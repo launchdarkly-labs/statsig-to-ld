@@ -16,25 +16,39 @@ go build -o statsig-metric-importer .
 
 The binary is `./statsig-metric-importer`. All commands below assume you are in the repository root.
 
-## API Key Handling
+## API Key Setup
 
-**CRITICAL: Never pass API keys as command-line flags.** Keys passed via `--statsig-key` or `--ld-key` are visible in shell history and process listings.
+The tool requires two API keys:
+- **Statsig Console API key** — starts with `console-`
+- **LaunchDarkly API access token** — starts with `api-`
 
-Instead, use one of these secure methods:
+### Before running the tool
 
-1. **Environment variables** (best for scripted/repeated use):
-```bash
-export STATSIG_CONSOLE_KEY=console-xxx
-export LD_API_KEY=api-xxx
-```
+Ask the user to provide their API keys using one of these methods (listed from most to least secure):
 
-2. **Interactive prompt** (most secure): Simply omit the key flags — the tool prompts with echo disabled. However, this requires an interactive terminal, so it will not work when you (an AI agent) are running the tool via a non-interactive shell. **Always use environment variables when running the CLI programmatically.**
+1. **Run the tool manually with interactive prompts** (most secure — keys never saved anywhere):
+   Tell the user to run the command themselves in their terminal. When no keys are provided via flags or env vars, the tool prompts with echo disabled. Keys never touch disk, shell history, or process listings. This method does not work when an AI agent runs the tool, since the agent's shell is non-interactive.
 
-Key formats:
-- Statsig Console API key starts with `console-`
-- LaunchDarkly API access token starts with `api-`
+2. **Set environment variables before starting the agent session** (recommended for agent use):
+   The user should run these exports in their terminal **before** launching the agent session, so the agent's subprocess inherits them:
+   ```bash
+   export STATSIG_CONSOLE_KEY=console-xxx
+   export LD_API_KEY=api-xxx
+   ```
+   Note: if the user exports these *after* the agent session has started, the agent's shell will not see them. The user would need to restart the agent session.
 
-**Before running any command that requires API keys, ask the user to set the environment variables.** Do not ask the user to provide keys in the chat — they should set them in their shell environment.
+3. **Pass keys as command-line flags** (least secure — visible in shell history and `ps` output):
+   ```bash
+   ./statsig-metric-importer convert --all --dry-run \
+     --statsig-key console-xxx --ld-key api-xxx --ld-project my-project
+   ```
+   This works in all contexts (interactive, agent, CI/CD) but the keys are exposed in shell history. Acceptable for short-lived staging tokens or CI/CD where keys are injected from a secrets manager.
+
+### When running commands as an agent
+
+If the user has set environment variables, omit key flags from all commands — the tool picks them up automatically. If the user asks you to pass keys directly, use `--statsig-key` and `--ld-key` flags.
+
+**Never ask the user to paste API keys into the chat.** Direct them to set env vars or pass flags instead.
 
 ## Core Workflows
 
