@@ -151,7 +151,7 @@ func TestConvert_EventUserWindow(t *testing.T) {
 // --- Incompatible types ---
 
 func TestConvert_IncompatibleTypes(t *testing.T) {
-	incompatible := []string{"ratio", "funnel", "composite", "composite_sum", "percentile"}
+	incompatible := []string{"ratio", "funnel", "composite", "composite_sum", "percentile", "user"}
 	for _, typ := range incompatible {
 		sg := baseMetric(typ)
 		_, err := Convert(sg, Options{})

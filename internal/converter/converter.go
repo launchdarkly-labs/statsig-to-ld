@@ -113,6 +113,14 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 			StatsigType: sg.Type,
 			Reason:      fmt.Sprintf("Statsig type %q is not supported as a metric type in LaunchDarkly (LD uses percentile as an analysisType, not a standalone type)", sg.Type),
 		}
+	case "user":
+		// Statsig "user" type covers auto-generated user-aggregation metrics
+		// (DAU, MAU, WAU, stickiness, retention rates). These are not single
+		// event-based metrics and have no direct LD equivalent.
+		return nil, &IncompatibleError{
+			StatsigType: sg.Type,
+			Reason:      fmt.Sprintf("Statsig type %q (auto-generated user aggregations like DAU/MAU/retention) has no direct LaunchDarkly equivalent — recreate manually as a Warehouse Native metric if needed", sg.Type),
+		}
 	default:
 		return nil, fmt.Errorf("unknown Statsig metric type %q — cannot determine LaunchDarkly equivalent", sg.Type)
 	}

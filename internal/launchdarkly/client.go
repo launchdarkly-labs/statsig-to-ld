@@ -8,10 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/httputil"
 )
+
+// unitNotFoundRe matches the LD API 400 message that indicates a randomization
+// unit on the metric does not exist as a context kind in the project, e.g.
+// `Randomization unit "stableid" not found in project settings [user]`.
+var unitNotFoundRe = regexp.MustCompile(`Randomization unit "([^"]+)" not found in project settings`)
 
 const defaultAPIBase = "https://app.launchdarkly.com"
 
@@ -92,6 +98,10 @@ func (c *Client) CreateMetric(ctx context.Context, metric MetricPost) (*MetricRe
 		if len(errMsg) > 300 {
 			errMsg = errMsg[:300] + "..."
 		}
+		hint := actionableHint(statusCode, errMsg)
+		if hint != "" {
+			return nil, fmt.Errorf("LD API returned HTTP %d: %s — %s", statusCode, errMsg, hint)
+		}
 		return nil, fmt.Errorf("LD API returned HTTP %d: %s", statusCode, errMsg)
 	}
 
@@ -101,4 +111,17 @@ func (c *Client) CreateMetric(ctx context.Context, metric MetricPost) (*MetricRe
 	}
 
 	return &ldResp, nil
+}
+
+// actionableHint returns a human-readable hint for known LD API error patterns
+// so users can resolve the issue without digging through the LD API docs.
+// Returns an empty string when no hint is available.
+func actionableHint(statusCode int, errMsg string) string {
+	if statusCode == 400 {
+		if m := unitNotFoundRe.FindStringSubmatch(errMsg); m != nil {
+			unit := m[1]
+			return fmt.Sprintf(`re-run with --unit-type-mapping mapping %q to an existing LD context kind (e.g. {%q: "user"}), or add %q as a context kind under Project Settings → Contexts`, unit, unit, unit)
+		}
+	}
+	return ""
 }
