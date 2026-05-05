@@ -257,6 +257,51 @@ func TestConvert_UnitTypeMapping(t *testing.T) {
 	}
 }
 
+func TestConvert_UnitTypeMapping_CaseInsensitive(t *testing.T) {
+	// Statsig returns "stableID" (camelCase). User wrote "stableid" (lowercase)
+	// in their mapping file. Lookup should succeed and the LD value casing
+	// should be preserved.
+	sg := baseMetric("event_count_custom")
+	sg.UnitTypes = []string{"stableID"}
+	opts := Options{
+		UnitTypeMapping: map[string]string{
+			"stableid": "anonymousUser",
+		},
+	}
+	result, err := Convert(sg, opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := result.LDMetric.RandomizationUnits; len(got) != 1 || got[0] != "anonymousUser" {
+		t.Errorf("RandomizationUnits = %v, want [anonymousUser]", got)
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "stableID") {
+			t.Errorf("should not warn about mapped unitType, got warning: %s", w)
+		}
+	}
+}
+
+func TestConvert_UnitTypeMapping_ExactMatchPriority(t *testing.T) {
+	// When both an exact and a case-folded match exist, exact wins. This
+	// lets users disambiguate intentionally if they need to.
+	sg := baseMetric("event_count_custom")
+	sg.UnitTypes = []string{"FOO"}
+	opts := Options{
+		UnitTypeMapping: map[string]string{
+			"FOO": "exact-match",
+			"foo": "lower-match",
+		},
+	}
+	result, err := Convert(sg, opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := result.LDMetric.RandomizationUnits; len(got) != 1 || got[0] != "exact-match" {
+		t.Errorf("RandomizationUnits = %v, want [exact-match]", got)
+	}
+}
+
 // --- Multi-event warning ---
 
 func TestConvert_MultipleMetricEvents(t *testing.T) {
