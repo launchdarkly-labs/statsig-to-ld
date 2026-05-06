@@ -117,11 +117,18 @@ func (c *Client) CreateMetric(ctx context.Context, metric MetricPost) (*MetricRe
 // so users can resolve the issue without digging through the LD API docs.
 // Returns an empty string when no hint is available.
 func actionableHint(statusCode int, errMsg string) string {
-	if statusCode == 400 {
+	switch statusCode {
+	case 400:
 		if m := unitNotFoundRe.FindStringSubmatch(errMsg); m != nil {
 			unit := m[1]
 			return fmt.Sprintf(`re-run with --unit-type-mapping <file> where <file> is a JSON file containing {%q: "user"}, or add %q as a context kind under Project Settings → Contexts`, unit, unit)
 		}
+	case 401:
+		return "verify your LD API access token is valid and not expired — check Account Settings → Authorization in the LaunchDarkly UI"
+	case 403:
+		return "your API access token does not have write permission for this project — ensure it has a Writer role or a custom role that includes metric creation"
+	case 404:
+		return "check that --ld-project matches an existing project key in your LaunchDarkly account"
 	}
 	return ""
 }
