@@ -113,6 +113,14 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 			StatsigType: sg.Type,
 			Reason:      fmt.Sprintf("Statsig type %q is not supported as a metric type in LaunchDarkly (LD uses percentile as an analysisType, not a standalone type)", sg.Type),
 		}
+	case "user":
+		// Statsig "user" type covers auto-generated user-aggregation metrics
+		// (DAU, MAU, WAU, stickiness, retention rates). These are not single
+		// event-based metrics and have no direct LD equivalent.
+		return nil, &IncompatibleError{
+			StatsigType: sg.Type,
+			Reason:      fmt.Sprintf("Statsig type %q (auto-generated user aggregations like DAU/MAU/retention) has no direct LaunchDarkly equivalent — recreate manually as a Warehouse Native metric if needed", sg.Type),
+		}
 	default:
 		return nil, fmt.Errorf("unknown Statsig metric type %q — cannot determine LaunchDarkly equivalent", sg.Type)
 	}
@@ -207,15 +215,22 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 
 	// ---------------------------------------------------------------
 	// Randomization units: Statsig "userID" → LD "user"
+	//
+	// Mapping lookup is case-insensitive on the key (Statsig side) so users
+	// don't have to know whether Statsig returns "stableID" or "stableid".
+	// Values are preserved as-is — LD context kinds are case-sensitive.
 	// ---------------------------------------------------------------
+	lowerMapping := lowerKeyMapping(opts.UnitTypeMapping)
 	var randUnits []string
 	for _, u := range sg.UnitTypes {
-		// Check explicit mapping first
-		if opts.UnitTypeMapping != nil {
-			if mapped, ok := opts.UnitTypeMapping[u]; ok {
-				randUnits = append(randUnits, mapped)
-				continue
-			}
+		// Exact match wins, then case-insensitive
+		if mapped, ok := opts.UnitTypeMapping[u]; ok {
+			randUnits = append(randUnits, mapped)
+			continue
+		}
+		if mapped, ok := lowerMapping[strings.ToLower(u)]; ok {
+			randUnits = append(randUnits, mapped)
+			continue
 		}
 		switch strings.ToLower(u) {
 		case "userid":
@@ -319,6 +334,21 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 
 	return result, nil
+}
+
+// lowerKeyMapping returns a copy of m with all keys lowercased, used for
+// case-insensitive lookup of unit-type mappings. If two keys collide on
+// lowercase, the last one wins — exact-case lookup at the call site is the
+// way to disambiguate intentionally.
+func lowerKeyMapping(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[strings.ToLower(k)] = v
+	}
+	return out
 }
 
 // resolveDataSource determines the LD data source key for a Statsig metric
