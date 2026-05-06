@@ -120,7 +120,7 @@ func actionableHint(statusCode int, errMsg string) string {
 	if statusCode == 400 {
 		if m := unitNotFoundRe.FindStringSubmatch(errMsg); m != nil {
 			unit := m[1]
-			return fmt.Sprintf(`re-run with --unit-type-mapping mapping %q to an existing LD context kind (e.g. {%q: "user"}), or add %q as a context kind under Project Settings → Contexts`, unit, unit, unit)
+			return fmt.Sprintf(`re-run with --unit-type-mapping <file> where <file> is a JSON file containing {%q: "user"}, or add %q as a context kind under Project Settings → Contexts`, unit, unit)
 		}
 	}
 	return ""

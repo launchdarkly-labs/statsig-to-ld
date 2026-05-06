@@ -17,6 +17,9 @@ func TestActionableHint_UnitNotFound(t *testing.T) {
 	if !strings.Contains(hint, "--unit-type-mapping") {
 		t.Errorf("hint should reference the --unit-type-mapping flag, got: %s", hint)
 	}
+	if !strings.Contains(hint, "JSON file") {
+		t.Errorf("hint should clarify that --unit-type-mapping takes a file path, not inline JSON, got: %s", hint)
+	}
 }
 
 func TestActionableHint_OtherErrors(t *testing.T) {
