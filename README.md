@@ -261,3 +261,12 @@ The tool supports incremental migration strategies:
 1. **By type**: Start with simple types first: `--include-types event_count_custom,sum`
 2. **By tag**: Migrate tagged subsets: `--include-tags p0,critical`
 3. **Re-run safely**: As LD adds support for new metric types (ratio, funnel), re-run `--all` — previously converted metrics are skipped, newly compatible metrics are created.
+
+## Releasing a New Version (Contributors)
+
+Releases are driven by Git tags. Pushing a `v*` tag triggers the CI workflow to cross-compile binaries for macOS, Linux, and Windows, then publish them to the [Releases page](https://github.com/launchdarkly-labs/statsig-metric-importer-cli/releases) automatically. Release notes are generated from commits since the previous tag.
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
