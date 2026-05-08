@@ -103,7 +103,7 @@ cat migration-report.json | jq '.metrics[] | select(.warnings | length > 0)'
 ./statsig-metric-importer convert --all --default-unit "$" --ld-project my-project
 ```
 
-Without `--default-unit`, numeric metrics get `unit: "TODO"` with a warning to update in the LD UI.
+Without `--default-unit`, numeric metrics get `unit: "units"` (a generic placeholder). Pass `--default-unit` to set a meaningful label like `$`, `ms`, or `count` at conversion time, or update the unit in the LD UI later.
 
 ### CSV output
 
@@ -246,7 +246,7 @@ Report written to migration-report.json
 
 ```csv
 statsig_name,statsig_type,statsig_id,status,ld_key,ld_project,warnings,reason
-purchase_revenue,sum,purchase_revenue::sum,converted,purchase-revenue-sum,my-project,"unit set to TODO",
+purchase_revenue,sum,purchase_revenue::sum,converted,purchase-revenue-sum,my-project,,
 conversion_rate,ratio,conversion_rate::ratio,skipped_incompatible,,,,Not yet supported
 ```
 

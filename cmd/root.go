@@ -121,7 +121,7 @@ func init() {
 
 	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Path for migration report output")
 	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
-	convertCmd.Flags().StringVar(&flagDefaultUnit, "default-unit", "", "Unit of measure for numeric metrics (e.g. \"$\", \"ms\", \"count\")")
+	convertCmd.Flags().StringVar(&flagDefaultUnit, "default-unit", "", "Unit of measure for numeric metrics (e.g. \"$\", \"ms\", \"count\"). Defaults to \"units\" if unset.")
 
 	convertCmd.Flags().StringVar(&flagIncludeTags, "include-tags", "", "Only convert metrics with these Statsig tags (comma-separated)")
 	convertCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert metrics of these Statsig types (comma-separated)")

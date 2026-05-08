@@ -26,7 +26,7 @@ type Options struct {
 	SourceMapping map[string]string
 
 	// DefaultUnit is the unit of measure for numeric metrics. If empty,
-	// defaults to "TODO" with a warning.
+	// defaults to "units" (a generic placeholder).
 	DefaultUnit string
 
 	// UnitTypeMapping maps Statsig unit types to LD context kinds.
@@ -273,9 +273,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		if opts.DefaultUnit != "" {
 			unit = opts.DefaultUnit
 		} else {
-			unit = "TODO"
-			result.Warnings = append(result.Warnings,
-				"unit of measure set to placeholder \"TODO\" — update in the LD UI or re-run with --default-unit")
+			unit = "units"
 		}
 	}
 

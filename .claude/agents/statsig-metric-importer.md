@@ -127,7 +127,7 @@ Re-running is safe — already-created metrics are detected (HTTP 409) and skipp
 | `--ld-data-source KEY` | LD data source key for Warehouse Native metrics |
 | `--source-mapping FILE` | JSON file: Statsig source names → LD data source keys |
 | `--unit-type-mapping FILE` | JSON file: Statsig unit types → LD context kinds |
-| `--default-unit UNIT` | Unit for numeric metrics (e.g. `$`, `ms`) — avoids `TODO` placeholders |
+| `--default-unit UNIT` | Unit for numeric metrics (e.g. `$`, `ms`) — defaults to `units` if unset |
 | `--include-types TYPES` | Comma-separated Statsig types to include |
 | `--include-tags TAGS` | Comma-separated Statsig tags to include |
 | `--format FORMAT` | `json` (default) or `csv` |
@@ -157,7 +157,6 @@ Re-running is safe — already-created metrics are detected (HTTP 409) and skipp
 | `winsorization ... not yet supported` | Low | Outlier clipping not applied. Monitor experiment results for outlier sensitivity. |
 | `per-unit capping` | Low | Daily cap not applied. |
 | `custom rollup window` | Low | LD uses full experiment duration instead of windowed measurement. |
-| `unit of measure set to placeholder "TODO"` | Low | Re-run with `--default-unit` or update in LD UI. |
 | `unitType ... may not match an LD context kind` | Medium | Ensure the LD project has a matching context kind. Use `--unit-type-mapping` to map explicitly. |
 | `no LD data source specified` | Medium | WH Native metric created without data source binding. Use `--ld-data-source` or `--source-mapping`. |
 
@@ -221,7 +220,7 @@ Before running the tool, confirm:
 2. **LD project key?** The `--ld-project` value.
 3. **Warehouse Native?** If yes, need `--ld-data-source` or `--source-mapping`.
 4. **Custom unit types?** If yes, need `--unit-type-mapping`.
-5. **Numeric metric units?** If known, use `--default-unit` to avoid TODO placeholders.
+5. **Numeric metric units?** If known, use `--default-unit` to set a meaningful label (otherwise unit defaults to `"units"`).
 6. **EU/FedRAMP?** If yes, need `--ld-url https://app.eu.launchdarkly.com`.
 
 ## Output
@@ -230,4 +229,4 @@ After every run, report to the user:
 1. The summary counts (converted, skipped, failed)
 2. Any `DATA LOSS` warnings and what they mean
 3. Any metrics that failed and why
-4. Next steps (e.g., "23 numeric metrics have unit set to TODO — update in the LD UI or re-run with --default-unit")
+4. Next steps (e.g., "23 numeric metrics use the default unit `\"units\"` — set a meaningful unit in the LD UI or re-run with --default-unit")

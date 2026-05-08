@@ -95,8 +95,8 @@ func TestConvert_Sum(t *testing.T) {
 	if ld.UnitAggregationType != "sum" {
 		t.Errorf("UnitAggregationType = %q, want \"sum\"", ld.UnitAggregationType)
 	}
-	if ld.Unit != "TODO" {
-		t.Errorf("Unit = %q, want \"TODO\"", ld.Unit)
+	if ld.Unit != "units" {
+		t.Errorf("Unit = %q, want \"units\"", ld.Unit)
 	}
 	if ld.EventDefault == nil || ld.EventDefault.Value != 0 {
 		t.Errorf("EventDefault should be {Disabled:false, Value:0}, got %+v", ld.EventDefault)
@@ -386,17 +386,21 @@ func TestConvert_DefaultUnit(t *testing.T) {
 	}
 }
 
-func TestConvert_DefaultUnitTODO(t *testing.T) {
+func TestConvert_DefaultUnitFallback(t *testing.T) {
 	sg := baseMetric("sum")
 	sg.MetricEvents[0] = statsig.MetricEvent{Name: "purchase", Type: "value"}
 	result, err := Convert(sg, Options{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.LDMetric.Unit != "TODO" {
-		t.Errorf("Unit = %q, want \"TODO\"", result.LDMetric.Unit)
+	if result.LDMetric.Unit != "units" {
+		t.Errorf("Unit = %q, want \"units\"", result.LDMetric.Unit)
 	}
-	assertHasWarning(t, result.Warnings, "TODO")
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "unit") || strings.Contains(w, "TODO") {
+			t.Errorf("should not warn about default unit fallback, got: %q", w)
+		}
+	}
 }
 
 // --- Feature warnings ---
