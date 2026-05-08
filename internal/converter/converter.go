@@ -75,7 +75,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	var analysisType string
 
 	switch sg.Type {
-	case "event_count_custom":
+	case "event_count_custom", "event_count":
 		isNumeric = false
 		unitAgg = "sum"
 		analysisType = "mean"
@@ -120,6 +120,13 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		return nil, &IncompatibleError{
 			StatsigType: sg.Type,
 			Reason:      fmt.Sprintf("Statsig type %q (auto-generated user aggregations like DAU/MAU/retention) has no direct LaunchDarkly equivalent — recreate manually as a Warehouse Native metric if needed", sg.Type),
+		}
+	case "undefined":
+		// Statsig returns "undefined" for metrics that have not been fully configured
+		// (setup_incomplete). These cannot be converted.
+		return nil, &IncompatibleError{
+			StatsigType: sg.Type,
+			Reason:      "Statsig metric is not fully configured (setup_incomplete) — finish setting it up in the Statsig console before migrating",
 		}
 	default:
 		return nil, fmt.Errorf("unknown Statsig metric type %q — cannot determine LaunchDarkly equivalent", sg.Type)
