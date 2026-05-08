@@ -6,7 +6,7 @@ Converts Statsig metric definitions into LaunchDarkly metrics. Supports both Sta
 
 - Go 1.24+ (to build from source)
 - A Statsig **Console API Key** (`console-xxx`) — create at Statsig Console > Project Settings > Keys & Environments
-- A LaunchDarkly **API Access Token** (`api-xxx`) — create at Account Settings > Authorization
+- A LaunchDarkly **API access token** (`api-xxx`) — create at **Account settings → Authorization → Access tokens** with a role that can write metrics (Writer is enough). Not an SDK key or client-side ID. Use a service token for shared automation.
 
 ## Installation
 
