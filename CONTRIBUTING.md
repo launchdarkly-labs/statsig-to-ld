@@ -11,6 +11,9 @@ Please use [GitHub Issues](https://github.com/launchdarkly-labs/statsig-metric-i
 to report bugs and request features. Before opening a new issue, please search
 existing issues to avoid duplicates.
 
+**Security issues should not be filed as GitHub issues.** See
+[`SECURITY.md`](./SECURITY.md) for the disclosure process.
+
 When filing a bug, include:
 
 - What you ran (command, flags, version of the CLI).
