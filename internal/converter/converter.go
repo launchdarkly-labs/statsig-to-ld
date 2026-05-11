@@ -93,33 +93,10 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		analysisType = "mean"
 
 	// Incompatible types
-	case "ratio":
+	case "ratio", "funnel", "composite", "composite_sum", "percentile", "user":
 		return nil, &IncompatibleError{
 			StatsigType: sg.Type,
-			Reason:      fmt.Sprintf("Statsig type %q is not yet supported in LaunchDarkly (no ratio metric type)", sg.Type),
-		}
-	case "funnel":
-		return nil, &IncompatibleError{
-			StatsigType: sg.Type,
-			Reason:      fmt.Sprintf("Statsig type %q requires a LaunchDarkly metric group, not a single metric", sg.Type),
-		}
-	case "composite", "composite_sum":
-		return nil, &IncompatibleError{
-			StatsigType: sg.Type,
-			Reason:      fmt.Sprintf("Statsig type %q is not supported in LaunchDarkly (no composite metric type)", sg.Type),
-		}
-	case "percentile":
-		return nil, &IncompatibleError{
-			StatsigType: sg.Type,
-			Reason:      fmt.Sprintf("Statsig type %q is not supported as a metric type in LaunchDarkly (LD uses percentile as an analysisType, not a standalone type)", sg.Type),
-		}
-	case "user":
-		// Statsig "user" type covers auto-generated user-aggregation metrics
-		// (DAU, MAU, WAU, stickiness, retention rates). These are not single
-		// event-based metrics and have no direct LD equivalent.
-		return nil, &IncompatibleError{
-			StatsigType: sg.Type,
-			Reason:      fmt.Sprintf("Statsig type %q (auto-generated user aggregations like DAU/MAU/retention) has no direct LaunchDarkly equivalent — recreate manually as a Warehouse Native metric if needed", sg.Type),
+			Reason:      fmt.Sprintf("Statsig type %q is not currently supported", sg.Type),
 		}
 	case "undefined":
 		// Statsig returns "undefined" for metrics that have not been fully configured
