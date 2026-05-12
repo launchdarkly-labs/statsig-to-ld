@@ -278,15 +278,9 @@ func TestRealResponse_GateWithTargeting(t *testing.T) {
 
 func TestRealResponse_PatchBodySerializesWithoutNulls(t *testing.T) {
 	r := newFakeReconciler(map[string]string{"production": "production"})
-	pp100 := 100.0
 	gate := statsig.Gate{
 		ID:   "g",
 		Name: "G",
-		Rules: []statsig.GateRule{{
-			Name:           "us-only",
-			PassPercentage: &pp100,
-			Conditions:     []statsig.Condition{{Type: "country", Operator: "any", TargetValue: []any{"US"}}},
-		}},
 	}
 	settings, _ := BuildGateEnvSettings(gate, nil, r)
 	ops := BuildEnvPatchOps("production", settings["production"])
@@ -295,11 +289,30 @@ func TestRealResponse_PatchBodySerializesWithoutNulls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, badPattern := range []string{`"targets":null`, `"contextTargets":null`, `"rules":null`} {
-		if strings.Contains(string(body), badPattern) {
-			t.Errorf("patch body has %q (LD rejects null arrays): %s", badPattern, body)
-		}
+	assertPatchValueJSON(t, ops, "/targets", "[]")
+	assertPatchValueJSON(t, ops, "/contextTargets", "[]")
+	assertPatchValueJSON(t, ops, "/rules", "[]")
+	if strings.Contains(string(body), `"value":null`) {
+		t.Errorf("patch body contains a null value (LD rejects null arrays): %s", body)
 	}
+}
+
+func assertPatchValueJSON(t *testing.T, ops []launchdarkly.JSONPatchOp, pathSuffix, want string) {
+	t.Helper()
+	for _, op := range ops {
+		if !strings.HasSuffix(op.Path, pathSuffix) {
+			continue
+		}
+		got, err := json.Marshal(op.Value)
+		if err != nil {
+			t.Fatalf("marshal value for %s: %v", op.Path, err)
+		}
+		if string(got) != want {
+			t.Errorf("patch value for %s = %s, want %s", op.Path, got, want)
+		}
+		return
+	}
+	t.Fatalf("missing patch op ending in %q: %+v", pathSuffix, ops)
 }
 
 // ----------------------------------------------------------------------------
