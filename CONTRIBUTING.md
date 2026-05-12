@@ -1,4 +1,4 @@
-# Contributing to statsig-metric-importer-cli
+# Contributing to statsig-to-ld
 
 Thanks for your interest in contributing! This project lives in the
 [LaunchDarkly Labs](https://github.com/launchdarkly-labs) organization, which
@@ -7,7 +7,7 @@ best-effort basis by the project maintainers and the community of users.
 
 ## Reporting bugs and requesting features
 
-Please use [GitHub Issues](https://github.com/launchdarkly-labs/statsig-metric-importer-cli/issues)
+Please use [GitHub Issues](https://github.com/launchdarkly-labs/statsig-to-ld/issues)
 to report bugs and request features. Before opening a new issue, please search
 existing issues to avoid duplicates.
 
@@ -27,9 +27,9 @@ When filing a bug, include:
 You need [Go 1.24+](https://go.dev/dl/) to build from source.
 
 ```bash
-git clone https://github.com/launchdarkly-labs/statsig-metric-importer-cli.git
-cd statsig-metric-importer-cli
-go build -o statsig-metric-importer .
+git clone https://github.com/launchdarkly-labs/statsig-to-ld.git
+cd statsig-to-ld
+go build -o statsig-to-ld .
 ```
 
 Run the test suite with:

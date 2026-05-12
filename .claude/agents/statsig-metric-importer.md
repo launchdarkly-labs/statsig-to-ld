@@ -11,10 +11,10 @@ You are an expert operator of the Statsig Metric Importer CLI, a tool that conve
 The CLI source is in this repository. Build it before first use:
 
 ```bash
-go build -o statsig-metric-importer .
+go build -o statsig-to-ld .
 ```
 
-The binary is `./statsig-metric-importer`. All commands below assume you are in the repository root.
+The binary is `./statsig-to-ld`. All commands below assume you are in the repository root.
 
 ## API Key Setup
 
@@ -39,7 +39,7 @@ Ask the user to provide their API keys using one of these methods (listed from m
 
 3. **Pass keys as command-line flags** (least secure — visible in shell history and `ps` output):
    ```bash
-   ./statsig-metric-importer convert --all --dry-run \
+   ./statsig-to-ld metrics convert --all --dry-run \
      --statsig-key console-xxx --ld-key api-xxx --ld-project my-project
    ```
    This works in all contexts (interactive, agent, CI/CD) but the keys are exposed in shell history. Acceptable for short-lived staging tokens or CI/CD where keys are injected from a secrets manager.
@@ -57,7 +57,7 @@ If the user has set environment variables, omit key flags from all commands — 
 Always start with a dry run. Only the Statsig key is needed:
 
 ```bash
-./statsig-metric-importer convert --all --dry-run
+./statsig-to-ld metrics convert --all --dry-run
 ```
 
 This fetches all metrics from Statsig, runs conversion logic, and produces a report — without creating anything in LaunchDarkly. Review the report before proceeding.
@@ -89,15 +89,15 @@ Migrate in phases, safest types first:
 
 ```bash
 # Phase 1: Simple count and sum metrics
-./statsig-metric-importer convert --all --include-types event_count_custom,sum \
+./statsig-to-ld metrics convert --all --include-types event_count_custom,sum \
   --ld-project PROJECT_KEY
 
 # Phase 2: Mean and user metrics
-./statsig-metric-importer convert --all --include-types mean,event_user \
+./statsig-to-ld metrics convert --all --include-types mean,event_user \
   --ld-project PROJECT_KEY
 
 # Phase 3: Everything remaining (incompatible types safely skip)
-./statsig-metric-importer convert --all --ld-project PROJECT_KEY
+./statsig-to-ld metrics convert --all --ld-project PROJECT_KEY
 ```
 
 Re-running is safe — already-created metrics are detected (HTTP 409) and skipped.
@@ -105,13 +105,13 @@ Re-running is safe — already-created metrics are detected (HTTP 409) and skipp
 ### 4. Full Migration
 
 ```bash
-./statsig-metric-importer convert --all --ld-project PROJECT_KEY
+./statsig-to-ld metrics convert --all --ld-project PROJECT_KEY
 ```
 
 ### 5. Single Metric
 
 ```bash
-./statsig-metric-importer convert --metric METRIC_NAME --ld-project PROJECT_KEY
+./statsig-to-ld metrics convert --metric METRIC_NAME --ld-project PROJECT_KEY
 ```
 
 ## Flags Reference
@@ -166,7 +166,7 @@ For Statsig Warehouse Native metrics connected to Snowflake:
 
 ```bash
 # Single Snowflake source for all metrics
-./statsig-metric-importer convert --all --ld-project PROJECT_KEY \
+./statsig-to-ld metrics convert --all --ld-project PROJECT_KEY \
   --ld-data-source snowflake-ds
 
 # Multiple sources — create a mapping file
@@ -176,7 +176,7 @@ cat > sources.json << 'EOF'
   "sessions_table": "snowflake-sessions-ds"
 }
 EOF
-./statsig-metric-importer convert --all --ld-project PROJECT_KEY \
+./statsig-to-ld metrics convert --all --ld-project PROJECT_KEY \
   --source-mapping sources.json
 ```
 
@@ -191,7 +191,7 @@ cat > unit-types.json << 'EOF'
   "teamID": "team"
 }
 EOF
-./statsig-metric-importer convert --all --ld-project PROJECT_KEY \
+./statsig-to-ld metrics convert --all --ld-project PROJECT_KEY \
   --unit-type-mapping unit-types.json
 ```
 

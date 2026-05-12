@@ -48,15 +48,15 @@ jobs:
       - name: Cross-compile binaries
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
-          LDFLAGS: -X github.com/launchdarkly-labs/statsig-metric-importer-cli/cmd.version=${{ steps.version.outputs.VERSION }}
+          LDFLAGS: -X github.com/launchdarkly-labs/statsig-to-ld/cmd.version=${{ steps.version.outputs.VERSION }}
         run: |
           mkdir -p dist
 
-          GOOS=darwin  GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/statsig-metric-importer-darwin-amd64 .
-          GOOS=darwin  GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/statsig-metric-importer-darwin-arm64 .
-          GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/statsig-metric-importer-linux-amd64 .
-          GOOS=linux   GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/statsig-metric-importer-linux-arm64 .
-          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/statsig-metric-importer-windows-amd64.exe .
+          GOOS=darwin  GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/statsig-to-ld-darwin-amd64 .
+          GOOS=darwin  GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/statsig-to-ld-darwin-arm64 .
+          GOOS=linux   GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/statsig-to-ld-linux-amd64 .
+          GOOS=linux   GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/statsig-to-ld-linux-arm64 .
+          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/statsig-to-ld-windows-amd64.exe .
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

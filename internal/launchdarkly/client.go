@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/httputil"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
 )
 
 // unitNotFoundRe matches the LD API 400 message that indicates a randomization

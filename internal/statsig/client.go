@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/httputil"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
 )
 
 const defaultAPIBase = "https://statsigapi.net/console/v1"
