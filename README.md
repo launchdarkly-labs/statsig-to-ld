@@ -1,14 +1,20 @@
 # statsig-to-ld
 
-Converts Statsig metric definitions into LaunchDarkly metrics. Supports both Statsig Cloud and Warehouse Native metrics, with idempotent re-runs, parallel processing, and structured migration reports.
+Migrate from Statsig to LaunchDarkly. Single CLI covering two paths:
 
-Multi-subcommand CLI; currently the only subcommand is `metric-import`.
+- **`metric-import`** — Statsig metric definitions → LaunchDarkly metrics (Statsig Cloud + Warehouse Native)
+- **`flag-import`** — Statsig feature gates / dynamic configs → LaunchDarkly flags, with per-environment targeting rules, percentage rollouts, and user overrides
+
+Both subcommands share the same credentials, the same idempotent re-run contract, and the same migration report format.
 
 ## Prerequisites
 
 - Go 1.24+ (to build from source)
 - A Statsig **Console API Key** (`console-xxx`) — create at Statsig Console > Project Settings > Keys & Environments
-- A LaunchDarkly **API access token** (`api-xxx`) — create at **Account settings → Authorization → Access tokens** with a role that can write metrics (Writer is enough). Not an SDK key or client-side ID. Use a service token for shared automation.
+- A LaunchDarkly **API access token** (`api-xxx`) — create at **Account settings → Authorization → Access tokens**. Required permissions:
+  - For `metric-import`: Writer (or any role with `metric:create`)
+  - For `flag-import`: Writer (or any role with `flag:create` + `flag:update` + `environment:create`). `environment:create` is only needed if Statsig has environments that don't yet exist in LD.
+  - Not an SDK key or client-side ID. Use a service token for shared automation.
 
 ## Installation
 
@@ -55,41 +61,46 @@ read -rs LD_API_KEY && export LD_API_KEY
 
 ```bash
 # 1. Set API keys (recommended — avoids shell history exposure)
-export STATSIG_CONSOLE_KEY=console-YOUR_KEY
-export LD_API_KEY=api-YOUR_KEY
+read -rs STATSIG_CONSOLE_KEY && export STATSIG_CONSOLE_KEY
+read -rs LD_API_KEY && export LD_API_KEY
 
-# 2. Preview what will happen (no metrics created)
-./statsig-to-ld metric-import --all --dry-run
+# 2. Migrate metrics
+./statsig-to-ld metric-import --all --dry-run                          # preview
+./statsig-to-ld metric-import --all --ld-project my-project            # run
 
-# 3. Review the migration report
-cat migration-report.json | jq '.metrics[] | select(.warnings | length > 0)'
-
-# 4. Run the actual migration
-./statsig-to-ld metric-import --all --ld-project my-project
+# 3. Migrate feature gates (one direction; --kind=dynamic-configs for DCs)
+./statsig-to-ld flag-import --kind feature-gates --dry-run             # preview
+./statsig-to-ld flag-import --kind feature-gates --ld-project my-project # run
 ```
+
+The keys (`STATSIG_CONSOLE_KEY`, `LD_API_KEY`) are shared across both subcommands — export once, use for both.
 
 ## Usage
 
-### Preview all metrics (dry run)
+> Two subcommands: **`metric-import`** handles Statsig metrics; **`flag-import`** handles Statsig feature gates and dynamic configs. The sections below cover each in turn.
+
+### metric-import
+
+#### Preview all metrics (dry run)
 
 ```bash
 ./statsig-to-ld metric-import --all --dry-run
 ```
 
-### Convert a single metric
+#### Convert a single metric
 
 ```bash
 ./statsig-to-ld metric-import --metric purchase_revenue \
   --ld-project my-project
 ```
 
-### Bulk convert all metrics
+#### Bulk convert all metrics
 
 ```bash
 ./statsig-to-ld metric-import --all --ld-project my-project
 ```
 
-### Filter by type or tag
+#### Filter by type or tag
 
 ```bash
 # Only convert sum and mean metrics
@@ -99,7 +110,7 @@ cat migration-report.json | jq '.metrics[] | select(.warnings | length > 0)'
 ./statsig-to-ld metric-import --all --include-tags p0 --ld-project my-project
 ```
 
-### Set a default unit for numeric metrics
+#### Set a default unit for numeric metrics
 
 ```bash
 ./statsig-to-ld metric-import --all --default-unit "$" --ld-project my-project
@@ -107,13 +118,13 @@ cat migration-report.json | jq '.metrics[] | select(.warnings | length > 0)'
 
 Without `--default-unit`, numeric metrics get `unit: "units"` (a generic placeholder). Pass `--default-unit` to set a meaningful label like `$`, `ms`, or `count` at conversion time, or update the unit in the LD UI later.
 
-### CSV output
+#### CSV output
 
 ```bash
 ./statsig-to-ld metric-import --all --format csv --ld-project my-project
 ```
 
-### With Warehouse Native data source
+#### With Warehouse Native data source
 
 ```bash
 # Single data source for all WH Native metrics
@@ -134,7 +145,7 @@ Where `sources.json` maps Statsig source names to LD data source keys:
 }
 ```
 
-### Custom unit types (company-level experiments)
+#### Custom unit types (company-level experiments)
 
 If your Statsig project uses unit types beyond `userID` (e.g. `companyID`, `teamID`), map them to your LD context kinds:
 
@@ -154,14 +165,49 @@ Where `unit-types.json` maps Statsig unit types to LD context kind names:
 
 Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` → `companyid`) and a warning is emitted. Ensure matching context kinds exist in your LD project before running experiments with the migrated metrics.
 
-### EU / FedRAMP instances
+#### EU / FedRAMP instances
 
 ```bash
 ./statsig-to-ld metric-import --all --ld-project my-project \
   --ld-url https://app.eu.launchdarkly.com
 ```
 
-## Flags
+### flag-import
+
+Imports Statsig **feature gates** as LD boolean flags, or **dynamic configs** as LD JSON multi-variate flags. Per-environment targeting rules + percentage rollouts + user overrides are translated and applied via JSON Patch after flag creation.
+
+Pick one entity type per run via `--kind`:
+
+```bash
+# Preview gate import (no LD writes)
+./statsig-to-ld flag-import --kind feature-gates --dry-run
+
+# Import all feature gates with targeting
+./statsig-to-ld flag-import --kind feature-gates --ld-project my-project
+
+# Import dynamic configs as JSON multi-variate flags
+./statsig-to-ld flag-import --kind dynamic-configs --ld-project my-project
+
+# Apply a tag to all imported flags (and to auto-created LD environments)
+./statsig-to-ld flag-import --kind feature-gates --ld-project my-project \
+  --tag imported-from-statsig
+
+# Filter by a Statsig tag — only import gates tagged "team-payments"
+./statsig-to-ld flag-import --kind feature-gates --ld-project my-project \
+  --include-tag team-payments
+
+# Create flag shells only, skip per-environment targeting
+./statsig-to-ld flag-import --kind feature-gates --ld-project my-project \
+  --no-targeting
+```
+
+**Targeting translation:** Statsig rule conditions are mapped to LD clauses through a fixed operator + condition table. Approximations (e.g. `version_gte` → `semVerGreaterThan` because LD has no `OrEqual` variant) are noted in the report. Unmappable conditions (`passes_segment`, `fails_gate`, etc.) cause the entire rule to be dropped with a warning — half-translated rules would silently evaluate wrong.
+
+**Environment reconciliation:** Statsig env names are mapped to LD env keys case-insensitively. Missing LD envs are auto-created with the optional `--tag` applied. 403 (no `environment:create` permission) marks the env unreachable but doesn't abort — rules scoped to that env are skipped with a note.
+
+**Idempotency:** Existing LD flags (matched by key) are detected via a pre-flight list and skipped. Re-running after a partial failure resumes from where it left off.
+
+## metric-import flags
 
 | Flag | Default | Description |
 |---|---|---|
@@ -182,6 +228,23 @@ Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` �
 | `--include-tags` | — | Only convert metrics with these Statsig tags (comma-separated) |
 | `--include-types` | — | Only convert metrics of these Statsig types (comma-separated) |
 | `--concurrency` | `10` | Max concurrent LD API requests for bulk conversion |
+
+## flag-import flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--kind` | — | `feature-gates` or `dynamic-configs` (required) |
+| `--statsig-key` | — | Statsig Console API key (or `STATSIG_CONSOLE_KEY` env) |
+| `--ld-key` | — | LaunchDarkly API access token (or `LD_API_KEY` env) |
+| `--ld-project` | — | LaunchDarkly project key (required for non-dry-run) |
+| `--include-tag` | — | Only import Statsig gates/configs with this tag |
+| `--tag` | — | Tag to apply to all imported LD flags + auto-created environments |
+| `--maintainer-id` | — | LD member ID to set as the flag maintainer |
+| `--no-targeting` | `false` | Skip per-env targeting (create flag shells only) |
+| `--dry-run` | `false` | Preview the import without writing to LaunchDarkly |
+| `--override-workers` | `10` | Concurrent workers fetching Statsig overrides |
+| `--output` | `flag-import-report.json` | Path for migration report output |
+| `--format` | `json` | Report format: `json` or `csv` |
 
 ## Type Conversion Mapping
 

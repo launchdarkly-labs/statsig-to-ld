@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- New `flag-import` subcommand: imports Statsig feature gates as LD boolean flags, or dynamic configs as LD JSON multi-variate flags. Translates per-environment targeting rules + percentage rollouts + user overrides via JSON Patch. Idempotent re-runs via list-and-dedup against existing LD flags. Conversion logic ported from `launchdarkly/goaltender/lambda_handlers/flag_import_worker` (PRs #825, #828, #829).
+
 ### Changed
 - **Breaking:** Binary renamed from `statsig-metric-importer` to `statsig-to-ld` to reflect the multi-subcommand direction.
 - **Breaking:** Metric subcommand renamed from `convert` to `metric-import` so additional subcommands can sit alongside without ambiguity. Old invocation now errors with `unknown command "convert" for "statsig-to-ld"` to surface the change on first run.
