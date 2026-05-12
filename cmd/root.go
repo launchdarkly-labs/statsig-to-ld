@@ -17,6 +17,7 @@ var rootCmd = &cobra.Command{
 	Long: `A CLI tool for migrating from Statsig to LaunchDarkly.
 
 Subcommands:
+  analyze            Read-only sizing report for a Statsig project before importing
   metrics convert    Convert Statsig metric definitions to LaunchDarkly metrics
 
 Re-running any subcommand is safe — existing LD resources are detected and skipped.`,
