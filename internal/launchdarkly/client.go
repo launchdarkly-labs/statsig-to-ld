@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
@@ -35,6 +37,24 @@ func IsConflict(err error) bool {
 	var target *ConflictError
 	return errors.As(err, &target)
 }
+
+// Sentinel errors returned by CreateEnvironment so callers can branch on the
+// 409 (someone else created it; refetch + reuse) and 403/401 (token lacks env
+// write permission; degrade rule import for that env) cases.
+var (
+	ErrEnvironmentExists    = errors.New("LD environment already exists")
+	ErrEnvironmentForbidden = errors.New("LD environment create forbidden")
+)
+
+// flagListPageSize is the per-page size used when listing flags. The LD API
+// caps this at 50.
+const flagListPageSize = 50
+
+// envCreateRetries bounds how many times we follow a 429 backoff when creating
+// or patching environment-scoped resources. httputil.DoWithRetry already
+// retries internally — these loops only add another layer for cases where we
+// want explicit logging or special-case error mapping per attempt.
+const envCreateRetries = 5
 
 // Client is a LaunchDarkly REST API client.
 type Client struct {
@@ -111,6 +131,244 @@ func (c *Client) CreateMetric(ctx context.Context, metric MetricPost) (*MetricRe
 	}
 
 	return &ldResp, nil
+}
+
+// ============================================================================
+// Flag endpoints (offset/limit pagination)
+// ============================================================================
+
+// ListAllFlags fetches every flag in the project, paginating internally via
+// offset/limit. When tagFilter is non-empty, the LD API filter is applied
+// server-side as `tags:<tag>`.
+func (c *Client) ListAllFlags(ctx context.Context, tagFilter string) ([]Flag, error) {
+	all := make([]Flag, 0)
+	offset := 0
+	for {
+		q := url.Values{}
+		q.Set("limit", strconv.Itoa(flagListPageSize))
+		q.Set("offset", strconv.Itoa(offset))
+		if tagFilter != "" {
+			q.Set("filter", "tags:"+tagFilter)
+		}
+
+		reqURL := fmt.Sprintf("%s/api/v2/flags/%s?%s", c.apiBase, c.projectKey, q.Encode())
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating list-flags request: %w", err)
+		}
+		c.setAuthHeaders(req)
+
+		respBody, statusCode, err := httputil.DoWithRetry(ctx, c.httpClient, req, nil)
+		if err != nil {
+			return nil, err
+		}
+		if statusCode != http.StatusOK {
+			return nil, c.apiError("listing LD flags", statusCode, respBody)
+		}
+
+		var r listFlagsResponse
+		if err := json.Unmarshal(respBody, &r); err != nil {
+			return nil, fmt.Errorf("parsing list-flags response: %w (body: %s)", err, httputil.Truncate(string(respBody), 200))
+		}
+
+		all = append(all, r.Items...)
+		// A short page means we hit the end. LD returns exactly `limit` items
+		// until the final page, which is < limit (often 0). Terminate on
+		// either case in one check.
+		if len(r.Items) < flagListPageSize {
+			return all, nil
+		}
+		offset += flagListPageSize
+	}
+}
+
+// CreateFlag creates a single flag shell. Returns a ConflictError on 409 so
+// callers can dedupe idempotently — matching CreateMetric semantics.
+func (c *Client) CreateFlag(ctx context.Context, flag Flag) (*Flag, error) {
+	body, err := json.Marshal(flag)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling flag: %w", err)
+	}
+
+	reqURL := fmt.Sprintf("%s/api/v2/flags/%s", c.apiBase, c.projectKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating create-flag request: %w", err)
+	}
+	c.setAuthHeaders(req)
+
+	respBody, statusCode, err := httputil.DoWithRetry(ctx, c.httpClient, req, body)
+	if err != nil {
+		return nil, err
+	}
+	if statusCode == http.StatusConflict {
+		return nil, &ConflictError{Key: flag.Key}
+	}
+	if statusCode != http.StatusCreated && statusCode != http.StatusOK {
+		return nil, c.apiError(fmt.Sprintf("creating LD flag %s", flag.Key), statusCode, respBody)
+	}
+
+	var created Flag
+	if err := json.Unmarshal(respBody, &created); err != nil {
+		return nil, fmt.Errorf("parsing create-flag response: %w (body: %s)", err, httputil.Truncate(string(respBody), 200))
+	}
+	return &created, nil
+}
+
+// PatchFlag applies a JSON Patch (RFC 6902) operation list to a flag's
+// configuration. Used to set per-environment rules, targets, fallthrough, etc.
+// after a flag has been created (CreateFlag creates flag shells without env
+// config). A nil/empty ops list is a no-op (returns nil without an HTTP call).
+func (c *Client) PatchFlag(ctx context.Context, flagKey string, ops []JSONPatchOp) error {
+	if len(ops) == 0 {
+		return nil
+	}
+
+	body, err := json.Marshal(ops)
+	if err != nil {
+		return fmt.Errorf("marshaling JSON patch: %w", err)
+	}
+
+	reqURL := fmt.Sprintf("%s/api/v2/flags/%s/%s", c.apiBase, c.projectKey, flagKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating patch-flag request: %w", err)
+	}
+	c.setAuthHeaders(req)
+
+	respBody, statusCode, err := httputil.DoWithRetry(ctx, c.httpClient, req, body)
+	if err != nil {
+		return err
+	}
+	if statusCode != http.StatusOK {
+		return c.apiError(fmt.Sprintf("patching LD flag %s", flagKey), statusCode, respBody)
+	}
+	return nil
+}
+
+// ============================================================================
+// Environment endpoints (_links.next cursor pagination)
+// ============================================================================
+
+// ListEnvironments fetches all environments in the LD project, following the
+// _links.next cursor.
+func (c *Client) ListEnvironments(ctx context.Context) ([]Environment, error) {
+	base, err := url.Parse(c.apiBase)
+	if err != nil {
+		return nil, fmt.Errorf("parsing apiBase: %w", err)
+	}
+
+	reqURL, err := url.JoinPath(c.apiBase, "api/v2/projects", c.projectKey, "environments")
+	if err != nil {
+		return nil, fmt.Errorf("building environments URL: %w", err)
+	}
+
+	envs := make([]Environment, 0)
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating list-environments request: %w", err)
+		}
+		c.setAuthHeaders(req)
+
+		respBody, statusCode, err := httputil.DoWithRetry(ctx, c.httpClient, req, nil)
+		if err != nil {
+			return nil, err
+		}
+		if statusCode != http.StatusOK {
+			return nil, c.apiError("listing LD environments", statusCode, respBody)
+		}
+
+		var r listEnvironmentsResponse
+		if err := json.Unmarshal(respBody, &r); err != nil {
+			return nil, fmt.Errorf("parsing list-environments response: %w (body: %s)", err, httputil.Truncate(string(respBody), 200))
+		}
+		envs = append(envs, r.Items...)
+
+		if r.Links.Next.Href == "" {
+			return envs, nil
+		}
+
+		// Resolve the next href against the apiBase. The href is a
+		// server-absolute reference like "/api/v2/projects/foo/environments?offset=20";
+		// url.JoinPath would percent-encode the '?'. ResolveReference handles it.
+		ref, parseErr := url.Parse(r.Links.Next.Href)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing _links.next.href: %w", parseErr)
+		}
+		reqURL = base.ResolveReference(ref).String()
+	}
+}
+
+// CreateEnvironment creates a new environment in the LD project. Returns
+// ErrEnvironmentExists on 409 and ErrEnvironmentForbidden on 403/401 so the
+// env-reconciler in PR 6 can branch on those cases.
+func (c *Client) CreateEnvironment(ctx context.Context, env Environment) (*Environment, error) {
+	body, err := json.Marshal(env)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling environment: %w", err)
+	}
+
+	reqURL, err := url.JoinPath(c.apiBase, "api/v2/projects", c.projectKey, "environments")
+	if err != nil {
+		return nil, fmt.Errorf("building environments URL: %w", err)
+	}
+
+	for range envCreateRetries {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("creating create-environment request: %w", err)
+		}
+		c.setAuthHeaders(req)
+
+		respBody, statusCode, err := httputil.DoWithRetry(ctx, c.httpClient, req, body)
+		if err != nil {
+			return nil, err
+		}
+		switch statusCode {
+		case http.StatusCreated, http.StatusOK:
+			var created Environment
+			if jsonErr := json.Unmarshal(respBody, &created); jsonErr != nil {
+				return nil, fmt.Errorf("parsing create-environment response: %w (body: %s)", jsonErr, httputil.Truncate(string(respBody), 200))
+			}
+			return &created, nil
+		case http.StatusConflict:
+			return nil, ErrEnvironmentExists
+		case http.StatusForbidden, http.StatusUnauthorized:
+			return nil, ErrEnvironmentForbidden
+		default:
+			return nil, c.apiError(fmt.Sprintf("creating LD environment %s", env.Key), statusCode, respBody)
+		}
+	}
+	return nil, fmt.Errorf("create environment %s exhausted retries", env.Key)
+}
+
+// setAuthHeaders applies the LD API auth + content-type headers.
+func (c *Client) setAuthHeaders(req *http.Request) {
+	req.Close = true
+	req.Header.Set("Authorization", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+}
+
+// apiError builds a standard LD API error including an actionable hint when
+// the status code matches a known pattern.
+func (c *Client) apiError(action string, statusCode int, body []byte) error {
+	var errResp struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(body, &errResp)
+	msg := errResp.Message
+	if msg == "" {
+		msg = string(body)
+	}
+	if len(msg) > 300 {
+		msg = msg[:300] + "..."
+	}
+	if hint := actionableHint(statusCode, msg); hint != "" {
+		return fmt.Errorf("%s: HTTP %d: %s — %s", action, statusCode, msg, hint)
+	}
+	return fmt.Errorf("%s: HTTP %d: %s", action, statusCode, msg)
 }
 
 // actionableHint returns a human-readable hint for known LD API error patterns

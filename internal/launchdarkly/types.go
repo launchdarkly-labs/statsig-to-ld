@@ -1,5 +1,9 @@
 package launchdarkly
 
+// ============================================================================
+// Metric types (consumed by `metrics convert`)
+// ============================================================================
+
 // MetricPost is the request body for creating an LD metric via the REST API.
 type MetricPost struct {
 	Key                 string        `json:"key"`
@@ -35,4 +39,73 @@ type MetricResponse struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
 	Kind string `json:"kind"`
+}
+
+// ============================================================================
+// Flag types (consumed by `flags import` and `targeting import`, PRs 5 and 6)
+// ============================================================================
+
+// Flag is the LD flag shell payload. Mirrors the goaltender importer's shape.
+// Per-env targeting (rules, targets, fallthrough) is applied separately via
+// PatchFlag — not via this struct.
+type Flag struct {
+	Defaults     Defaults    `json:"defaults,omitempty"`
+	Description  string      `json:"description"`
+	Key          string      `json:"key"`
+	MaintainerID string      `json:"maintainerId,omitempty"`
+	Name         string      `json:"name"`
+	Tags         []string    `json:"tags"`
+	Temporary    bool        `json:"temporary"`
+	Variations   []Variation `json:"variations"`
+}
+
+// Defaults is the on/off variation index pair for a flag.
+type Defaults struct {
+	OnVariation  int `json:"onVariation"`
+	OffVariation int `json:"offVariation"`
+}
+
+// Variation is one named return value for a flag.
+type Variation struct {
+	Description string `json:"description,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Value       any    `json:"value"`
+}
+
+// FailedFlag captures a flag that could not be constructed or created.
+type FailedFlag struct {
+	Name  string `json:"name"`
+	Error string `json:"error"`
+}
+
+// ============================================================================
+// Environment types (consumed by `targeting import`, PR 6)
+// ============================================================================
+
+// Environment is the subset of /api/v2/projects/{proj}/environments fields the
+// importer cares about. The LD API returns many more fields (sdkKey, mobileKey,
+// defaultTtl, etc.) that are ignored.
+type Environment struct {
+	Key   string   `json:"key"`
+	Name  string   `json:"name"`
+	Color string   `json:"color"`
+	Tags  []string `json:"tags,omitempty"`
+}
+
+// ============================================================================
+// Private response shapes
+// ============================================================================
+
+type listFlagsResponse struct {
+	Items      []Flag `json:"items"`
+	TotalCount int    `json:"totalCount"`
+}
+
+type listEnvironmentsResponse struct {
+	Items []Environment `json:"items"`
+	Links struct {
+		Next struct {
+			Href string `json:"href"`
+		} `json:"next"`
+	} `json:"_links"`
 }
