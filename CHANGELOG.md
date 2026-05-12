@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** Binary renamed from `statsig-metric-importer` to `statsig-to-ld` to reflect the multi-subcommand direction.
+- **Breaking:** Metric subcommand renamed from `convert` to `metric-import` so additional subcommands can sit alongside without ambiguity. Old invocation now errors with `unknown command "convert" for "statsig-to-ld"` to surface the change on first run.
+- HTTP `User-Agent` header is now `statsig-to-ld/<version>`.
+
 ## [0.1.1] - 2026-05-06
 
 ### Added

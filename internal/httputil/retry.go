@@ -29,7 +29,7 @@ func SetVersion(v string) {
 }
 
 func userAgent() string {
-	return "statsig-metric-importer/" + version
+	return "statsig-to-ld/" + version
 }
 
 // DoWithRetry executes an HTTP request with retry for transient failures

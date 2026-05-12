@@ -25,19 +25,22 @@ import (
 var version = "dev"
 
 var rootCmd = &cobra.Command{
-	Use:     "statsig-metric-importer",
-	Short:   "Convert Statsig metric definitions to LaunchDarkly metrics",
+	Use:     "statsig-to-ld",
+	Short:   "Migrate Statsig metrics and flags to LaunchDarkly",
 	Version: version,
-	Long: `A CLI tool for migrating Statsig metric definitions into LaunchDarkly.
+	Long: `A CLI tool for migrating from Statsig to LaunchDarkly.
 
-Supports both Statsig Cloud and Warehouse Native metrics. Produces a
-migration report with per-metric status, warnings, and summary counts.
+Subcommands:
+  metric-import   Convert Statsig metric definitions to LaunchDarkly metrics
+  flag-import      Import Statsig feature gates or dynamic configs as LD flags
+                   (with per-environment targeting rules + user overrides)
 
-Re-running the tool is safe — existing LD metrics are detected and skipped.`,
+Re-running any subcommand is safe — existing LD resources are detected and
+skipped.`,
 }
 
-var convertCmd = &cobra.Command{
-	Use:   "convert",
+var metricImportCmd = &cobra.Command{
+	Use:   "metric-import",
 	Short: "Convert Statsig metrics to LaunchDarkly format",
 	Long: `Fetch Statsig metrics via the Console API, convert them to LaunchDarkly
 metric definitions, and create them via the LD REST API.
@@ -54,27 +57,27 @@ API Key Security:
 
 Examples:
   # Just run — the tool prompts for keys interactively (most secure)
-  statsig-metric-importer convert --all --dry-run
+  statsig-to-ld metric-import --all --dry-run
 
   # Or set env vars for the session (use 'read -rs' to avoid shell history)
   read -rs STATSIG_CONSOLE_KEY && export STATSIG_CONSOLE_KEY
   read -rs LD_API_KEY && export LD_API_KEY
-  statsig-metric-importer convert --all --ld-project my-project
+  statsig-to-ld metric-import --all --ld-project my-project
 
   # Convert a single metric
-  statsig-metric-importer convert --metric purchase_revenue --ld-project my-project
+  statsig-to-ld metric-import --metric purchase_revenue --ld-project my-project
 
   # Bulk convert all metrics with CSV output
-  statsig-metric-importer convert --all --format csv --ld-project my-project
+  statsig-to-ld metric-import --all --format csv --ld-project my-project
 
   # Convert only sum and mean metrics, with a default unit
-  statsig-metric-importer convert --all --include-types sum,mean \
+  statsig-to-ld metric-import --all --include-types sum,mean \
     --default-unit "$" --ld-project my-project
 
   # Bulk convert with Warehouse Native data source
-  statsig-metric-importer convert --all --ld-project my-project \
+  statsig-to-ld metric-import --all --ld-project my-project \
     --ld-data-source snowflake-ds`,
-	RunE: runConvert,
+	RunE: runMetricImport,
 }
 
 // Flags
@@ -103,30 +106,30 @@ func init() {
 	// Disable default log timestamp — cleaner CLI output
 	log.SetFlags(0)
 
-	rootCmd.AddCommand(convertCmd)
+	rootCmd.AddCommand(metricImportCmd)
 
-	convertCmd.Flags().StringVar(&flagMetric, "metric", "", "Statsig metric name to convert")
-	convertCmd.Flags().BoolVar(&flagAll, "all", false, "Convert all Statsig metrics")
-	convertCmd.Flags().BoolVar(&flagDryRun, "dry-run", false, "Preview conversion without creating LD metrics")
+	metricImportCmd.Flags().StringVar(&flagMetric, "metric", "", "Statsig metric name to convert")
+	metricImportCmd.Flags().BoolVar(&flagAll, "all", false, "Convert all Statsig metrics")
+	metricImportCmd.Flags().BoolVar(&flagDryRun, "dry-run", false, "Preview conversion without creating LD metrics")
 
-	convertCmd.Flags().StringVar(&flagStatsigKey, "statsig-key", "", "Statsig Console API key (console-xxx)")
-	convertCmd.Flags().StringVar(&flagStatsigURL, "statsig-url", "", "Statsig API base URL including scheme (e.g. https://statsigapi.net/console/v1)")
-	convertCmd.Flags().StringVar(&flagLDKey, "ld-key", "", "LaunchDarkly API access token (api-xxx)")
-	convertCmd.Flags().StringVar(&flagLDURL, "ld-url", "", "LaunchDarkly API base URL including scheme (e.g. https://app.launchdarkly.com/)")
-	convertCmd.Flags().StringVar(&flagLDProject, "ld-project", "", "LaunchDarkly project key (required)")
+	metricImportCmd.Flags().StringVar(&flagStatsigKey, "statsig-key", "", "Statsig Console API key (console-xxx)")
+	metricImportCmd.Flags().StringVar(&flagStatsigURL, "statsig-url", "", "Statsig API base URL including scheme (e.g. https://statsigapi.net/console/v1)")
+	metricImportCmd.Flags().StringVar(&flagLDKey, "ld-key", "", "LaunchDarkly API access token (api-xxx)")
+	metricImportCmd.Flags().StringVar(&flagLDURL, "ld-url", "", "LaunchDarkly API base URL including scheme (e.g. https://app.launchdarkly.com/)")
+	metricImportCmd.Flags().StringVar(&flagLDProject, "ld-project", "", "LaunchDarkly project key (required)")
 
-	convertCmd.Flags().StringVar(&flagLDDataSource, "ld-data-source", "", "LD data source key for Warehouse Native metrics")
-	convertCmd.Flags().StringVar(&flagSourceMapping, "source-mapping", "", "JSON file mapping Statsig source names to LD data source keys")
-	convertCmd.Flags().StringVar(&flagUnitTypeMapping, "unit-type-mapping", "", "JSON file mapping Statsig unit types to LD context kinds (e.g. {\"companyID\": \"company\"})")
+	metricImportCmd.Flags().StringVar(&flagLDDataSource, "ld-data-source", "", "LD data source key for Warehouse Native metrics")
+	metricImportCmd.Flags().StringVar(&flagSourceMapping, "source-mapping", "", "JSON file mapping Statsig source names to LD data source keys")
+	metricImportCmd.Flags().StringVar(&flagUnitTypeMapping, "unit-type-mapping", "", "JSON file mapping Statsig unit types to LD context kinds (e.g. {\"companyID\": \"company\"})")
 
-	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Path for migration report output")
-	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
-	convertCmd.Flags().StringVar(&flagDefaultUnit, "default-unit", "", "Unit of measure for numeric metrics (e.g. \"$\", \"ms\", \"count\"). Defaults to \"units\" if unset.")
+	metricImportCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Path for migration report output")
+	metricImportCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
+	metricImportCmd.Flags().StringVar(&flagDefaultUnit, "default-unit", "", "Unit of measure for numeric metrics (e.g. \"$\", \"ms\", \"count\"). Defaults to \"units\" if unset.")
 
-	convertCmd.Flags().StringVar(&flagIncludeTags, "include-tags", "", "Only convert metrics with these Statsig tags (comma-separated)")
-	convertCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert metrics of these Statsig types (comma-separated)")
-	convertCmd.Flags().IntVar(&flagConcurrency, "concurrency", 10, "Max concurrent LD API requests for bulk conversion")
-	convertCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed per-metric progress (status, name, key, errors)")
+	metricImportCmd.Flags().StringVar(&flagIncludeTags, "include-tags", "", "Only convert metrics with these Statsig tags (comma-separated)")
+	metricImportCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert metrics of these Statsig types (comma-separated)")
+	metricImportCmd.Flags().IntVar(&flagConcurrency, "concurrency", 10, "Max concurrent LD API requests for bulk conversion")
+	metricImportCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed per-metric progress (status, name, key, errors)")
 }
 
 // ExecuteContext runs the root command with the given context.
@@ -134,7 +137,7 @@ func ExecuteContext(ctx context.Context) error {
 	return rootCmd.ExecuteContext(ctx)
 }
 
-func runConvert(cmd *cobra.Command, args []string) error {
+func runMetricImport(cmd *cobra.Command, args []string) error {
 	// Propagate build version to httputil User-Agent
 	httputil.SetVersion(version)
 
