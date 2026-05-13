@@ -45,7 +45,7 @@ There's no automated codemod in this tool. Open an issue if you'd find one usefu
 
 ### 2. Statsig segments
 
-Statsig segments (named user cohorts) are referenced by gates via `passes_segment` / `fails_segment` conditions. The CLI doesn't recreate them in LaunchDarkly — by default it skips any flag whose targeting references a segment (D8 fail-closed). With `--accept-data-loss=segments` the flag imports but the segment reference is dropped.
+Statsig segments (named user cohorts) are referenced by gates via `passes_segment` / `fails_segment` conditions. The CLI doesn't recreate them in LaunchDarkly — by default it skips any flag whose targeting references a segment (fail-closed). With `--accept-data-loss=segments` the flag imports but the segment reference is dropped.
 
 **Approach:**
 
@@ -60,7 +60,7 @@ A planned `segments export` subcommand will dump Statsig segment definitions to 
 
 ### 3. Statsig gate prerequisites
 
-`passes_gate` / `fails_gate` conditions (one gate referencing another) are dropped under D8 the same way segments are. LaunchDarkly **does** support flag prerequisites natively, but the CLI doesn't translate them today.
+`passes_gate` / `fails_gate` conditions (one gate referencing another) are dropped the same way segments are (fail-closed). LaunchDarkly **does** support flag prerequisites natively, but the CLI doesn't translate them today.
 
 **Approach:**
 
