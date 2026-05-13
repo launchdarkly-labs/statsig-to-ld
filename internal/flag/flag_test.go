@@ -291,6 +291,9 @@ func TestWrapScalarDefault(t *testing.T) {
 		{"scalar string wrapped", `"hello"`, `{"value":"hello"}`},
 		{"scalar number wrapped", `42`, `{"value":42}`},
 		{"array wrapped", `[1,2]`, `{"value":[1,2]}`},
+		// Malformed JSON: must produce a syntactically valid placeholder,
+		// not splice the bad bytes into a string template.
+		{"malformed JSON yields valid placeholder", `{not json`, `{"value":null}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -162,16 +162,44 @@ func LossyTargetingFeatures(g statsig.Gate) []string {
 }
 
 // LossyDCTargetingFeatures returns the names of D8 fail-closed features
-// present in this dynamic config. Currently flags multi-variant configs
-// since their overrides cannot be fully reproduced (Statsig's override API
-// is binary pass/fail per user).
+// present in this dynamic config: multi-variant override fidelity loss, plus
+// the same condition-level features `LossyTargetingFeatures` flags for gates
+// (DC rules also have Conditions; the earlier version of this function
+// missed them, so a DC whose targeting referenced a segment slipped past D8).
 func LossyDCTargetingFeatures(c statsig.DynamicConfig) []string {
+	var hasMultiVariant bool
+	var f gateFlags
 	for _, rule := range c.Rules {
 		if len(rule.Variants) >= 2 {
-			return []string{"multi_variant_overrides"}
+			hasMultiVariant = true
+		}
+		for _, cond := range rule.Conditions {
+			switch cond.Type {
+			case condPassesSegment, condFailsSegment:
+				f.hasSegment = true
+			case condPassesGate, condFailsGate:
+				f.hasPrerequisite = true
+			case condUnitID:
+				if cond.CustomID != "" && cond.CustomID != "userID" {
+					f.hasCustomUnitID = true
+				}
+			}
 		}
 	}
-	return nil
+	var out []string
+	if f.hasSegment {
+		out = append(out, "segments")
+	}
+	if f.hasPrerequisite {
+		out = append(out, "prerequisites")
+	}
+	if f.hasCustomUnitID {
+		out = append(out, "custom_unit_id")
+	}
+	if hasMultiVariant {
+		out = append(out, "multi_variant_overrides")
+	}
+	return out
 }
 
 // EstimateManualWork sums the fail-closed-under-D8 counters plus the

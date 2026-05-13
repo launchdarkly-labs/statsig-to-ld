@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -147,21 +148,25 @@ func runFlagsImport(cmd *cobra.Command, args []string) error {
 		return errors.New(`Statsig key should start with "console-" — this is a Console API key, not a server secret key`)
 	}
 
-	if flagFILDKey == "" && !flagFIDryRun {
+	// LD credentials are required even in --dry-run: the dry-run reads
+	// existing LD flags to dedupe so the "would create" count reflects
+	// reality. Without the read, a re-run against a project that already
+	// has imports would falsely report N new flags every time.
+	if flagFILDKey == "" {
 		key, err := promptForKey("LaunchDarkly API access token (api-xxx)")
 		if err != nil {
 			return fmt.Errorf("reading LD key: %w", err)
 		}
 		flagFILDKey = key
 	}
-	if flagFILDKey == "" && !flagFIDryRun {
-		return errors.New("LaunchDarkly API key is required (set LD_API_KEY env, use --ld-key, or enter at prompt)")
+	if flagFILDKey == "" {
+		return errors.New("LaunchDarkly API key is required (set LD_API_KEY env, use --ld-key, or enter at prompt — required even for --dry-run)")
 	}
-	if flagFILDKey != "" && !strings.HasPrefix(flagFILDKey, "api-") {
+	if !strings.HasPrefix(flagFILDKey, "api-") {
 		return errors.New(`LaunchDarkly key should start with "api-" — this is an API access token`)
 	}
-	if flagFILDProject == "" && !flagFIDryRun {
-		return errors.New("--ld-project is required (LaunchDarkly project key)")
+	if flagFILDProject == "" {
+		return errors.New("--ld-project is required (LaunchDarkly project key — required even for --dry-run)")
 	}
 
 	flagFIStatsigURL = strings.TrimRight(flagFIStatsigURL, "/")
@@ -173,11 +178,7 @@ func runFlagsImport(cmd *cobra.Command, args []string) error {
 
 	ctx := cmd.Context()
 	sg := statsig.NewClient(flagFIStatsigKey, flagFIStatsigURL)
-
-	var ld *launchdarkly.Client
-	if !flagFIDryRun {
-		ld = launchdarkly.NewClient(flagFILDKey, flagFILDProject, flagFILDURL)
-	}
+	ld := launchdarkly.NewClient(flagFILDKey, flagFILDProject, flagFILDURL)
 
 	// Fetch source from Statsig
 	var (
@@ -209,33 +210,51 @@ func runFlagsImport(cmd *cobra.Command, args []string) error {
 		log.Printf("Fetched %d dynamic configs", len(dcs))
 	}
 
-	// Build LD flag shells from sources
-	gateFlags, gateFailures := flag.NewFlagsFromGates(gates, flagFILDTag, flagFILDMaintainer)
-	dcFlags, dcFailures := flag.NewFlagsFromDynamicConfigs(dcs, flagFILDTag, flagFILDMaintainer)
-
-	// Map ldKey → (statsigName, statsigKind, statsigID, lossy[]) for report annotation
+	// Detect sanitized-key collisions BEFORE constructing the meta map. If a
+	// gate and a dynamic config (or two gates with structurally different
+	// IDs that sanitize identically) produce the same LD key, the second
+	// would silently overwrite the first in the meta map — and the report
+	// would mislabel the surviving flag. Warn and drop the second.
 	type sourceMeta struct {
 		Name  string
 		Kind  string
 		ID    string
 		Lossy []string
 	}
+	rpt := report.NewFlagReport()
 	meta := make(map[string]sourceMeta, len(gates)+len(dcs))
+
+	keptGates := make([]statsig.Gate, 0, len(gates))
 	for _, g := range gates {
 		ldKey := flag.SanitizeKey(g.ID)
+		if first, dup := meta[ldKey]; dup {
+			log.Printf("WARNING: key collision — gate %q (%s) and earlier %s %q both sanitize to LD key %q. Skipping the gate.",
+				g.Name, g.ID, first.Kind, first.ID, ldKey)
+			rpt.AddFailed(g.Name, "gate", g.ID, fmt.Sprintf("sanitized key %q collides with earlier source", ldKey))
+			continue
+		}
 		meta[ldKey] = sourceMeta{Name: g.Name, Kind: "gate", ID: g.ID, Lossy: analyze.LossyTargetingFeatures(g)}
+		keptGates = append(keptGates, g)
 	}
+	keptDCs := make([]statsig.DynamicConfig, 0, len(dcs))
 	for _, c := range dcs {
 		ldKey := flag.SanitizeKey(c.ID)
+		if first, dup := meta[ldKey]; dup {
+			log.Printf("WARNING: key collision — dynamic config %q (%s) and earlier %s %q both sanitize to LD key %q. Skipping the dynamic config.",
+				c.Name, c.ID, first.Kind, first.ID, ldKey)
+			rpt.AddFailed(c.Name, "dynamic_config", c.ID, fmt.Sprintf("sanitized key %q collides with earlier source", ldKey))
+			continue
+		}
 		meta[ldKey] = sourceMeta{Name: c.Name, Kind: "dynamic_config", ID: c.ID, Lossy: analyze.LossyDCTargetingFeatures(c)}
+		keptDCs = append(keptDCs, c)
 	}
+
+	// Build LD flag shells from the deduplicated sources.
+	gateFlags, gateFailures := flag.NewFlagsFromGates(keptGates, flagFILDTag, flagFILDMaintainer)
+	dcFlags, dcFailures := flag.NewFlagsFromDynamicConfigs(keptDCs, flagFILDTag, flagFILDMaintainer)
 
 	allFlags := append([]launchdarkly.Flag{}, gateFlags...)
 	allFlags = append(allFlags, dcFlags...)
-
-	// Idempotent dedupe (D6): fetch existing LD flags tagged with the import
-	// tag, and filter our new flags by sanitized key.
-	rpt := report.NewFlagReport()
 
 	// Record source-construction failures (rare; from DC parsing edge cases)
 	for _, ff := range gateFailures {
@@ -245,30 +264,27 @@ func runFlagsImport(cmd *cobra.Command, args []string) error {
 		rpt.AddFailed(ff.Name, "dynamic_config", ff.Name, ff.Error)
 	}
 
-	var toCreate []launchdarkly.Flag
-	if !flagFIDryRun {
-		log.Println("Fetching existing LaunchDarkly flags (for dedupe)...")
-		existing, err := ld.ListAllFlags(ctx, flagFILDTag)
-		if err != nil {
-			return fmt.Errorf("listing existing LD flags: %w", err)
-		}
-		log.Printf("Found %d existing flags tagged %q", len(existing), flagFILDTag)
-
-		// Record skipped-existing entries
-		existingByKey := make(map[string]struct{}, len(existing))
-		for _, e := range existing {
-			existingByKey[e.Key] = struct{}{}
-		}
-		for _, f := range allFlags {
-			if _, dup := existingByKey[f.Key]; dup {
-				m := meta[f.Key]
-				rpt.AddSkippedExisting(m.Name, m.Kind, m.ID, f.Key, flagFILDProject, m.Lossy)
-			}
-		}
-		toCreate = flag.FilterNewFlags(allFlags, existing)
-	} else {
-		toCreate = allFlags
+	// Always fetch existing LD flags for dedupe, even in --dry-run. Without
+	// this, a dry-run against a project that already has imports would
+	// report "would create N" when most flags actually exist — misleading.
+	log.Println("Fetching existing LaunchDarkly flags (for dedupe)...")
+	existing, err := ld.ListAllFlags(ctx, flagFILDTag)
+	if err != nil {
+		return fmt.Errorf("listing existing LD flags: %w", err)
 	}
+	log.Printf("Found %d existing flags tagged %q", len(existing), flagFILDTag)
+
+	existingByKey := make(map[string]struct{}, len(existing))
+	for _, e := range existing {
+		existingByKey[e.Key] = struct{}{}
+	}
+	for _, f := range allFlags {
+		if _, dup := existingByKey[f.Key]; dup {
+			m := meta[f.Key]
+			rpt.AddSkippedExisting(m.Name, m.Kind, m.ID, f.Key, flagFILDProject, m.Lossy)
+		}
+	}
+	toCreate := flag.FilterNewFlags(allFlags, existing)
 
 	total := len(toCreate)
 	if total > 0 && !flagFIVerbose {
@@ -344,7 +360,9 @@ func runFlagsImport(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr)
 	}
 
-	rpt.Finalize(len(allFlags))
+	// StatsigSrcTotal should reflect the original source count from Statsig,
+	// not allFlags (which excludes construction failures and collisions).
+	rpt.Finalize(len(gates) + len(dcs))
 
 	if err := writeFlagReport(rpt); err != nil {
 		return err
@@ -369,8 +387,45 @@ func writeFlagReport(rpt *report.FlagReport) error {
 		}
 		data = j
 	}
-	if err := os.WriteFile(flagFIOutput, data, 0600); err != nil {
+	// Atomic write: same pattern as the metric report (see metrics_convert.go).
+	// Migration reports may be the only record of what was created in LD; a
+	// partial file from a process kill is worse than no file at all.
+	if err := writeFileAtomic(flagFIOutput, data, 0600); err != nil {
 		return fmt.Errorf("writing report to %s: %w", flagFIOutput, err)
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to path via a sibling temp file and a rename so
+// concurrent readers and crash-during-write don't observe a truncated file.
+// Local duplicate of metrics_convert.go's atomicWriteFile (separately named
+// here to avoid colliding with that PR's helper before the stack merges; the
+// two should be unified into a shared package-level helper in a follow-up).
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-"+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return err
 	}
 	return nil
 }

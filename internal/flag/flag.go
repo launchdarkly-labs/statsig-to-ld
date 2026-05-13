@@ -145,13 +145,21 @@ func unwrapVariantValue(raw json.RawMessage) json.RawMessage {
 // wrapScalarDefault returns the dc-level defaultValue in object form. Scalar /
 // non-object / null defaults are wrapped as {"value": x} so LD JSON-variation
 // flags always see an object at the top level.
+//
+// On unmarshal failure (raw is not valid JSON), we return a safe placeholder
+// {"value":null} rather than splicing the malformed bytes into a string
+// template — that would have produced a syntactically broken JSON object
+// that LD's API would reject with a confusing 400.
 func wrapScalarDefault(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
 		return json.RawMessage(`{"value":null}`)
 	}
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return json.RawMessage(fmt.Sprintf(`{"value":%s}`, string(raw)))
+		// raw is malformed JSON; produce a valid placeholder instead of
+		// splicing invalid bytes (the previous behavior would have emitted
+		// `{"value":<malformed>}` and reached the LD API as broken JSON).
+		return json.RawMessage(`{"value":null}`)
 	}
 	if decoded == nil {
 		return json.RawMessage(`{"value":null}`)
