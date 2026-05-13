@@ -147,7 +147,7 @@ func EstimateManualWork(gates GateSummary, dcs DynamicConfigSummary) int {
 // Build composes a complete Report from already-fetched data. Pure function —
 // callers (the CLI) do the I/O.
 func Build(
-	statsigProject, ldProject string,
+	ldProject string,
 	gates []statsig.Gate,
 	dcs []statsig.DynamicConfig,
 	statsigEnvs []statsig.Environment,
@@ -158,7 +158,6 @@ func Build(
 	dcSum := AnalyzeDynamicConfigs(dcs)
 	return Report{
 		Timestamp:           time.Now().UTC(),
-		StatsigProject:      statsigProject,
 		LDProject:           ldProject,
 		Gates:               gs,
 		DynamicConfigs:      dcSum,

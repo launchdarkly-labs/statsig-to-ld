@@ -101,6 +101,12 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 
 	flagAnalyzeLDURL = strings.TrimRight(flagAnalyzeLDURL, "/")
 	flagAnalyzeStatsigURL = strings.TrimRight(flagAnalyzeStatsigURL, "/")
+	if flagAnalyzeLDURL != "" && !strings.HasPrefix(flagAnalyzeLDURL, "https://") && !strings.HasPrefix(flagAnalyzeLDURL, "http://") {
+		return fmt.Errorf("--ld-url must include the scheme (e.g. https://%s)", flagAnalyzeLDURL)
+	}
+	if flagAnalyzeStatsigURL != "" && !strings.HasPrefix(flagAnalyzeStatsigURL, "https://") && !strings.HasPrefix(flagAnalyzeStatsigURL, "http://") {
+		return fmt.Errorf("--statsig-url must include the scheme (e.g. https://%s)", flagAnalyzeStatsigURL)
+	}
 
 	sgClient := statsig.NewClient(flagAnalyzeStatsigKey, flagAnalyzeStatsigURL)
 
@@ -147,7 +153,7 @@ func runAnalyze(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	report := analyze.Build("", flagAnalyzeLDProject, gates, dcs, statsigEnvs, ldEnvs, metrics)
+	report := analyze.Build(flagAnalyzeLDProject, gates, dcs, statsigEnvs, ldEnvs, metrics)
 
 	report.PrintTable(os.Stdout)
 

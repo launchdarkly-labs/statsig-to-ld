@@ -13,9 +13,11 @@ import "time"
 
 // Report is the full pre-migration sizing result.
 type Report struct {
-	Timestamp     time.Time         `json:"timestamp"`
-	StatsigProject string           `json:"statsig_project,omitempty"`
-	LDProject     string            `json:"ld_project,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+	// LDProject is set when --ld-project is provided. The Statsig project name
+	// isn't surfaced through the Console API (the API key implicitly scopes it),
+	// so we don't track a corresponding StatsigProject field.
+	LDProject string `json:"ld_project,omitempty"`
 
 	Gates          GateSummary          `json:"gates"`
 	DynamicConfigs DynamicConfigSummary `json:"dynamic_configs"`
@@ -29,12 +31,19 @@ type Report struct {
 }
 
 // GateSummary counts gates by how the importer will treat each one.
+//
+// BooleanSimple is mutually exclusive with the With* counters (a gate counted
+// in any With* is not counted in BooleanSimple). The With* counters are NOT
+// mutually exclusive with each other — a gate that has both segment and
+// prerequisite conditions is counted in both WithSegments and WithPrerequisites.
+// So `BooleanSimple + sum(With*)` may exceed Total. The user-facing metric is
+// EstimatedManualWork on Report, which deliberately sums the fail-closed
+// counters as a magnitude indicator, not a precise unique-gate count.
 type GateSummary struct {
 	Total int `json:"total"`
 
-	// BooleanSimple counts gates whose rules use only operator/condition
-	// types we can faithfully reproduce in LD. These are safe to import
-	// with default flags.
+	// BooleanSimple counts gates with no fail-closed-under-D8 and no
+	// approximated-operator markers. Safe to import with default flags.
 	BooleanSimple int `json:"boolean_simple"`
 
 	// WithSegments counts gates with any passes_segment / fails_segment
