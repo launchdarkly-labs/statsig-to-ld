@@ -108,6 +108,74 @@ func TestFlagsImportCmd_FlagsBound(t *testing.T) {
 	}
 }
 
+// TestCommandTree_TargetingImportResolves verifies the `targeting import` path.
+func TestCommandTree_TargetingImportResolves(t *testing.T) {
+	c, _, err := rootCmd.Find([]string{"targeting", "import"})
+	if err != nil {
+		t.Fatalf("rootCmd.Find([\"targeting\", \"import\"]) failed: %v", err)
+	}
+	if c.Name() != "import" {
+		t.Errorf("resolved command name = %q, want %q", c.Name(), "import")
+	}
+	if c.Parent() == nil || c.Parent().Name() != "targeting" {
+		t.Errorf("parent = %v, want %q", c.Parent(), "targeting")
+	}
+}
+
+// TestTargetingImportCmd_FlagsBound verifies every user-facing flag is
+// registered on targetingImportCmd.
+func TestTargetingImportCmd_FlagsBound(t *testing.T) {
+	expected := []string{
+		"all", "dry-run", "import-type", "include-tag",
+		"ld-tag", "accept-data-loss", "no-create-envs",
+		"statsig-key", "statsig-url",
+		"ld-key", "ld-url", "ld-project",
+		"output", "format", "verbose",
+	}
+	for _, name := range expected {
+		if targetingImportCmd.Flags().Lookup(name) == nil {
+			t.Errorf("flag --%s not registered on `targeting import`", name)
+		}
+	}
+}
+
+// TestParseAcceptDataLoss exercises the --accept-data-loss value parser.
+func TestParseAcceptDataLoss(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		wantAll   bool
+		wantSet   []string
+		wantErr   bool
+	}{
+		{"empty = strict", "", false, nil, false},
+		{"all keyword", "all", true, nil, false},
+		{"single feature", "segments", false, []string{"segments"}, false},
+		{"multiple features", "segments,prerequisites", false, []string{"segments", "prerequisites"}, false},
+		{"whitespace tolerant", "segments, prerequisites", false, []string{"segments", "prerequisites"}, false},
+		{"unknown feature errors", "bogus", false, nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			set, all, err := parseAcceptDataLoss(tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr=%v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if all != tc.wantAll {
+				t.Errorf("acceptAll = %v, want %v", all, tc.wantAll)
+			}
+			for _, f := range tc.wantSet {
+				if !set[f] {
+					t.Errorf("feature %q not in accepted set: %v", f, set)
+				}
+			}
+		})
+	}
+}
+
 // TestHelp_AllLevels verifies --help renders without error at every
 // level of the command tree. Smoke-tests the wiring end-to-end.
 func TestHelp_AllLevels(t *testing.T) {
@@ -118,6 +186,8 @@ func TestHelp_AllLevels(t *testing.T) {
 		{"analyze", "--help"},
 		{"flags", "--help"},
 		{"flags", "import", "--help"},
+		{"targeting", "--help"},
+		{"targeting", "import", "--help"},
 	}
 	for _, args := range levels {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
