@@ -387,65 +387,76 @@ func (e *migrationEngine) phase2WarehouseSetup() error {
 
 	detected := warehouse.DetectWarehouseType(e.whConnections, e.metricSources)
 
-	// Check if both integrations already exist
-	if detected != "" && e.dataExportExists(detected) && e.experimentationExists(detected) {
-		output.Ok("Data export and experimentation integrations already exist, skipping")
+	e.whPrefilled["_env_id"] = e.environmentID
+	e.whPrefilled["_project_id"] = e.projectID
+
+	// Check data export first — no prompt needed
+	exportExists := e.checkDataExportExists(detected)
+
+	// Check experimentation — no prompt needed
+	expExists := e.checkExperimentationExists(detected)
+
+	if exportExists && expExists {
 		e.report.Warehouse.Skipped = true
 		e.state.SetWarehouseDone()
 		return nil
 	}
 
-	whType := warehouse.PromptWarehouseType(e.reader, detected)
-	e.whPrefilled["_env_id"] = e.environmentID
-	e.whPrefilled["_project_id"] = e.projectID
-
-	// Step 1: Data export
-	if err := e.phase2aDataExport(whType); err != nil {
-		return err
+	// Only prompt for warehouse type if we actually need to create something
+	whType := detected
+	if whType == "" || (!exportExists && !expExists) {
+		whType = warehouse.PromptWarehouseType(e.reader, detected)
 	}
-	// Step 2: Experimentation
-	if err := e.phase2bExperimentation(whType); err != nil {
-		return err
+
+	if !exportExists {
+		if err := e.phase2aDataExport(whType); err != nil {
+			return err
+		}
+	}
+	if !expExists {
+		if err := e.phase2bExperimentation(whType); err != nil {
+			return err
+		}
 	}
 
 	e.state.SetWarehouseDone()
 	return nil
 }
 
-func (e *migrationEngine) dataExportExists(whType string) bool {
+// checkDataExportExists checks all destinations for the environment and logs the result.
+// Returns true if a destination already exists (no user action needed).
+func (e *migrationEngine) checkDataExportExists(whType string) bool {
+	output.Info("Checking data export destination...")
 	dests := e.ld.ListDestinations(e.ctx)
-	return len(dests) > 0
+	if len(dests) > 0 {
+		kind := jsonutil.GetStr(dests[0], "kind")
+		if kind == "" {
+			kind = "unknown"
+		}
+		output.Ok(fmt.Sprintf("Data export destination exists (%s), skipping", kind))
+		return true
+	}
+	return false
 }
 
-func (e *migrationEngine) experimentationExists(whType string) bool {
-	integrationKey := warehouse.WarehouseTypes[whType]
-	for _, cfg := range e.ld.ListIntegrationConfigs(e.ctx, integrationKey) {
-		cv := jsonutil.GetMap(cfg, "configValues")
-		env := jsonutil.GetMap(cv, "selectedEnv")
-		if jsonutil.GetStr(env, "environmentKey") == e.environmentKey {
-			return true
+// checkExperimentationExists checks all warehouse integration types for the environment.
+// Returns true if an integration exists for the current environment.
+func (e *migrationEngine) checkExperimentationExists(whType string) bool {
+	output.Info("Checking experimentation integration...")
+	for _, integrationKey := range warehouse.WarehouseTypes {
+		for _, cfg := range e.ld.ListIntegrationConfigs(e.ctx, integrationKey) {
+			cv := jsonutil.GetMap(cfg, "configValues")
+			env := jsonutil.GetMap(cv, "selectedEnv")
+			if jsonutil.GetStr(env, "environmentKey") == e.environmentKey {
+				output.Ok(fmt.Sprintf("Experimentation integration exists for env '%s' (%s), skipping", e.environmentKey, integrationKey))
+				return true
+			}
 		}
 	}
 	return false
 }
 
 func (e *migrationEngine) phase2aDataExport(whType string) error {
-	output.Info("Checking data export destination (prerequisite)...")
-	exportKey := warehouse.DataExportTypes[whType]
-
-	existing := e.ld.ListDestinations(e.ctx)
-	for _, dest := range existing {
-		kind := strings.ToLower(jsonutil.GetStr(dest, "kind"))
-		if kind == exportKey || kind == whType || strings.Contains(kind, whType) {
-			output.Ok(fmt.Sprintf("Data export destination exists (%s), skipping", kind))
-			return nil
-		}
-	}
-	if len(existing) > 0 {
-		output.Ok(fmt.Sprintf("Data export destination exists (%d found), skipping", len(existing)))
-		return nil
-	}
-
 	output.Warn(fmt.Sprintf("No data export destination for env '%s'", e.environmentKey))
 	output.Info("Setting up data export (prerequisite for native experimentation)...")
 
@@ -466,19 +477,7 @@ func (e *migrationEngine) phase2aDataExport(whType string) error {
 }
 
 func (e *migrationEngine) phase2bExperimentation(whType string) error {
-	output.Info("Checking experimentation integration...")
-	integrationKey := warehouse.WarehouseTypes[whType]
-
-	existing := e.ld.ListIntegrationConfigs(e.ctx, integrationKey)
-	for _, cfg := range existing {
-		cv := jsonutil.GetMap(cfg, "configValues")
-		env := jsonutil.GetMap(cv, "selectedEnv")
-		if jsonutil.GetStr(env, "environmentKey") == e.environmentKey {
-			output.Ok(fmt.Sprintf("Experimentation integration exists for env '%s', skipping", e.environmentKey))
-			e.report.Warehouse.Skipped = true
-			return nil
-		}
-	}
+	output.Info("Setting up experimentation integration...")
 
 	type setupFunc func(context.Context, *bufio.Reader, *launchdarkly.Client, string, string, map[string]string) error
 	setupFuncs := map[string]setupFunc{
