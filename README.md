@@ -53,7 +53,7 @@ statsig-to-ld metrics convert --all --ld-project my-project
 # 4. Create flag shells — off in all envs, no production impact
 statsig-to-ld flags import --all --ld-project my-project
 
-# 5. Preview targeting — D8 strict by default
+# 5. Preview targeting — fail-closed by default
 statsig-to-ld targeting import --all --ld-project my-project --dry-run
 
 # 6. Apply targeting (review the dry-run report first)
@@ -81,7 +81,7 @@ read -rs LD_API_KEY && export LD_API_KEY
 
 ### analyze
 
-Read-only sizing report. Surveys gates, dynamic configs, environments, and metrics and tells you what will import faithfully, what will be lossy under [D8](#d8-lossy-targeting-features), and what will be skipped.
+Read-only sizing report. Surveys gates, dynamic configs, environments, and metrics and tells you what will import faithfully, what will be [lossy](#lossy-targeting-features), and what will be skipped.
 
 ```bash
 # Statsig-only analysis — no LD account needed yet
@@ -112,7 +112,7 @@ statsig-to-ld flags import --all --import-type gates --include-tag p0 \
   --ld-project my-project
 ```
 
-**Idempotency**: dedupe is by sanitized LD key, not display name. Renaming a Statsig gate between runs does **not** create a duplicate (this is a behavioral fix over the predecessor lambda — see [D6](#decisions)).
+**Idempotency**: dedupe is by sanitized LD key, not display name. Renaming a Statsig gate between runs does **not** create a duplicate.
 
 See `statsig-to-ld flags import --help` for the full flag list.
 
@@ -198,7 +198,7 @@ Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` �
 
 See `statsig-to-ld metrics convert --help` for the full flag list.
 
-## D8: lossy targeting features
+## Lossy targeting features
 
 `targeting import` is **fail-closed by default**: flags whose Statsig source uses any of the features below are skipped (with a `skipped_lossy` entry in the report). To import them anyway, opt in via `--accept-data-loss`:
 
@@ -247,15 +247,6 @@ statsig-to-ld <subcommand> ... --ld-url https://app.eu.launchdarkly.com
 ```
 
 All subcommands accept `--ld-url` and `--statsig-url` overrides.
-
-## Decisions
-
-The repo follows a fixed set of design decisions tracked in [the decisions doc](https://github.com/launchdarkly-labs/statsig-to-ld/blob/main/docs/decisions.md) (if present in the release artifacts) or in PR descriptions. Key ones:
-
-- **D1**: Statsig is the only source platform in v1 (no Split, no Unleash).
-- **D6**: Flag dedupe is by sanitized LD key, not display name. Re-runs are safe even when Statsig display names change.
-- **D8**: Lossy targeting transformations fail-closed by default. `--accept-data-loss` opts in.
-- **D11**: The [migration playbook](docs/migration-playbook.md) ships alongside the CLI; the CLI is half the migration story.
 
 ## Planned follow-ups
 
