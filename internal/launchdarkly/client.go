@@ -50,12 +50,6 @@ var (
 // caps this at 50.
 const flagListPageSize = 50
 
-// envCreateRetries bounds how many times we follow a 429 backoff when creating
-// or patching environment-scoped resources. httputil.DoWithRetry already
-// retries internally — these loops only add another layer for cases where we
-// want explicit logging or special-case error mapping per attempt.
-const envCreateRetries = 5
-
 // Client is a LaunchDarkly REST API client.
 type Client struct {
 	apiKey     string
@@ -204,7 +198,10 @@ func (c *Client) CreateFlag(ctx context.Context, flag Flag) (*Flag, error) {
 	if statusCode == http.StatusConflict {
 		return nil, &ConflictError{Key: flag.Key}
 	}
-	if statusCode != http.StatusCreated && statusCode != http.StatusOK {
+	// LD documents only 201 Created as the success status for flag creation.
+	// Treat any other 2xx (including 200) as an unexpected response and
+	// surface it via apiError rather than silently accepting it.
+	if statusCode != http.StatusCreated {
 		return nil, c.apiError(fmt.Sprintf("creating LD flag %s", flag.Key), statusCode, respBody)
 	}
 
@@ -296,6 +293,13 @@ func (c *Client) ListEnvironments(ctx context.Context) ([]Environment, error) {
 		if parseErr != nil {
 			return nil, fmt.Errorf("parsing _links.next.href: %w", parseErr)
 		}
+		// Reject hrefs that point to a different host. The LD API only ever
+		// returns relative paths here; an absolute href to another host would
+		// be a server-side bug at best and an SSRF redirect at worst. Bound
+		// the next request to the same origin as apiBase regardless.
+		if ref.Host != "" && ref.Host != base.Host {
+			return nil, fmt.Errorf("rejecting _links.next.href host %q: does not match apiBase host %q", ref.Host, base.Host)
+		}
 		reqURL = base.ResolveReference(ref).String()
 	}
 }
@@ -314,33 +318,34 @@ func (c *Client) CreateEnvironment(ctx context.Context, env Environment) (*Envir
 		return nil, fmt.Errorf("building environments URL: %w", err)
 	}
 
-	for range envCreateRetries {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("creating create-environment request: %w", err)
-		}
-		c.setAuthHeaders(req)
-
-		respBody, statusCode, err := httputil.DoWithRetry(ctx, c.httpClient, req, body)
-		if err != nil {
-			return nil, err
-		}
-		switch statusCode {
-		case http.StatusCreated, http.StatusOK:
-			var created Environment
-			if jsonErr := json.Unmarshal(respBody, &created); jsonErr != nil {
-				return nil, fmt.Errorf("parsing create-environment response: %w (body: %s)", jsonErr, httputil.Truncate(string(respBody), 200))
-			}
-			return &created, nil
-		case http.StatusConflict:
-			return nil, ErrEnvironmentExists
-		case http.StatusForbidden, http.StatusUnauthorized:
-			return nil, ErrEnvironmentForbidden
-		default:
-			return nil, c.apiError(fmt.Sprintf("creating LD environment %s", env.Key), statusCode, respBody)
-		}
+	// Single attempt — httputil.DoWithRetry already handles transient 429/5xx
+	// retry internally with backoff. An outer retry loop here was dead code:
+	// every branch below returns immediately, so any iteration past the first
+	// is unreachable.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating create-environment request: %w", err)
 	}
-	return nil, fmt.Errorf("create environment %s exhausted retries", env.Key)
+	c.setAuthHeaders(req)
+
+	respBody, statusCode, err := httputil.DoWithRetry(ctx, c.httpClient, req, body)
+	if err != nil {
+		return nil, err
+	}
+	switch statusCode {
+	case http.StatusCreated, http.StatusOK:
+		var created Environment
+		if jsonErr := json.Unmarshal(respBody, &created); jsonErr != nil {
+			return nil, fmt.Errorf("parsing create-environment response: %w (body: %s)", jsonErr, httputil.Truncate(string(respBody), 200))
+		}
+		return &created, nil
+	case http.StatusConflict:
+		return nil, ErrEnvironmentExists
+	case http.StatusForbidden, http.StatusUnauthorized:
+		return nil, ErrEnvironmentForbidden
+	default:
+		return nil, c.apiError(fmt.Sprintf("creating LD environment %s", env.Key), statusCode, respBody)
+	}
 }
 
 // setAuthHeaders applies the LD API auth + content-type headers.
