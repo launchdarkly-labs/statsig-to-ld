@@ -164,9 +164,12 @@ func TestRealResponse_DynamicConfigListConvertsToFlags(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	flags, _ := flag.NewFlagsFromDynamicConfigs(wrap.Data, "imported-from-statsig", "")
+	flags, failed := flag.NewFlagsFromDynamicConfigs(wrap.Data, "imported-from-statsig", "")
+	if len(failed) != 0 {
+		t.Errorf("unexpected failed conversions: %v", failed)
+	}
 	if len(flags) != 2 {
-		t.Fatalf("got %d flags", len(flags))
+		t.Fatalf("got %d flags, want 2 (failed=%v)", len(flags), failed)
 	}
 
 	checkoutFlag := flags[0]
@@ -190,7 +193,10 @@ func TestRealResponse_DynamicConfigListConvertsToFlags(t *testing.T) {
 			len(toggleFlag.Variations), toggleFlag.Variations)
 	}
 	// Wrapped scalar default serializes as {"value":"fallback-string"}.
-	defaultJSON, _ := json.Marshal(toggleFlag.Variations[0].Value)
+	defaultJSON, err := json.Marshal(toggleFlag.Variations[0].Value)
+	if err != nil {
+		t.Fatalf("marshal wrapped default: %v", err)
+	}
 	if string(defaultJSON) != `{"value":"fallback-string"}` {
 		t.Errorf("toggle wrapped default = %s, want %s", defaultJSON, `{"value":"fallback-string"}`)
 	}
@@ -226,7 +232,12 @@ func TestRealResponse_VariationValueRoundTripsAsRawJSON(t *testing.T) {
 
 func TestRealResponse_GateWithTargeting(t *testing.T) {
 	var wrap gateListWrapper
-	_ = json.Unmarshal([]byte(realStatsigGateResponse), &wrap)
+	if err := json.Unmarshal([]byte(realStatsigGateResponse), &wrap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(wrap.Data) == 0 {
+		t.Fatal("fixture parsed but Data is empty")
+	}
 	gate := wrap.Data[0] // checkout_new_flow
 
 	r := newFakeReconciler(map[string]string{
