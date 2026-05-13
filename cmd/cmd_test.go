@@ -43,6 +43,36 @@ func TestConvertCmd_FlagsBound(t *testing.T) {
 	}
 }
 
+// TestAnalyzeCmdResolves verifies `statsig-to-ld analyze` is wired in
+// as a top-level command.
+func TestAnalyzeCmdResolves(t *testing.T) {
+	c, _, err := rootCmd.Find([]string{"analyze"})
+	if err != nil {
+		t.Fatalf("rootCmd.Find([\"analyze\"]) failed: %v", err)
+	}
+	if c.Name() != "analyze" {
+		t.Errorf("resolved command name = %q, want %q", c.Name(), "analyze")
+	}
+	if c.Parent() == nil || c.Parent().Name() != "statsig-to-ld" {
+		t.Errorf("parent = %v, want root", c.Parent())
+	}
+}
+
+// TestAnalyzeCmd_FlagsBound verifies every user-facing flag is registered
+// on analyzeCmd.
+func TestAnalyzeCmd_FlagsBound(t *testing.T) {
+	expected := []string{
+		"statsig-key", "statsig-url",
+		"ld-key", "ld-url", "ld-project",
+		"output", "include-tag",
+	}
+	for _, name := range expected {
+		if analyzeCmd.Flags().Lookup(name) == nil {
+			t.Errorf("flag --%s not registered on `analyze`", name)
+		}
+	}
+}
+
 // TestHelp_AllLevels verifies --help renders without error at every
 // level of the command tree. Smoke-tests the wiring end-to-end.
 func TestHelp_AllLevels(t *testing.T) {
@@ -50,6 +80,7 @@ func TestHelp_AllLevels(t *testing.T) {
 		{"--help"},
 		{"metrics", "--help"},
 		{"metrics", "convert", "--help"},
+		{"analyze", "--help"},
 	}
 	for _, args := range levels {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
