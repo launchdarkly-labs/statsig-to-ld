@@ -1,4 +1,4 @@
-module github.com/launchdarkly-labs/statsig-metric-importer-cli
+module github.com/launchdarkly-labs/statsig-to-ld
 
 go 1.25.0
 

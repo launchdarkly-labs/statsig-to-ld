@@ -5,7 +5,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/cmd"
+	"github.com/launchdarkly-labs/statsig-to-ld/cmd"
 )
 
 func main() {

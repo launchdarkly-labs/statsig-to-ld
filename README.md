@@ -1,6 +1,14 @@
-# Statsig Metric Importer CLI
+# statsig-to-ld
 
-Converts Statsig metric definitions into LaunchDarkly metrics. Supports both Statsig Cloud and Warehouse Native metrics, with idempotent re-runs, parallel processing, and structured migration reports.
+A CLI for migrating from Statsig to LaunchDarkly.
+
+## Subcommands
+
+| Subcommand | What it does |
+|---|---|
+| `metrics convert` | Convert Statsig metric definitions to LaunchDarkly metrics. Supports both Statsig Cloud and Warehouse Native metrics, with idempotent re-runs, parallel processing, and structured migration reports. |
+
+Additional subcommands (`flags import`, `targeting import`) are planned. See the design notes for scope.
 
 ## Prerequisites
 
@@ -13,16 +21,16 @@ Converts Statsig metric definitions into LaunchDarkly metrics. Supports both Sta
 ### From source
 
 ```bash
-go build -o statsig-metric-importer .
+go build -o statsig-to-ld .
 
 # With version stamped into the binary
-go build -ldflags "-X github.com/launchdarkly-labs/statsig-metric-importer-cli/cmd.version=1.0.0" \
-  -o statsig-metric-importer .
+go build -ldflags "-X github.com/launchdarkly-labs/statsig-to-ld/cmd.version=1.0.0" \
+  -o statsig-to-ld .
 ```
 
 ### Pre-built binaries
 
-Download from the [Releases](https://github.com/launchdarkly-labs/statsig-metric-importer-cli/releases) page.
+Download from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page.
 
 ## API Key Security
 
@@ -35,7 +43,7 @@ API keys can be provided in three ways (in order of precedence):
 **Recommended: let the tool prompt you.** Just run the command without any key flags â€” you'll be prompted to enter each key with input hidden:
 
 ```bash
-./statsig-metric-importer convert --all --dry-run
+./statsig-to-ld metrics convert --all --dry-run
 # Enter Statsig Console API key (console-xxx): <hidden input>
 ```
 
@@ -57,13 +65,13 @@ export STATSIG_CONSOLE_KEY=console-YOUR_KEY
 export LD_API_KEY=api-YOUR_KEY
 
 # 2. Preview what will happen (no metrics created)
-./statsig-metric-importer convert --all --dry-run
+./statsig-to-ld metrics convert --all --dry-run
 
 # 3. Review the migration report
 cat migration-report.json | jq '.metrics[] | select(.warnings | length > 0)'
 
 # 4. Run the actual migration
-./statsig-metric-importer convert --all --ld-project my-project
+./statsig-to-ld metrics convert --all --ld-project my-project
 ```
 
 ## Usage
@@ -71,36 +79,36 @@ cat migration-report.json | jq '.metrics[] | select(.warnings | length > 0)'
 ### Preview all metrics (dry run)
 
 ```bash
-./statsig-metric-importer convert --all --dry-run
+./statsig-to-ld metrics convert --all --dry-run
 ```
 
 ### Convert a single metric
 
 ```bash
-./statsig-metric-importer convert --metric purchase_revenue \
+./statsig-to-ld metrics convert --metric purchase_revenue \
   --ld-project my-project
 ```
 
 ### Bulk convert all metrics
 
 ```bash
-./statsig-metric-importer convert --all --ld-project my-project
+./statsig-to-ld metrics convert --all --ld-project my-project
 ```
 
 ### Filter by type or tag
 
 ```bash
 # Only convert sum and mean metrics
-./statsig-metric-importer convert --all --include-types sum,mean --ld-project my-project
+./statsig-to-ld metrics convert --all --include-types sum,mean --ld-project my-project
 
 # Only convert metrics tagged "p0"
-./statsig-metric-importer convert --all --include-tags p0 --ld-project my-project
+./statsig-to-ld metrics convert --all --include-tags p0 --ld-project my-project
 ```
 
 ### Set a default unit for numeric metrics
 
 ```bash
-./statsig-metric-importer convert --all --default-unit "$" --ld-project my-project
+./statsig-to-ld metrics convert --all --default-unit "$" --ld-project my-project
 ```
 
 Without `--default-unit`, numeric metrics get `unit: "units"` (a generic placeholder). Pass `--default-unit` to set a meaningful label like `$`, `ms`, or `count` at conversion time, or update the unit in the LD UI later.
@@ -108,18 +116,18 @@ Without `--default-unit`, numeric metrics get `unit: "units"` (a generic placeho
 ### CSV output
 
 ```bash
-./statsig-metric-importer convert --all --format csv --ld-project my-project
+./statsig-to-ld metrics convert --all --format csv --ld-project my-project
 ```
 
 ### With Warehouse Native data source
 
 ```bash
 # Single data source for all WH Native metrics
-./statsig-metric-importer convert --all --ld-project my-project \
+./statsig-to-ld metrics convert --all --ld-project my-project \
   --ld-data-source snowflake-ds
 
 # Multiple data sources via mapping file
-./statsig-metric-importer convert --all --ld-project my-project \
+./statsig-to-ld metrics convert --all --ld-project my-project \
   --source-mapping sources.json
 ```
 
@@ -137,7 +145,7 @@ Where `sources.json` maps Statsig source names to LD data source keys:
 If your Statsig project uses unit types beyond `userID` (e.g. `companyID`, `teamID`), map them to your LD context kinds:
 
 ```bash
-./statsig-metric-importer convert --all --ld-project my-project \
+./statsig-to-ld metrics convert --all --ld-project my-project \
   --unit-type-mapping unit-types.json
 ```
 
@@ -155,7 +163,7 @@ Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` â
 ### EU / FedRAMP instances
 
 ```bash
-./statsig-metric-importer convert --all --ld-project my-project \
+./statsig-to-ld metrics convert --all --ld-project my-project \
   --ld-url https://app.eu.launchdarkly.com
 ```
 
@@ -264,7 +272,7 @@ The tool supports incremental migration strategies:
 
 ## Releasing a New Version (Contributors)
 
-Releases are driven by Git tags. Pushing a `v*` tag triggers the CI workflow to cross-compile binaries for macOS, Linux, and Windows, then publish them to the [Releases page](https://github.com/launchdarkly-labs/statsig-metric-importer-cli/releases) automatically. Release notes are generated from commits since the previous tag.
+Releases are driven by Git tags. Pushing a `v*` tag triggers the CI workflow to cross-compile binaries for macOS, Linux, and Windows, then publish them to the [Releases page](https://github.com/launchdarkly-labs/statsig-to-ld/releases) automatically. Release notes are generated from commits since the previous tag.
 
 ```bash
 git tag v1.2.3

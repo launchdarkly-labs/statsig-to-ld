@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/statsig"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 )
 
 func TestSanitizeKey(t *testing.T) {
