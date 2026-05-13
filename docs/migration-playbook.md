@@ -37,7 +37,7 @@ if (ldClient.boolVariation('show_banner', ldUser, false)) { ... }
    - `statsig.checkGate(name, user)` → `ldClient.boolVariation(name, ctx, false)`
    - `statsig.getConfig(name, user).get(key, default)` → `ldClient.jsonVariation(name, ctx, default)` (then read the key)
    - `statsig.getExperiment(name, user)` → use an LD flag for the experiment variant
-4. **Validate** by running both SDKs in parallel for a period — see [§7](#7-validation-strategy).
+4. **Validate** by running both SDKs in parallel for a period — see [Validation strategy](#validation-strategy).
 5. **Cut over reads** to LD once parity is confirmed.
 6. **Remove the Statsig SDK** once you're confident.
 
@@ -99,12 +99,12 @@ A reasonable order for a real migration. Adjust to your team's tolerance for par
 6. **`statsig-to-ld targeting import --dry-run`** — preview the targeting application. Review the report for `skipped_lossy` entries.
 7. **`statsig-to-ld targeting import`** — apply the targeting. Strict by default; opt in via `--accept-data-loss=...` if needed. Flags now have the same targeting as Statsig, but your app still reads Statsig.
 8. **Add the LaunchDarkly SDK alongside Statsig** — initialize it but don't read from it yet.
-9. **Validate** — see [§7](#7-validation-strategy).
+9. **Validate** — see [Validation strategy](#validation-strategy).
 10. **Cut over reads** — flip your application to read from LD instead of Statsig. Keep Statsig writes in case of rollback.
 11. **Soak** — let LD serve production for an agreed period.
 12. **Remove the Statsig SDK** — once you're confident the migration is stable.
 
-## 7. Validation strategy
+## Validation strategy
 
 The high-stakes step is cutting over reads. The strategy that's easiest to get right is **shadow evaluation**:
 
@@ -130,7 +130,7 @@ function checkGate(name, user) {
 
 Acceptable divergence rate is your call. Some teams accept 0%; others accept up to 1% for the long tail of weird contexts (deleted users, bot traffic, etc.).
 
-## 8. Rollback strategy
+## Rollback strategy
 
 The good news: Statsig is read-only from LaunchDarkly's perspective. The CLI only writes to LD. Until you actually cut application reads over to LD, **rolling back is free** — just don't deploy the SDK switch, or revert the deploy that did.
 
