@@ -100,7 +100,7 @@ func init() {
 	flagsImportCmd.Flags().StringVar(&flagFIStatsigURL, "statsig-url", "", "Statsig API base URL override")
 	flagsImportCmd.Flags().StringVar(&flagFILDKey, "ld-key", "", "LaunchDarkly API access token (api-xxx)")
 	flagsImportCmd.Flags().StringVar(&flagFILDURL, "ld-url", "", "LaunchDarkly API base URL override")
-	flagsImportCmd.Flags().StringVar(&flagFILDProject, "ld-project", "", "LaunchDarkly project key (required unless --dry-run)")
+	flagsImportCmd.Flags().StringVar(&flagFILDProject, "ld-project", "", "LaunchDarkly project key (required — even for --dry-run, since the dry-run reads existing LD flags for dedupe)")
 
 	flagsImportCmd.Flags().StringVar(&flagFIOutput, "output", "flag-import-report.json", "Path for the migration report output")
 	flagsImportCmd.Flags().StringVar(&flagFIFormat, "format", "json", "Report format: json or csv")
