@@ -92,6 +92,43 @@ func TestListGates_Pagination(t *testing.T) {
 	}
 }
 
+// TestListGates_Pagination_ExactlyFullLastPage covers the edge case the
+// previous pagination test missed: a final page with exactly pageSize items
+// AND NextPage="". The OR-termination must trigger on the empty NextPage
+// alone, not require len<pageSize. Without this case, a project whose total
+// gate count is a multiple of pageSize would hang on a phantom page-2.
+func TestListGates_Pagination_ExactlyFullLastPage(t *testing.T) {
+	full := make([]Gate, 100)
+	for i := range full {
+		full[i] = Gate{ID: fmt.Sprintf("gate_%d", i)}
+	}
+
+	var pageHits []string
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pageHits = append(pageHits, page)
+		if page != "1" {
+			t.Errorf("expected only page 1 to be fetched; got %q", page)
+		}
+		// Full page of items AND no next-page cursor.
+		_ = json.NewEncoder(w).Encode(gatesListResponse{
+			Data:       full,
+			Pagination: pagination{NextPage: ""},
+		})
+	})
+
+	got, err := client.ListGates(context.Background())
+	if err != nil {
+		t.Fatalf("ListGates: %v", err)
+	}
+	if len(got) != 100 {
+		t.Errorf("got %d gates, want 100", len(got))
+	}
+	if len(pageHits) != 1 {
+		t.Errorf("expected exactly 1 page request (NextPage='' should terminate); got pages %v", pageHits)
+	}
+}
+
 func TestListGates_HTTPError(t *testing.T) {
 	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)

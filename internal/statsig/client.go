@@ -320,8 +320,14 @@ func (c *Client) makeUnpagedGetRequest(ctx context.Context, reqURL string) ([]by
 // headers used by the gate / DC / env / override endpoints. The legacy metric
 // path uses fetchMetricsPage and intentionally does not send the version pin
 // to preserve existing behavior.
+//
+// Note: req.Close is intentionally NOT set — leaving it false lets net/http
+// reuse the TCP connection across paged list calls (ListGates,
+// ListDynamicConfigs), which is much cheaper than a fresh handshake per page
+// for projects with hundreds of gates. The goaltender lambda set req.Close
+// because of an unrelated EOF bug under its environment; we don't observe
+// that here and prefer keep-alive.
 func (c *Client) setStatsigHeaders(req *http.Request) {
-	req.Close = true
 	req.Header.Set("STATSIG-API-KEY", c.apiKey)
 	req.Header.Set("STATSIG-API-VERSION", apiVersion)
 	req.Header.Set("Content-Type", "application/json")

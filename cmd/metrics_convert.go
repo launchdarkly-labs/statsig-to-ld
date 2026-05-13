@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -417,10 +418,46 @@ func writeReport(rpt *report.Report) error {
 		}
 	}
 
-	if err := os.WriteFile(flagOutput, data, 0600); err != nil {
+	// Atomic write: write to a temp file in the same directory and rename
+	// into place. Prevents readers from seeing a half-written report if the
+	// process is killed mid-write — important when the report is the only
+	// record of what was created in LaunchDarkly.
+	if err := atomicWriteFile(flagOutput, data, 0600); err != nil {
 		return fmt.Errorf("writing report to %s: %w", flagOutput, err)
 	}
 
+	return nil
+}
+
+// atomicWriteFile writes data to path via a sibling temp file and a rename,
+// so concurrent readers and crash-during-write don't observe a truncated file.
+// The temp file is removed on any error path before rename.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-"+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return err
+	}
 	return nil
 }
 
