@@ -267,9 +267,21 @@ git push origin v0.2.0
 
 Release notes are generated from commits since the previous tag.
 
+## Using with AI coding agents
+
+This repo ships a single, agent-agnostic operator guide at [`AGENTS.md`](AGENTS.md) covering build, API-key handling, the recommended migration sequence, per-subcommand usage, report analysis, and troubleshooting. Any agent (Claude Code, Codex, Cursor, etc.) should treat it as authoritative.
+
+For Claude Code users, two thin wrappers point at the same guide:
+
+- [`.claude/skills/statsig-to-ld/SKILL.md`](.claude/skills/statsig-to-ld/SKILL.md) — auto-loads the guide into the active session when the conversation matches (e.g. "migrate our Statsig flags", "run the targeting import").
+- [`.claude/agents/statsig-to-ld.md`](.claude/agents/statsig-to-ld.md) — invocable subagent for delegating an end-to-end migration to a separate context.
+
+Both files `@`-import `AGENTS.md`, so there's a single source of truth.
+
 ## See also
 
 - [`docs/migration-playbook.md`](docs/migration-playbook.md) — what this tool **doesn't** do (SDK rewrites, layers, experiments, holdouts, segment recreation, cutover, rollback)
+- [`AGENTS.md`](AGENTS.md) — operator guide for AI agents driving the CLI
 - [`CHANGELOG.md`](CHANGELOG.md)
 - [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - [`SECURITY.md`](SECURITY.md)
