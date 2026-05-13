@@ -423,10 +423,13 @@ func (e *migrationEngine) phase2WarehouseSetup() error {
 	return nil
 }
 
-// checkDataExportExists checks all destinations for the environment and logs the result.
-// Returns true if a destination already exists (no user action needed).
+// checkDataExportExists checks if a data export destination exists for the environment.
+// It first checks via ListDestinations, then does a lightweight probe via the setup
+// endpoint (which returns "already exists" when a destination is configured).
 func (e *migrationEngine) checkDataExportExists(whType string) bool {
 	output.Info("Checking data export destination...")
+
+	// Try listing first
 	dests := e.ld.ListDestinations(e.ctx)
 	if len(dests) > 0 {
 		kind := jsonutil.GetStr(dests[0], "kind")
@@ -436,6 +439,29 @@ func (e *migrationEngine) checkDataExportExists(whType string) bool {
 		output.Ok(fmt.Sprintf("Data export destination exists (%s), skipping", kind))
 		return true
 	}
+
+	// ListDestinations can return empty even when a destination exists.
+	// Probe the setup endpoint with the known host — if it returns "already exists",
+	// the destination is there.
+	if whType != "" {
+		exportKind := warehouse.DataExportTypes[whType]
+		if exportKind != "" {
+			host := e.whPrefilled["snowflake_host"]
+			if host != "" && !strings.HasPrefix(host, "http") {
+				host = "https://" + host
+			}
+			if host != "" {
+				_, err := e.ld.GenerateDataExportSetup(e.ctx, exportKind, map[string]any{
+					"snowflakeHostAddress": host,
+				})
+				if err != nil && strings.Contains(err.Error(), "already exists") {
+					output.Ok("Data export destination exists, skipping")
+					return true
+				}
+			}
+		}
+	}
+
 	return false
 }
 
