@@ -87,7 +87,7 @@ func init() {
 	targetingImportCmd.Flags().BoolVar(&flagTIDryRun, "dry-run", false, "Build the patch ops without sending them to LaunchDarkly")
 	targetingImportCmd.Flags().StringVar(&flagTIImportType, "import-type", importTypeBoth, "What source to read: gates | dynamic-configs | both")
 	targetingImportCmd.Flags().StringVar(&flagTIIncludeTag, "include-tag", "", "Only consider Statsig sources with this tag (single value)")
-	targetingImportCmd.Flags().StringVar(&flagTILDTag, "ld-tag", defaultLDImportTag, "LD tag identifying flags previously created by `flags import`")
+	targetingImportCmd.Flags().StringVar(&flagTILDTag, "ld-tag", defaultLDImportTag, "LD tag identifying flags previously created by 'flags import'")
 	targetingImportCmd.Flags().StringVar(&flagTIAcceptDataLoss, "accept-data-loss", "",
 		"Opt in to importing flags whose targeting will lose information. Use \"all\" to accept everything, or a comma-separated list: segments, prerequisites, custom_unit_id, unreachable_rules, multi_variant_overrides")
 	targetingImportCmd.Flags().BoolVar(&flagTINoCreateEnvs, "no-create-envs", false, "Do not auto-create missing LD environments; mark them unreachable instead")
@@ -96,7 +96,7 @@ func init() {
 	targetingImportCmd.Flags().StringVar(&flagTIStatsigURL, "statsig-url", "", "Statsig API base URL override")
 	targetingImportCmd.Flags().StringVar(&flagTILDKey, "ld-key", "", "LaunchDarkly API access token (api-xxx)")
 	targetingImportCmd.Flags().StringVar(&flagTILDURL, "ld-url", "", "LaunchDarkly API base URL override")
-	targetingImportCmd.Flags().StringVar(&flagTILDProject, "ld-project", "", "LaunchDarkly project key (required unless --dry-run)")
+	targetingImportCmd.Flags().StringVar(&flagTILDProject, "ld-project", "", "LaunchDarkly project key (required — even for --dry-run, since the dry-run reads existing LD flags + environments)")
 
 	targetingImportCmd.Flags().StringVar(&flagTIOutput, "output", "targeting-import-report.json", "Path for the migration report")
 	targetingImportCmd.Flags().StringVar(&flagTIFormat, "format", "json", "Report format: json or csv")
