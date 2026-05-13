@@ -2,6 +2,8 @@ package targeting
 
 import (
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
@@ -27,8 +29,8 @@ func TestConvertCondition_SegmentDropped(t *testing.T) {
 	if !got.drop {
 		t.Error("passes_segment should drop the rule")
 	}
-	if got.note == nil || got.note.Severity != "warning" {
-		t.Errorf("expected warning note; got %+v", got.note)
+	if len(got.notes) == 0 || got.notes[0].Severity != "warning" {
+		t.Errorf("expected warning note; got %+v", got.notes)
 	}
 }
 
@@ -78,8 +80,8 @@ func TestConvertCondition_VersionGteEmitsApproximationNote(t *testing.T) {
 	if got.clause.Op != "semVerGreaterThan" {
 		t.Errorf("Op = %q, want semVerGreaterThan", got.clause.Op)
 	}
-	if got.note == nil || got.note.Severity != "info" {
-		t.Errorf("expected info note about approximation; got %+v", got.note)
+	if len(got.notes) == 0 || got.notes[0].Severity != "info" {
+		t.Errorf("expected info note about approximation; got %+v", got.notes)
 	}
 }
 
@@ -88,8 +90,44 @@ func TestConvertCondition_CustomUnitIDEmitsInfoNote(t *testing.T) {
 	if got.drop || got.clause == nil {
 		t.Fatalf("unit_id custom should still produce a clause (mapped to user)")
 	}
-	if got.note == nil || got.note.Severity != "info" {
-		t.Errorf("expected info note about unit_id mapping; got %+v", got.note)
+	if len(got.notes) == 0 || got.notes[0].Severity != "info" {
+		t.Errorf("expected info note about unit_id mapping; got %+v", got.notes)
+	}
+}
+
+// TestConvertCondition_ApproximationAndCustomUnitIDBothEmit asserts the
+// regression for the Looking Glass review (PR #14): a condition that triggers
+// BOTH the approximation path AND the custom-unit_id path must emit BOTH
+// info notes. The prior implementation overwrote the approximation note
+// with the unit_id note via a single-Note field.
+func TestConvertCondition_ApproximationAndCustomUnitIDBothEmit(t *testing.T) {
+	got := convertCondition(statsig.Condition{
+		Type:        "unit_id",
+		Operator:    "version_gte", // approximated → emits one note
+		CustomID:    "companyID",   // custom unit → emits another note
+		TargetValue: "5.0",
+	}, "f", "r")
+	if got.drop || got.clause == nil {
+		t.Fatalf("expected clause; got drop=%v", got.drop)
+	}
+	if len(got.notes) != 2 {
+		t.Fatalf("expected 2 notes (approximation + unit_id remap); got %d: %+v", len(got.notes), got.notes)
+	}
+	foundApprox := false
+	foundUnit := false
+	for _, n := range got.notes {
+		if n.Severity != "info" {
+			t.Errorf("expected info severity; got %q", n.Severity)
+		}
+		switch {
+		case strings.Contains(n.Message, "approximated"):
+			foundApprox = true
+		case strings.Contains(n.Message, "unit ID"):
+			foundUnit = true
+		}
+	}
+	if !foundApprox || !foundUnit {
+		t.Errorf("missing one of the two notes; foundApprox=%v foundUnit=%v notes=%+v", foundApprox, foundUnit, got.notes)
 	}
 }
 
@@ -364,6 +402,10 @@ func newFakeReconciler(envMap map[string]string) *EnvReconciler {
 	for k := range keys {
 		r.allLDKeys = append(r.allLDKeys, k)
 	}
+	// Production Reconcile.Reconcile sorts allLDKeys; mirror that here so the
+	// fake matches the deterministic env-iteration contract callers (and
+	// tests) depend on.
+	sort.Strings(r.allLDKeys)
 	return r
 }
 

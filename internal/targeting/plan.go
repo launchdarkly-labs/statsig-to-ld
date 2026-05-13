@@ -157,19 +157,24 @@ func (p *Plan) Apply(ctx context.Context, ld ldPatchClient, flags []launchdarkly
 		for _, k := range envKeys {
 			allOps = append(allOps, BuildEnvPatchOps(k, settingsByEnv[k])...)
 		}
-		if len(allOps) == 0 {
+
+		// In dry-run mode, report SkippedDryRun regardless of whether allOps
+		// is empty — the user explicitly asked for "don't apply anything," so
+		// reporting Applied for an empty-ops flag is misleading even though
+		// technically nothing would have changed.
+		if dryRun {
 			results = append(results, ApplyResult{
 				FlagKey: f.Key,
-				Status:  StatusApplied,
+				Status:  StatusSkippedDryRun,
 				Notes:   notes,
 			})
 			continue
 		}
 
-		if dryRun {
+		if len(allOps) == 0 {
 			results = append(results, ApplyResult{
 				FlagKey: f.Key,
-				Status:  StatusSkippedDryRun,
+				Status:  StatusApplied,
 				Notes:   notes,
 			})
 			continue

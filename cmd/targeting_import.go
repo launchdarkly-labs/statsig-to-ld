@@ -145,21 +145,26 @@ func runTargetingImport(cmd *cobra.Command, args []string) error {
 		return errors.New(`Statsig key should start with "console-"`)
 	}
 
-	if flagTILDKey == "" && !flagTIDryRun {
+	// LD credentials are required even in --dry-run mode: we still need to
+	// read existing LD flags (for matching) and existing LD environments
+	// (for env reconciliation) before building the patch ops we'd otherwise
+	// send. Without these reads, "dry-run" couldn't produce a meaningful
+	// plan.
+	if flagTILDKey == "" {
 		k, err := promptForKey("LaunchDarkly API access token (api-xxx)")
 		if err != nil {
 			return fmt.Errorf("reading LD key: %w", err)
 		}
 		flagTILDKey = k
 	}
-	if flagTILDKey == "" && !flagTIDryRun {
-		return errors.New("LD API access token is required")
+	if flagTILDKey == "" {
+		return errors.New("LD API access token is required (set LD_API_KEY env, use --ld-key, or enter at prompt — required even for --dry-run)")
 	}
-	if flagTILDKey != "" && !strings.HasPrefix(flagTILDKey, "api-") {
+	if !strings.HasPrefix(flagTILDKey, "api-") {
 		return errors.New(`LD key should start with "api-"`)
 	}
-	if flagTILDProject == "" && !flagTIDryRun {
-		return errors.New("--ld-project is required")
+	if flagTILDProject == "" {
+		return errors.New("--ld-project is required (even for --dry-run, since the dry-run reads existing LD flags and environments)")
 	}
 
 	flagTIStatsigURL = strings.TrimRight(flagTIStatsigURL, "/")
@@ -170,17 +175,7 @@ func runTargetingImport(cmd *cobra.Command, args []string) error {
 
 	ctx := cmd.Context()
 	sg := statsig.NewClient(flagTIStatsigKey, flagTIStatsigURL)
-	var ld *launchdarkly.Client
-	if !flagTIDryRun {
-		ld = launchdarkly.NewClient(flagTILDKey, flagTILDProject, flagTILDURL)
-	} else {
-		// We still need an LD client for ListEnvironments + ListAllFlags during
-		// dry-run, but only if a key is present. Without a key, those calls
-		// will be skipped and the planner will run with an empty LD env list.
-		if flagTILDKey != "" && flagTILDProject != "" {
-			ld = launchdarkly.NewClient(flagTILDKey, flagTILDProject, flagTILDURL)
-		}
-	}
+	ld := launchdarkly.NewClient(flagTILDKey, flagTILDProject, flagTILDURL)
 
 	rpt := report.NewTargetingReport()
 
@@ -225,10 +220,7 @@ func runTargetingImport(cmd *cobra.Command, args []string) error {
 		log.Printf("D8: %d source(s) skipped due to lossy targeting. Re-run with --accept-data-loss to include them.", n)
 	}
 
-	// 3. Build plan
-	if ld == nil {
-		return errors.New("an LD client is required for env reconciliation (provide --ld-key + --ld-project, even with --dry-run)")
-	}
+	// 3. Build plan (ld is guaranteed non-nil by the credential check above)
 	plan, err := targeting.BuildPlan(ctx, sg, ld, targeting.PlanInputs{
 		Gates:          gatesAccepted,
 		DynamicConfigs: dcsAccepted,
@@ -289,7 +281,11 @@ func runTargetingImport(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr)
 	}
 
-	rpt.Finalize(len(ldFlags))
+	// FlagsConsidered must include sources that were D8-refused before plan
+	// build — they're already in rpt.Flags as `skipped_lossy` entries but
+	// aren't in ldFlags. Without this sum the summary table would understate
+	// what was processed.
+	rpt.Finalize(len(ldFlags) + len(gatesRefused) + len(dcsRefused))
 
 	if err := writeTargetingReport(rpt); err != nil {
 		return err

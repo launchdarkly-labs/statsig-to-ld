@@ -172,12 +172,15 @@ type conditionResult struct {
 	clause   *Clause // nil for public conditions
 	isPublic bool
 	drop     bool
-	note     *Note
+	// notes accumulates *all* observations attached to this condition. A
+	// single condition can produce both an approximation warning AND a
+	// unit_id remap notice (e.g. `version_gte` on a `unit_id` field with
+	// CustomID="companyID"); both must reach the report.
+	notes []Note
 }
 
 func dropWithWarning(flagKey, format string, args ...any) conditionResult {
-	n := newWarning(flagKey, format, args...)
-	return conditionResult{drop: true, note: &n}
+	return conditionResult{drop: true, notes: []Note{newWarning(flagKey, format, args...)}}
 }
 
 // convertCondition maps a single Statsig condition to an LD clause.
@@ -222,17 +225,15 @@ func convertCondition(c statsig.Condition, flagKey, ruleName string) conditionRe
 	}
 
 	if opMap.approximation != "" {
-		n := newInfo(flagKey,
+		result.notes = append(result.notes, newInfo(flagKey,
 			"Rule %q: operator %q approximated: %s. Manual review recommended.",
-			ruleName, c.Operator, opMap.approximation)
-		result.note = &n
+			ruleName, c.Operator, opMap.approximation))
 	}
 
 	if c.Type == "unit_id" && c.CustomID != "" && c.CustomID != "userID" {
-		n := newInfo(flagKey,
+		result.notes = append(result.notes, newInfo(flagKey,
 			"Rule %q used Statsig unit ID %q which was mapped to the 'user' context. Re-map in LaunchDarkly if needed.",
-			ruleName, c.CustomID)
-		result.note = &n
+			ruleName, c.CustomID))
 	}
 
 	return result
@@ -417,6 +418,13 @@ func dcRolloutFromRule(
 			weighted = append(weighted, WeightedVariation{Variation: idx, Weight: w})
 			usedWeight += w
 		}
+		if usedWeight > 100000 {
+			// Variant pass-percentages summed to more than 100% — a malformed
+			// Statsig config (each variant pp is meant to be a share of total
+			// traffic). Refuse rather than emit a rollout with a negative
+			// remainder weight, which LD would reject anyway.
+			return skipNote("Rule %q skipped: variant pass-percentages sum to %.2f%% (>100%%); refusing to emit invalid rollout.", rule.Name, float64(usedWeight)/1000)
+		}
 		if usedWeight < 100000 {
 			defIdx, ok := variantNameToIndex[statsigDefaultVariantName]
 			if !ok {
@@ -434,9 +442,7 @@ func dcRolloutFromRule(
 func buildClauses(conditions []statsig.Condition, flagKey, ruleName string) (clauses []Clause, hasPublic bool, drop bool, notes []Note) {
 	for _, c := range conditions {
 		r := convertCondition(c, flagKey, ruleName)
-		if r.note != nil {
-			notes = append(notes, *r.note)
-		}
+		notes = append(notes, r.notes...)
 		if r.drop {
 			return nil, false, true, notes
 		}
@@ -718,7 +724,31 @@ func buildEnvSettings(
 
 		settingsByEnv[ldEnvKey] = settings
 	}
-	return settingsByEnv, notes
+	// Dedupe notes. Override conversion + unreachable-rule detection run
+	// inside the per-env loop, so env-invariant observations (e.g. a unit_id
+	// mapping note on a global override) would otherwise appear once per
+	// reachable env. Env-specific notes (the "N rule(s) in env %q were
+	// unreachable…" message embeds the env key) remain distinct after dedupe
+	// because their text differs.
+	return settingsByEnv, dedupeNotes(notes)
+}
+
+// dedupeNotes removes duplicate (severity, flagKey, message) entries while
+// preserving order of first occurrence.
+func dedupeNotes(in []Note) []Note {
+	if len(in) <= 1 {
+		return in
+	}
+	seen := make(map[Note]struct{}, len(in))
+	out := make([]Note, 0, len(in))
+	for _, n := range in {
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
 }
 
 func intPtr(i int) *int { return &i }
