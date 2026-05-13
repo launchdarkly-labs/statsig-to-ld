@@ -269,14 +269,19 @@ Release notes are generated from commits since the previous tag.
 
 ## Using with AI coding agents
 
-This repo ships a single, agent-agnostic operator guide at [`AGENTS.md`](AGENTS.md) covering build, API-key handling, the recommended migration sequence, per-subcommand usage, report analysis, and troubleshooting. Any agent (Claude Code, Codex, Cursor, etc.) should treat it as authoritative.
+This repo ships a single, agent-agnostic operator guide at [`AGENTS.md`](AGENTS.md) covering build, API-key handling, the recommended migration sequence, per-subcommand usage, report analysis, and troubleshooting. Treat it as authoritative.
 
-For Claude Code users, two thin wrappers point at the same guide:
+Agent-specific shims point back at the same guide so each agent's native discovery surface works without duplicating content:
 
-- [`.claude/skills/statsig-to-ld/SKILL.md`](.claude/skills/statsig-to-ld/SKILL.md) — auto-loads the guide into the active session when the conversation matches (e.g. "migrate our Statsig flags", "run the targeting import").
-- [`.claude/agents/statsig-to-ld.md`](.claude/agents/statsig-to-ld.md) — invocable subagent for delegating an end-to-end migration to a separate context.
+| Agent | File | How it loads |
+|---|---|---|
+| **Any** (Codex, recent Cursor, Sourcegraph, manual reference) | [`AGENTS.md`](AGENTS.md) | The `AGENTS.md` convention — auto-loaded by agents that support it; point any other agent at it manually. |
+| **Cursor** | [`.cursor/rules/statsig-to-ld.mdc`](.cursor/rules/statsig-to-ld.mdc) | Auto-attaches when the conversation matches the rule's description (Statsig→LD migration topics). |
+| **GitHub Copilot** | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) | Auto-loaded into every Copilot Chat session in this repo. |
+| **Claude Code** (skill) | [`.claude/skills/statsig-to-ld/SKILL.md`](.claude/skills/statsig-to-ld/SKILL.md) | Auto-loads on trigger phrases (subcommand names, API-key env vars, report filenames). |
+| **Claude Code** (subagent) | [`.claude/agents/statsig-to-ld.md`](.claude/agents/statsig-to-ld.md) | Invoke via the Task tool for a delegated end-to-end migration in a separate context. |
 
-Both files `@`-import `AGENTS.md`, so there's a single source of truth.
+Each shim `@`-imports `AGENTS.md`, so a change there propagates to every agent. If your agent isn't listed, point it at `AGENTS.md` directly.
 
 ## See also
 
