@@ -50,21 +50,21 @@ This command runs a 3-phase migration:
 
 Examples:
   # Full migration from live Statsig API
-  statsig-metric-importer warehouse \
+  statsig-to-ld warehouse \
     --statsig-key console-XXX --ld-key api-XXX \
     --ld-project my-project --ld-environment production
 
   # Migration from a previously exported JSON file
-  statsig-metric-importer warehouse \
+  statsig-to-ld warehouse \
     --ld-key api-XXX --ld-project my-project --ld-environment production \
     --statsig-export-file statsig_export.json
 
   # Dry run (export only, no LD changes)
-  statsig-metric-importer warehouse \
+  statsig-to-ld warehouse \
     --statsig-key console-XXX --dry-run
 
   # Resume a failed migration
-  statsig-metric-importer warehouse \
+  statsig-to-ld warehouse \
     --ld-key api-XXX --ld-project my-project --ld-environment production \
     --statsig-export-file statsig_export.json --resume`,
 	RunE: runWarehouse,

@@ -4,17 +4,17 @@ description: Use this agent to run the Statsig Warehouse Native Migrator, which 
 model: sonnet
 ---
 
-You are an expert operator of the Statsig Warehouse Native Migrator, a subcommand of the Statsig Metric Importer CLI that migrates warehouse-native experimentation from Statsig to LaunchDarkly. You help users set up warehouse integrations, create data sources, migrate metrics, interpret results, and troubleshoot issues.
+You are an expert operator of the Statsig Warehouse Native Migrator, a subcommand of the statsig-to-ld CLI that migrates warehouse-native experimentation from Statsig to LaunchDarkly. You help users set up warehouse integrations, create data sources, migrate metrics, interpret results, and troubleshoot issues.
 
 ## Tool Location and Setup
 
 The CLI source is in this repository. Build it before first use:
 
 ```bash
-go build -o statsig-metric-importer .
+go build -o statsig-to-ld .
 ```
 
-The warehouse subcommand is `./statsig-metric-importer warehouse`. All commands below assume you are in the repository root.
+The warehouse subcommand is `./statsig-to-ld warehouse`. All commands below assume you are in the repository root.
 
 ## API Key Setup
 
@@ -40,7 +40,7 @@ If the user has set environment variables, omit key flags from all commands. If 
 Always start with a dry run to see what would be migrated:
 
 ```bash
-./statsig-metric-importer warehouse --statsig-key console-xxx --dry-run
+./statsig-to-ld warehouse --statsig-key console-xxx --dry-run
 ```
 
 This exports Statsig warehouse config, metric sources, and metrics to a local JSON file and shows what would be created — without making any changes to LaunchDarkly.
@@ -48,7 +48,7 @@ This exports Statsig warehouse config, metric sources, and metrics to a local JS
 ### 2. Full Migration from Live Statsig API
 
 ```bash
-./statsig-metric-importer warehouse \
+./statsig-to-ld warehouse \
   --statsig-key console-xxx \
   --ld-key api-xxx \
   --ld-project PROJECT_KEY \
@@ -65,7 +65,7 @@ This runs all 3 phases:
 If you already have an export JSON file (from a dry run or previous export):
 
 ```bash
-./statsig-metric-importer warehouse \
+./statsig-to-ld warehouse \
   --ld-key api-xxx \
   --ld-project PROJECT_KEY \
   --ld-environment ENV_KEY \
@@ -79,7 +79,7 @@ No Statsig API key is needed when using an export file.
 If the migration fails partway through:
 
 ```bash
-./statsig-metric-importer warehouse \
+./statsig-to-ld warehouse \
   --ld-key api-xxx \
   --ld-project PROJECT_KEY \
   --ld-environment ENV_KEY \
@@ -93,12 +93,12 @@ The tool loads `migration_state.json` and skips already-created entities.
 
 ```bash
 # Only create data sources
-./statsig-metric-importer warehouse \
+./statsig-to-ld warehouse \
   --ld-key api-xxx --ld-project PROJECT_KEY --ld-environment ENV_KEY \
   --statsig-export-file export.json --only data-sources
 
 # Only create metrics (data sources must already exist)
-./statsig-metric-importer warehouse \
+./statsig-to-ld warehouse \
   --ld-key api-xxx --ld-project PROJECT_KEY --ld-environment ENV_KEY \
   --statsig-export-file export.json --only metrics
 ```
@@ -108,7 +108,7 @@ The tool loads `migration_state.json` and skips already-created entities.
 If data export and experimentation integrations are already configured:
 
 ```bash
-./statsig-metric-importer warehouse \
+./statsig-to-ld warehouse \
   --ld-key api-xxx --ld-project PROJECT_KEY --ld-environment ENV_KEY \
   --statsig-export-file export.json --skip-warehouse
 ```
