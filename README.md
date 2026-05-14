@@ -47,17 +47,18 @@ read -rs LD_API_KEY && export LD_API_KEY
 # 2. Scope the migration: how much work, what won't import faithfully
 statsig-to-ld analyze --ld-project my-project
 
-# 3. Convert metrics first — low risk, no flag changes
-statsig-to-ld metrics convert --all --ld-project my-project
-
-# 4. Create flag shells — off in all envs, no production impact
+# 3. Create flag shells — off in all envs, no production impact
 statsig-to-ld flags import --all --ld-project my-project
 
-# 5. Preview targeting — fail-closed by default
+# 4. Preview targeting — fail-closed by default
 statsig-to-ld targeting import --all --ld-project my-project --dry-run
 
-# 6. Apply targeting (review the dry-run report first)
+# 5. Apply targeting (review the dry-run report first)
 statsig-to-ld targeting import --all --ld-project my-project
+
+# 6. Convert metrics last — most likely to need manual cleanup, so do this
+#    after flags + targeting are validated
+statsig-to-ld metrics convert --all --ld-project my-project
 
 # 7. Read the migration playbook before changing your app
 cat docs/migration-playbook.md

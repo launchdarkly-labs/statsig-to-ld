@@ -62,23 +62,23 @@ If the user has set environment variables, omit key flags from all commands — 
 
 ## Recommended migration sequence
 
-Always run the phases in this order. Earlier phases are read-only or low-risk; later phases write production-facing data.
+Always run the phases in this order. Earlier phases are read-only or build the runtime layer; metrics go last because they're the most likely to need manual cleanup (DATA LOSS warnings, unsupported metric types), and doing them after flags + targeting are validated avoids reworking orphan metrics.
 
 ```bash
 # 1. Scope: how much work, what won't import faithfully
 ./statsig-to-ld analyze --ld-project my-project
 
-# 2. Metrics (low risk — nothing reads them until you wire up an experiment)
-./statsig-to-ld metrics convert --all --dry-run
-./statsig-to-ld metrics convert --all --ld-project my-project
-
-# 3. Flag shells (off in every env — no production impact)
+# 2. Flag shells (off in every env — no production impact)
 ./statsig-to-ld flags import --all --dry-run --ld-project my-project
 ./statsig-to-ld flags import --all --ld-project my-project
 
-# 4. Targeting (fail-closed by default — preview first)
+# 3. Targeting (fail-closed by default — preview first)
 ./statsig-to-ld targeting import --all --dry-run --ld-project my-project
 ./statsig-to-ld targeting import --all --ld-project my-project
+
+# 4. Metrics (most manual cleanup — do after flags + targeting are validated)
+./statsig-to-ld metrics convert --all --dry-run
+./statsig-to-ld metrics convert --all --ld-project my-project
 ```
 
 Re-running any subcommand is safe — existing LD resources are detected by sanitized key and skipped.
