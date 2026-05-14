@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/jsonutil"
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/launchdarkly"
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/output"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/output"
 )
 
 // PromptWithDefault prompts for input, returning defaultVal if the user presses Enter.

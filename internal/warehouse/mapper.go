@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	j "github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/jsonutil"
+	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
 )
 
 // WarehouseTypes maps warehouse type to experimentation integration key.

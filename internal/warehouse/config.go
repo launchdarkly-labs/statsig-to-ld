@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	j "github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/jsonutil"
+	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
 )
 
 var reFromThreePart = regexp.MustCompile(`(?i)\bFROM\s+([A-Za-z_]\w*)\.([A-Za-z_]\w*)\.([A-Za-z_]\w*)`)

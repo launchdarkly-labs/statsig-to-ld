@@ -11,12 +11,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/jsonutil"
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/launchdarkly"
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/output"
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/state"
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/statsig"
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/warehouse"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/output"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/state"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/warehouse"
 )
 
 // Warehouse command flags

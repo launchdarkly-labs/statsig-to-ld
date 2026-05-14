@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/httputil"
-	j "github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/jsonutil"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
+	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
 )
 
 // requestJSON performs an HTTP request and returns the status code and parsed JSON body.

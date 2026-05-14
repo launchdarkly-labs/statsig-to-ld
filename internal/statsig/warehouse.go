@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/httputil"
-	j "github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/jsonutil"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
+	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
 )
 
 // getRaw performs a GET request and returns the parsed JSON response.
