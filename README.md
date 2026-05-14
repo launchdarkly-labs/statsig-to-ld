@@ -19,7 +19,7 @@ Five CLI subcommands plus a bundled Claude Code skill:
 
 ## Quick start (coding agent)
 
-Paste this imto any coding agent
+Paste this into any coding agent
 
 ```
 Read the README at https://github.com/launchdarkly-labs/statsig-to-ld and follow
