@@ -22,7 +22,7 @@ The CLI moves **definitions** from Statsig to LaunchDarkly:
 | `flags import` | Create LD flag shells from Statsig gates and dynamic configs | LaunchDarkly |
 | `targeting import` | Apply per-environment targeting rules, rollouts, and overrides | LaunchDarkly |
 | `metrics convert` | Convert Statsig metric definitions | LaunchDarkly |
-| `warehouse` | Migrate Statsig warehouse-native experimentation (integrations + data sources + metrics) | LaunchDarkly + warehouse |
+| `warehouse` | Set up the LaunchDarkly side of a Statsig warehouse-native project: integrations + LD metric data sources + `source-mapping.json` for the metric-definitions handoff. **Does not migrate metric definitions** — that's `metrics convert`. | LaunchDarkly + warehouse |
 
 It does **not** modify application code (for that, use the [SDK-rewrite skill](skills/statsig-to-launchdarkly-migrator/SKILL.md)), set up LD experiments, recreate Statsig segments, or migrate layers/holdouts. See [`docs/migration-playbook.md`](docs/migration-playbook.md) in the repo for what the user still needs to do themselves.
 
@@ -90,24 +90,27 @@ If the user is also rewriting application code from the Statsig SDK to the Launc
 ./statsig-to-ld targeting import --all --dry-run --ld-project my-project
 ./statsig-to-ld targeting import --all --ld-project my-project
 
-# 4. (Conditional) Warehouse-native experimentation — see step 4 / 5 table below.
+# 4. (Conditional) Warehouse-native setup — sets up integrations + data sources
+#    and writes source-mapping.json. See decision tree below.
 ./statsig-to-ld warehouse --statsig-key ... --dry-run
 ./statsig-to-ld warehouse --statsig-key ... --ld-project my-project --ld-environment production
 
-# 5. Metrics (most manual cleanup — do after flags + targeting are validated)
+# 5. Metric definitions. If step 4 ran, pass --source-mapping so warehouse-native
+#    metrics bind to the data sources warehouse just created.
 ./statsig-to-ld metrics convert --all --dry-run
-./statsig-to-ld metrics convert --all --ld-project my-project
+./statsig-to-ld metrics convert --all --ld-project my-project \
+  [--source-mapping source-mapping.json]   # add this line if step 4 ran
 ```
 
-### When to run step 4 (`warehouse`) vs step 5 (`metrics convert`)
+### When to run step 4 (`warehouse`) and how it feeds step 5 (`metrics convert`)
 
-These two subcommands overlap on "create warehouse-native LD metric." The decision tree:
+`warehouse` handles only the parts unique to warehouse-native (interactive integrations wizard, SQL setup, LD data source creation with column-schema discovery). `metrics convert` handles **all** metric definitions — event-based and warehouse-native alike. The handoff between them is `source-mapping.json`, which `warehouse` writes (Statsig metric source name → LD data source key).
 
 | Statsig usage | What to run | Why |
 |---|---|---|
-| Warehouse-native only | `warehouse` (step 4). Skip `metrics convert` (step 5). | `warehouse` does the full pipeline: integrations + data sources + warehouse-native metrics, all bound. |
-| Event-based metrics only (Statsig Cloud) | `metrics convert` (step 5). Skip `warehouse` (step 4). | `warehouse` would have nothing warehouse-native to do. |
-| Mixed (both) | `warehouse` first (step 4), then `metrics convert` (step 5). | `warehouse` creates the warehouse-native metrics already bound to data sources; `metrics convert` is idempotent on warehouse-native ones (they skip-existing) and only creates the event-based metrics. |
+| Warehouse-native (any usage) | `warehouse` (step 4) → `metrics convert --source-mapping source-mapping.json` (step 5). | `warehouse` creates the integrations + data sources but **not** the metrics. `metrics convert` then creates every metric definition and binds the warehouse-native ones to the data sources via the mapping. |
+| Event-based metrics only (Statsig Cloud, no warehouse-native) | `metrics convert` (step 5). Skip `warehouse` (step 4). | `warehouse` would have nothing to do — there are no data sources to create. |
+| Mixed (both) | Same as warehouse-native: `warehouse` (step 4) → `metrics convert --source-mapping source-mapping.json` (step 5). | `metrics convert` walks all metrics; event-based ones don't need a data source binding, warehouse-native ones do — the mapping file resolves both in one pass. |
 
 Re-running any subcommand is safe — existing LD resources are detected by sanitized key and skipped.
 
@@ -260,20 +263,24 @@ Without this mapping, non-`userID` unit types are lowercased and a warning is em
 | `per-unit capping` | Low | Daily cap not applied. |
 | `custom rollup window` | Low | LD uses full experiment duration. |
 | `unitType ... may not match an LD context kind` | Medium | Use `--unit-type-mapping` to map explicitly. |
-| `no LD data source specified` | Medium | Warehouse-native metric created without a data source binding. Preferred fix: re-run via `statsig-to-ld warehouse` so the data source and the binding are created together. If the user already has their data sources set up by hand, pass `--ld-data-source` or `--source-mapping` to `metrics convert`. |
+| `no LD data source specified` | Medium | Warehouse-native metric is being created without a data source binding. Fix: run `statsig-to-ld warehouse` first (it creates the data sources and writes `source-mapping.json`), then re-run `metrics convert --source-mapping source-mapping.json`. If the data sources already exist (set up by hand or via Terraform), pass `--ld-data-source` or `--source-mapping` directly. |
 
 ## Subcommand: warehouse
 
-Migrates Statsig's warehouse-native experimentation setup to LaunchDarkly: warehouse integrations (data export + experimentation), metric data sources, and warehouse-native metrics. Full operator detail (interactive SQL wizards per warehouse type, resume semantics, the `migration_state.json` lifecycle) is in [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md); this section is enough to drive the basic flow and decide when to run it.
+Sets up the LaunchDarkly side of a Statsig warehouse-native experimentation project: data export integration, experimentation integration, and LD metric data sources. **It does not migrate metric definitions** — `metrics convert` does that, using the `source-mapping.json` this subcommand writes. Full operator detail (interactive SQL wizards per warehouse type, resume semantics, the `migration_state.json` lifecycle) is in [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md); this section is enough to drive the basic flow and decide when to run it.
 
 ```bash
 # Dry-run from live Statsig API (only Statsig key needed)
 ./statsig-to-ld warehouse --statsig-key console-... --dry-run
 
-# Full migration
+# Full warehouse setup (integrations + data sources)
 ./statsig-to-ld warehouse \
   --statsig-key console-... --ld-key api-... \
   --ld-project my-project --ld-environment production
+
+# Then migrate metric definitions, binding warehouse-native ones to the data sources
+./statsig-to-ld metrics convert --all --ld-project my-project \
+  --source-mapping source-mapping.json
 
 # From an export file (no Statsig key needed)
 ./statsig-to-ld warehouse \
@@ -283,44 +290,31 @@ Migrates Statsig's warehouse-native experimentation setup to LaunchDarkly: wareh
 # Resume after a failure (loads migration_state.json)
 ./statsig-to-ld warehouse ... --resume
 
-# Set up data sources only (skip metric creation)
-./statsig-to-ld warehouse ... --only data-sources
+# Phase 2 only — set up integrations, stop before creating data sources
+./statsig-to-ld warehouse ... --only warehouse
 
-# Set up metrics only (data sources must already exist)
-./statsig-to-ld warehouse ... --only metrics
+# Phase 3 only — skip integrations wizard (assumes integrations exist), create data sources
+./statsig-to-ld warehouse ... --only data-sources
 ```
 
 ### Phases
 
-1. **Export** — Fetches `wh_connections`, `metric_source/list`, `metrics/list` from Statsig (or loads from `--statsig-export-file`). Writes `statsig_export_<timestamp>.json`.
+1. **Export** — Fetches `wh_connections` and `metric_source/list` from Statsig (or loads from `--statsig-export-file`). Writes `statsig_export_<timestamp>.json`. (Metric definitions are not fetched here — `metrics convert` re-fetches them itself.)
 2. **Warehouse setup** (interactive) — Checks for existing data-export and experimentation integrations in LD; if absent, runs the wizard. Snowflake / BigQuery / Databricks / Redshift each have their own setup path. Auto-skips if integrations already exist.
-3. **Migrate** — Creates LD data sources (calling the warehouse preview API to discover real column schemas first) and warehouse-native LD metrics bound to those data sources.
-
-### Warehouse metric type mapping
-
-Different from `metrics convert`'s table — `warehouse` only handles warehouse-native metrics:
-
-| Statsig type | LD mapping | Notes |
-|---|---|---|
-| `sum` | numeric, unitAggregationType: sum | |
-| `mean` | numeric, unitAggregationType: average | |
-| `event_count` | numeric, unitAggregationType: sum | |
-| `count_distinct` | numeric, unitAggregationType: sum | |
-| `percentile` | numeric, analysisType: percentile | `eventDefault.disabled = true` |
-| `user` / `user_count` | non-numeric (conversion) | |
-| `conversion` | non-numeric (conversion) | |
-| `retention` | non-numeric (conversion) | |
-| `ratio` / `funnel` / `composite` | Skipped | No LD equivalent |
-| `undefined` | Skipped | Metric not configured |
+3. **Data sources** — Creates LD data sources (calling the warehouse preview API to discover real column schemas first), then writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key it created. The subcommand prints the recommended `metrics convert --source-mapping source-mapping.json` hand-off command at the end of a successful run.
 
 ### Relationship to `metrics convert`
 
-`warehouse` and `metrics convert` are **separate code paths** that overlap on "create warehouse-native LD metric":
+`warehouse` and `metrics convert` are **separate, complementary** subcommands. `warehouse` handles only the parts unique to warehouse-native (integrations + data sources). `metrics convert` handles **all** metric definitions, event-based and warehouse-native alike — for warehouse-native, it binds each metric to an existing LD data source by key.
 
-- `warehouse` is the full pipeline for warehouse-native experimentation — it creates the data sources and binds metrics to them in one pass.
-- `metrics convert` walks **all** Statsig metrics. For warehouse-native ones it only *references* an existing data source by key (via `--ld-data-source` or `--source-mapping`) — it does **not** create the data source. For event-based ones (Statsig Cloud) it creates LD metrics from event definitions.
+The two subcommands compose via `source-mapping.json`:
 
-The decision tree is in the [migration-sequence table above](#when-to-run-step-4-warehouse-vs-step-5-metrics-convert). The `--ld-data-source` / `--source-mapping` flags on `metrics convert` are for users who skip `warehouse` entirely and pre-create their data sources by hand or via Terraform.
+- `warehouse` writes `source-mapping.json` (Statsig metric source name → LD data source key).
+- `metrics convert --source-mapping source-mapping.json` reads it and binds each warehouse-native metric to the correct data source.
+
+The decision tree is in the [migration-sequence table above](#when-to-run-step-4-warehouse-and-how-it-feeds-step-5-metrics-convert). The `--ld-data-source` / `--source-mapping` flags on `metrics convert` are also available for users who skip `warehouse` entirely and pre-create their data sources by hand or via Terraform.
+
+For event-based-only Statsig projects (no warehouse-native), skip `warehouse` entirely — `metrics convert` doesn't need a data source binding for event-based metrics.
 
 ### Internal API endpoints
 
@@ -393,7 +387,7 @@ Before running the tool, confirm:
 2. **LD project key?** The `--ld-project` value. Required for everything except a Statsig-only `analyze` or `metrics convert --dry-run`.
 3. **Migration scope?** All gates + dynamic configs + metrics, or a subset (via `--import-type`, `--include-tag`, `--include-types`, `--metric`)?
 4. **Lossy targeting?** Run `analyze` first; if there are lossy sources the user wants to import, decide which `--accept-data-loss` features they'll accept.
-5. **Warehouse-native experimentation?** If yes, you'll likely want the `warehouse` subcommand (step 4 above) rather than `metrics convert --ld-data-source`. Confirm warehouse type (Snowflake / BigQuery / Databricks / Redshift) and the LD environment key (`--ld-environment`). If they've already set up the LD integrations by hand and only need `metrics convert` to bind to existing data sources, use `--ld-data-source` or `--source-mapping`.
+5. **Warehouse-native experimentation?** If yes, you'll run **two** subcommands: `warehouse` first (sets up integrations + data sources, writes `source-mapping.json`), then `metrics convert --source-mapping source-mapping.json` to create the metric definitions bound to those data sources. Confirm warehouse type (Snowflake / BigQuery / Databricks / Redshift) and the LD environment key (`--ld-environment`). If the LD integrations and data sources already exist (set up by hand or via Terraform), skip `warehouse` and pass `--ld-data-source` or `--source-mapping` directly to `metrics convert`.
 6. **Custom unit types?** If yes, need `--unit-type-mapping`.
 7. **Numeric metric units?** If known, use `--default-unit` to set a meaningful label (default is `"units"`).
 8. **EU/FedRAMP?** If yes, need `--ld-url https://app.eu.launchdarkly.com`.

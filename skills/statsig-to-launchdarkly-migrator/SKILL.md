@@ -204,7 +204,8 @@ This skill rewrites application code. It does **not** create LaunchDarkly flags,
 | LaunchDarkly flag *shells* corresponding to your Statsig gates and dynamic configs | `statsig-to-ld flags import` |
 | Per-environment targeting rules, rollouts, and overrides | `statsig-to-ld targeting import` |
 | Statsig metric definitions → LD metrics | `statsig-to-ld metrics convert` |
-| Statsig warehouse-native experimentation (Snowflake / BigQuery / Databricks / Redshift integration + data sources + warehouse-native metrics) | `statsig-to-ld warehouse` |
+| Statsig warehouse-native experimentation setup: Snowflake / BigQuery / Databricks / Redshift integrations + LD metric data sources | `statsig-to-ld warehouse` (writes `source-mapping.json`) |
+| Metric definitions for warehouse-native (each bound to a data source `warehouse` created) | `statsig-to-ld metrics convert --source-mapping source-mapping.json` |
 | Scoping the work before any of the above | `statsig-to-ld analyze` |
 
 Operator detail for the CLI lives in [`AGENTS.md`](../../AGENTS.md) at the repo root. Project-level decisions the automated surfaces don't make for you (context-kind mapping, segment recreation, experiment design, validation strategy, cutover, rollback) live in [`docs/migration-playbook.md`](../../docs/migration-playbook.md).

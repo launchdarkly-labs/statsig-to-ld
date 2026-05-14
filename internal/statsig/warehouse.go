@@ -88,32 +88,6 @@ func (c *Client) GetMetricSource(ctx context.Context, name string) (map[string]a
 	return data, nil
 }
 
-// ListAllMetricsRaw fetches all metrics as raw maps (for the warehouse flow).
-func (c *Client) ListAllMetricsRaw(ctx context.Context) ([]map[string]any, error) {
-	var all []map[string]any
-	page := 1
-	for {
-		data, err := c.getRaw(ctx, "/metrics/list", map[string]string{
-			"page":  fmt.Sprintf("%d", page),
-			"limit": "100",
-		})
-		if err != nil {
-			return all, err
-		}
-		items := extractRawItems(data)
-		if len(items) == 0 {
-			break
-		}
-		all = append(all, items...)
-		pagination := j.GetMap(data, "pagination")
-		if pagination == nil || pagination["nextPage"] == nil {
-			break
-		}
-		page++
-	}
-	return all, nil
-}
-
 // extractRawItems extracts the data array from Statsig API responses.
 func extractRawItems(data map[string]any) []map[string]any {
 	for _, key := range []string{"data", "results", "items"} {
