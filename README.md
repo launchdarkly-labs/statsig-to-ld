@@ -16,6 +16,31 @@ Four subcommands:
 | [`metrics convert`](#metrics-convert) | Convert Statsig metric definitions | LaunchDarkly |
 | [`warehouse`](#warehouse-native-migration) | Set up LaunchDarkly warehouse integrations and metric data sources from Statsig | LaunchDarkly + warehouse |
 
+## Agent Instructions
+
+This section is for AI coding agents (Claude Code, Codex, Cursor, etc.) helping a user migrate from Statsig to LaunchDarkly. Use it to pick the right surface for what the user is migrating, then follow the linked guide. Detailed CLI flags and examples live in the [CLI command reference](#subcommands) below.
+
+### Step 1 — Ask what to migrate
+
+Ask the user which paths they need (multi-select):
+
+| Path | What | Where to go |
+|---|---|---|
+| **A — SDK code** | Statsig SDK calls → LaunchDarkly SDK calls in application code | Load [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md) and run its phases. |
+| **B — Flags** | Statsig gates / dynamic configs → LD flag shells | [`statsig-to-ld flags import`](#flags-import) |
+| **C — Targeting rules** | Per-environment rules, rollouts, overrides on existing LD flag shells | [`statsig-to-ld targeting import`](#targeting-import) (requires B first) |
+| **D — Metrics** | Statsig metric definitions → LD metrics | [`statsig-to-ld metrics convert`](#metrics-convert) |
+| **E — Warehouse-native integrations** | Data export + experimentation integrations + LD metric data sources, from a Statsig warehouse-native project | See Step 2 |
+
+### Step 2 — If the user picked E, ask which warehouse scope
+
+Ask one follow-up:
+
+- **"I already have the LaunchDarkly warehouse integration set up; I only need to migrate metric data sources."** → [`statsig-to-ld warehouse --only data-sources`](#running-only-one-phase). Skips the integrations wizard, creates LD data sources, writes `source-mapping.json`.
+- **"I haven't set up the LaunchDarkly warehouse integration yet — do all of it."** → [`statsig-to-ld warehouse`](#warehouse-native-migration) with no `--only` flag. Runs the full pipeline: integrations wizard + data sources + `source-mapping.json`.
+
+Either path produces a `source-mapping.json` file. **Then run path D** to migrate the warehouse-native metric definitions: `statsig-to-ld metrics convert --source-mapping source-mapping.json` binds each metric to the LD data source `warehouse` just created. The agent shim at [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) has the wizard-by-wizard detail for the warehouse subcommand.
+
 ## Prerequisites
 
 - Go 1.24+ (to build from source) or a pre-built binary from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page
