@@ -51,15 +51,18 @@ Ask which the user wants (multi-select):
 
 **Then ask: "Are you using Statsig warehouse-native experimentation?"** (metrics computed from a Snowflake / BigQuery / Databricks / Redshift warehouse, rather than from Statsig-ingested events). If unsure, run `statsig-to-ld analyze` — it surfaces warehouse-native usage.
 
-- **Yes** → add **Path E** to the selected paths: `statsig-to-ld warehouse` sets up the warehouse integration in LD, creates data sources, and migrates the warehouse-native metric definitions. See [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) for wizard prompts. **Run E before C** so the data sources C's warehouse-native metrics reference (`--ld-data-source` / `--source-mapping`) exist by the time C runs.
-- **No** → skip E. Path C runs independently for event-based metrics.
+- **Yes, warehouse-native only** → add **Path E** in place of C. `statsig-to-ld warehouse` is the full pipeline for warehouse-native: it sets up the LD warehouse integrations, creates LD data sources, AND creates warehouse-native LD metrics bound to those data sources, all in one pass. `metrics convert` (Path C) is unnecessary; the warehouse subcommand already covers warehouse-native metrics.
+- **Yes, with some event-based metrics too (mixed)** → add **Path E**, AND keep Path C. Run E first (it creates warehouse-native metrics with bound data sources). Then run C — it's idempotent, so warehouse-native metrics E already created will land as `skipped_existing`; only the event-based ones get created.
+- **No, only event-based metrics** → skip Path E entirely. Path C runs independently for event-based metrics.
 
-If multiple paths are selected, execute in order **A → B → D → E → C** (E only if the user is using warehouse-native experimentation):
+See `.claude/agents/statsig-warehouse-migrator.md` for the Path E wizard prompts and phase details.
+
+If multiple paths are selected, execute in order **A → B → D → E → C** (E only if warehouse-native; C skipped if warehouse-only):
 
 1. **A first** — the skill emits `migration-summary.json` with the canonical flag-key list that B should match.
 2. **B before D** — targeting rules apply to flag shells, which must already exist.
-3. **E before C** — E creates warehouse integrations + data sources that C's warehouse-native metric conversions bind to. Without E running first, those metrics import without source bindings and surface as `no LD data source specified` warnings.
-4. **C last** — metrics work is the most likely to need manual cleanup (DATA LOSS warnings, unsupported types); cheaper to triage after the flag and warehouse setup are settled.
+3. **E before C** — only relevant for mixed-metric projects. E creates warehouse-native metrics with data-source bindings; C then idempotently skips those and creates only the event-based ones.
+4. **C last** — metrics work is the most likely to need manual cleanup (DATA LOSS warnings, unsupported types); cheaper to triage after the flag work and (if applicable) warehouse setup are settled.
 
 ### Step 3 — Credentials (split by surface)
 
@@ -81,8 +84,8 @@ If multiple paths are selected, execute in order **A → B → D → E → C** (
 
 - **Path A.** Load [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md) and run its seven phases as written. The skill handles its own credentials, version resolution, code translation, and report.
 - **Paths B / D.** Follow [`AGENTS.md`](AGENTS.md) for the per-subcommand flow (`--dry-run` first, fail-closed semantics for targeting, `--accept-data-loss` opt-ins, idempotency notes, report locations). Confirm the LD project key with the user before applying. Always dry-run before apply.
-- **Path E** (warehouse-native only). Follow [`AGENTS.md`](AGENTS.md) for the cross-CLI conventions (credentials, dry-run, `--ld-project`), then [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) for the warehouse-specific flow: three phases (export → integration setup → data sources + metrics), interactive wizard for the warehouse type, `migration_state.json` for resume support, `--only data-sources` / `--only metrics` to scope a re-run. After E completes, the LD data source keys it created are the values you'll pass to C via `--ld-data-source` or `--source-mapping`.
-- **Path C** (always last). Follow [`AGENTS.md`](AGENTS.md) per-subcommand. If the user also ran E, plug the data source keys E created into `--ld-data-source` (single source) or `--source-mapping` (per-table JSON) so the warehouse-native metric conversions land with their source binding.
+- **Path E** (warehouse-native only). Follow [`AGENTS.md`](AGENTS.md) for the cross-CLI conventions (credentials, dry-run, `--ld-project`), then [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) for the warehouse-specific flow: three phases (export → integration setup → data sources + warehouse-native metrics), interactive wizard for the warehouse type, `migration_state.json` for resume support, `--only data-sources` / `--only metrics` to scope a re-run. E creates the warehouse-native metrics bound to their data sources in a single pass — no follow-up flag-tuning needed from C.
+- **Path C**. Follow [`AGENTS.md`](AGENTS.md) per-subcommand. If the user has a **mixed** Statsig project (both warehouse-native and event-based metrics) and ran E first, C is run after E with no special flags — it's idempotent, so the warehouse-native metrics E already created will skip-existing and only the event-based ones get created. If the user has **only event-based** metrics, C runs independently of E.
 
 ### Step 5 — Summarize results
 
@@ -91,8 +94,8 @@ After all selected paths complete, present a per-path summary (in execution orde
 - **Path A**: files changed, flag keys in `migration-summary.json`, items blocked by experiments
 - **Path B**: flags created, flags skipped (already existed), incompatible flags
 - **Path D**: targeting applied, flags skipped as `skipped_lossy`, approximated operators
-- **Path E**: warehouse integrations set up (data export + experimentation), data sources created (call out their LD keys so the user can confirm they line up with C's `--ld-data-source` / `--source-mapping`), warehouse-native metrics created, metric types skipped (`ratio` / `funnel` / `composite` / `undefined` have no LD equivalent)
-- **Path C**: metrics converted, metrics skipped, DATA LOSS warnings, `no LD data source specified` warnings (if any — points to misaligned `--ld-data-source` from E)
+- **Path E**: warehouse integrations set up (data export + experimentation), data sources created (call out their LD keys), warehouse-native metrics created (bound to those data sources), metric types skipped (`ratio` / `funnel` / `composite` / `undefined` have no LD equivalent)
+- **Path C**: metrics converted, metrics skipped (`skipped_existing` for warehouse-native metrics E already created — expected on mixed projects), DATA LOSS warnings, `no LD data source specified` warnings (if a Statsig warehouse-native metric has no corresponding LD data source — only seen when C is run without E having run first on a warehouse-native project)
 - **Next steps**: experiment migration (manual in LD), parallel SDK testing checklist, segments to recreate in LD UI, [`docs/migration-playbook.md`](docs/migration-playbook.md) for the rest
 
 ## Credentials reference
