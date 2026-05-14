@@ -7,6 +7,8 @@ description: Migrate JavaScript/TypeScript/React/Node.js code from the Statsig S
 
 Convert Statsig SDK code (JavaScript, TypeScript, React, Node.js) to LaunchDarkly while preserving experiments, ensuring the latest SDK versions, and writing the LD Client-Side ID to `.env` via `ldcli`. Migrates feature gates and dynamic configs; preserves and flags experiments.
 
+> **This skill rewrites application code only.** Flag, metric, and targeting *definitions* live in Statsig's backend, not in code — they're migrated by the `statsig-to-ld` CLI that ships in the same repo. See [Beyond SDK code](#beyond-sdk-code) at the bottom for how the two surfaces compose, or the repo's [README](../../README.md) for the orchestration view.
+
 ## When this skill runs
 
 Trigger phrases include: "migrate from Statsig", "replace Statsig with LaunchDarkly", "port these flags to LaunchDarkly", "convert StatsigUser to LDContext", or pasted Statsig code with a request to translate it.
@@ -191,6 +193,23 @@ See `evals/README.md` for details and rubric.
 - Never emit `launchdarkly-node-server-sdk` (legacy unscoped name) — the current package is `@launchdarkly/node-server-sdk`
 - Never migrate experiments
 - Never skip Phase 1 (version resolution) — stale SDK versions are the #1 reliability failure for agentic migrations
+
+## Beyond SDK code
+
+This skill rewrites application code. It does **not** create LaunchDarkly flags, metrics, segments, or targeting rules in the LaunchDarkly backend — those are server-side definitions that live alongside, not inside, your code. The companion `statsig-to-ld` CLI (same repo) handles those:
+
+| You want to migrate… | Use |
+|---|---|
+| Statsig SDK call sites in JS / TS / React / Node code | **This skill.** |
+| LaunchDarkly flag *shells* corresponding to your Statsig gates and dynamic configs | `statsig-to-ld flags import` |
+| Per-environment targeting rules, rollouts, and overrides | `statsig-to-ld targeting import` |
+| Statsig metric definitions → LD metrics | `statsig-to-ld metrics convert` |
+| Statsig warehouse-native experimentation (Snowflake / BigQuery / Databricks / Redshift integration + data sources + warehouse-native metrics) | `statsig-to-ld warehouse` |
+| Scoping the work before any of the above | `statsig-to-ld analyze` |
+
+Operator detail for the CLI lives in [`AGENTS.md`](../../AGENTS.md) at the repo root. Project-level decisions the automated surfaces don't make for you (context-kind mapping, segment recreation, experiment design, validation strategy, cutover, rollback) live in [`docs/migration-playbook.md`](../../docs/migration-playbook.md).
+
+The `migration-summary.json` this skill emits (Phase 7) lists canonical flag keys — feed it to `statsig-to-ld flags import` so the flag shells use the same keys your migrated code reads.
 
 ## Reference docs
 
