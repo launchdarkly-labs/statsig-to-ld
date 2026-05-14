@@ -16,6 +16,19 @@ Four subcommands:
 | [`metrics convert`](#metrics-convert) | Convert Statsig metric definitions | LaunchDarkly |
 | [`warehouse`](#warehouse-native-migration) | Set up LaunchDarkly warehouse integrations and metric data sources from Statsig | LaunchDarkly + warehouse |
 
+## Quick start (Claude Code)
+
+Paste this into Claude Code (or any Claude interface with this repo on the filesystem):
+
+```
+Read the README at https://github.com/launchdarkly-labs/statsig-to-ld and follow
+the Agent Instructions section to help me migrate from Statsig to LaunchDarkly.
+```
+
+Claude will then run the [Agent Instructions](#agent-instructions) below — asking which path(s) you need (SDK code, flags, targeting, metrics, warehouse-native integrations), prompting you to export credentials securely in your shell, and running the appropriate surface.
+
+For running the CLI directly without an agent, see [Manual quick start](#manual-quick-start).
+
 ## Agent Instructions
 
 This section is for AI coding agents (Claude Code, Codex, Cursor, etc.) helping a user migrate from Statsig to LaunchDarkly. Use it to pick the right surface for what the user is migrating, then follow the linked guide. Detailed CLI flags and examples live in the [CLI command reference](#subcommands) below.
@@ -91,7 +104,9 @@ go build -ldflags "-X github.com/launchdarkly-labs/statsig-to-ld/cmd.version=1.0
 
 Download from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page.
 
-## Quick start — full migration
+## Manual quick start
+
+For running the CLI directly without an agent. (For agent-driven, see [Quick start (Claude Code)](#quick-start-claude-code) and the [Agent Instructions](#agent-instructions) above.)
 
 ```bash
 # 1. Set API keys (recommended — avoids shell history exposure)
