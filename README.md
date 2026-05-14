@@ -278,9 +278,7 @@ Agent-specific shims point back at the same guide so each agent's native discove
 | **Codex** + any agent reading the `AGENTS.md` convention | [`AGENTS.md`](AGENTS.md) | OpenAI Codex auto-loads `AGENTS.md` from the repo root as part of its system prompt; other agents that follow the convention (recent Cursor, Sourcegraph, etc.) do the same. Point any other agent at it manually. |
 | **Cursor** | [`.cursor/rules/statsig-to-ld.mdc`](.cursor/rules/statsig-to-ld.mdc) | Auto-attaches when the conversation matches the rule's description (Statsig→LD migration topics). |
 | **GitHub Copilot** | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) | Auto-loaded into every Copilot Chat session in this repo. |
-| **Windsurf** | [`.windsurf/rules/statsig-to-ld.md`](.windsurf/rules/statsig-to-ld.md) | `trigger: model_decision` — Cascade attaches it when the conversation matches the description. |
 | **Aider** | [`.aider.conf.yml`](.aider.conf.yml) | Project config `read:` list auto-loads `AGENTS.md` as read-only context for every Aider session in this repo. |
-| **Cline** | [`.clinerules/statsig-to-ld.md`](.clinerules/statsig-to-ld.md) | Workspace rule file — Cline reads all `.clinerules/*.md` at session start. |
 | **Claude Code** (skill) | [`.claude/skills/statsig-to-ld/SKILL.md`](.claude/skills/statsig-to-ld/SKILL.md) | Auto-loads on trigger phrases (subcommand names, API-key env vars, report filenames). |
 | **Claude Code** (subagent) | [`.claude/agents/statsig-to-ld.md`](.claude/agents/statsig-to-ld.md) | Invoke via the Task tool for a delegated end-to-end migration in a separate context. |
 
