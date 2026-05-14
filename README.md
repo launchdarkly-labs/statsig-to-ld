@@ -41,6 +41,34 @@ Ask one follow-up:
 
 Either path produces a `source-mapping.json` file. **Then run path D** to migrate the warehouse-native metric definitions: `statsig-to-ld metrics convert --source-mapping source-mapping.json` binds each metric to the LD data source `warehouse` just created. The agent shim at [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) has the wizard-by-wizard detail for the warehouse subcommand.
 
+### Step 3 — Check credentials before running anything
+
+**Applies to paths B, C, D, and E only.** Path A handles its own credentials inside the skill (via `ldcli` to `.env`).
+
+Before running any CLI command, check whether the user's shell already has the two required environment variables:
+
+```bash
+[ -n "$STATSIG_CONSOLE_KEY" ] && echo "STATSIG_CONSOLE_KEY: set" || echo "STATSIG_CONSOLE_KEY: NOT set"
+[ -n "$LD_API_KEY" ]          && echo "LD_API_KEY: set"          || echo "LD_API_KEY: NOT set"
+```
+
+If either is `NOT set`, **do not ask the user to paste the key into the chat**. Anything pasted into the chat lands in the conversation transcript and may be logged or persisted. Instead, give the user this exact snippet to run in their own terminal:
+
+```bash
+read -rs STATSIG_CONSOLE_KEY && export STATSIG_CONSOLE_KEY   # console-... from Statsig
+read -rs LD_API_KEY && export LD_API_KEY                     # api-... from LaunchDarkly
+```
+
+Why this form:
+- `read -rs` reads with **no echo** (the key never appears on screen) and **no backslash interpretation** (so a `\` in the key isn't misread). This avoids the key landing in shell history that `export KEY=value` would create.
+- The two `export` statements then make the values available to any subprocess (including the CLI the agent runs).
+
+**Important constraint:** the user must run these `read -rs && export` lines in **the same shell session that the agent's subprocess inherits from**. If the agent is already running and the user exports keys in a *different* terminal, the agent's subprocess won't see them. After the user reports the export is done, re-check with the snippet above; if values still show `NOT set`, ask the user to restart the agent session so the new shell environment is inherited.
+
+For users on Windows / fish / non-POSIX shells, give the equivalent (`Read-Host -AsSecureString` on PowerShell, `read -s` + `set -x` on fish) — same principle: no echo, no history, no chat-paste.
+
+Only after both env vars are confirmed set should you run any `statsig-to-ld <subcommand>` command. The CLI reads them automatically; never pass keys as `--statsig-key` / `--ld-key` flags when env vars are set, since flag values are visible in `ps` output.
+
 ## Prerequisites
 
 - Go 1.24+ (to build from source) or a pre-built binary from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page
