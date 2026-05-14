@@ -1,6 +1,6 @@
-# Built binaries
-statsig-to-ld
-statsig-metric-importer
+# Built binaries (anchored so they don't shadow same-named paths under skills/)
+/statsig-to-ld
+/statsig-metric-importer
 
 # CLI output
 migration-report.json
