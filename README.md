@@ -47,16 +47,19 @@ Ask which the user wants (multi-select):
 - **A — Migrate SDK code** → the skill at [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md)
 - **B — Create LD flag shells** → `statsig-to-ld flags import` (see AGENTS.md)
 - **D — Migrate targeting rules** → `statsig-to-ld targeting import` (see AGENTS.md)
-- **C — Migrate metrics** (event-based) → `statsig-to-ld metrics convert` (see AGENTS.md)
-- **E — Migrate warehouse-native experimentation** (Snowflake / BigQuery / Databricks / Redshift integrations + warehouse-native data sources + metrics) → `statsig-to-ld warehouse` (see [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) for wizard prompts)
+- **C — Migrate metrics** → `statsig-to-ld metrics convert` (see AGENTS.md)
 
-C vs E: if the user has **warehouse-native** experimentation in Statsig (their metrics are computed from a data warehouse), use **E**. If their metrics are event-based (Statsig event ingestion), use **C**. Some teams have both. Run `statsig-to-ld analyze` to see which surfaces exist in the source project.
+**Then ask: "Are you using Statsig warehouse-native experimentation?"** (metrics computed from a Snowflake / BigQuery / Databricks / Redshift warehouse, rather than from Statsig-ingested events). If unsure, run `statsig-to-ld analyze` — it surfaces warehouse-native usage.
 
-If multiple are selected, execute in order **A → B → D → C → E**:
+- **Yes** → add **Path E** to the selected paths: `statsig-to-ld warehouse` sets up the warehouse integration in LD, creates data sources, and migrates the warehouse-native metric definitions. See [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) for wizard prompts. **Run E before C** so the data sources C's warehouse-native metrics reference (`--ld-data-source` / `--source-mapping`) exist by the time C runs.
+- **No** → skip E. Path C runs independently for event-based metrics.
+
+If multiple paths are selected, execute in order **A → B → D → E → C** (E only if the user is using warehouse-native experimentation):
 
 1. **A first** — the skill emits `migration-summary.json` with the canonical flag-key list that B should match.
 2. **B before D** — targeting rules apply to flag shells, which must already exist.
-3. **C / E last** — metrics work (event-based or warehouse-native) is independent of the flag work and most likely to need manual cleanup (DATA LOSS warnings, unsupported types, warehouse wizard interactions); cheaper to triage after the flag side is settled. C and E are independent and can run in either order — surface that to the user if they're running both.
+3. **E before C** — E creates warehouse integrations + data sources that C's warehouse-native metric conversions bind to. Without E running first, those metrics import without source bindings and surface as `no LD data source specified` warnings.
+4. **C last** — metrics work is the most likely to need manual cleanup (DATA LOSS warnings, unsupported types); cheaper to triage after the flag and warehouse setup are settled.
 
 ### Step 3 — Credentials (split by surface)
 
@@ -77,18 +80,19 @@ If multiple are selected, execute in order **A → B → D → C → E**:
 ### Step 4 — Run each path
 
 - **Path A.** Load [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md) and run its seven phases as written. The skill handles its own credentials, version resolution, code translation, and report.
-- **Paths B / D / C.** Follow [`AGENTS.md`](AGENTS.md) for the per-subcommand flow (`--dry-run` first, fail-closed semantics for targeting, `--accept-data-loss` opt-ins, idempotency notes, report locations). Confirm the LD project key with the user before applying. Always dry-run before apply.
-- **Path E.** Follow [`AGENTS.md`](AGENTS.md) for the cross-CLI conventions (credentials, dry-run, `--ld-project`), then [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) for the warehouse-specific flow: three phases (export → integration setup → data sources + metrics), interactive wizard for the warehouse type, `migration_state.json` for resume support, `--only data-sources` / `--only metrics` to scope a re-run.
+- **Paths B / D.** Follow [`AGENTS.md`](AGENTS.md) for the per-subcommand flow (`--dry-run` first, fail-closed semantics for targeting, `--accept-data-loss` opt-ins, idempotency notes, report locations). Confirm the LD project key with the user before applying. Always dry-run before apply.
+- **Path E** (warehouse-native only). Follow [`AGENTS.md`](AGENTS.md) for the cross-CLI conventions (credentials, dry-run, `--ld-project`), then [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) for the warehouse-specific flow: three phases (export → integration setup → data sources + metrics), interactive wizard for the warehouse type, `migration_state.json` for resume support, `--only data-sources` / `--only metrics` to scope a re-run. After E completes, the LD data source keys it created are the values you'll pass to C via `--ld-data-source` or `--source-mapping`.
+- **Path C** (always last). Follow [`AGENTS.md`](AGENTS.md) per-subcommand. If the user also ran E, plug the data source keys E created into `--ld-data-source` (single source) or `--source-mapping` (per-table JSON) so the warehouse-native metric conversions land with their source binding.
 
 ### Step 5 — Summarize results
 
-After all selected paths complete, present a per-path summary:
+After all selected paths complete, present a per-path summary (in execution order):
 
 - **Path A**: files changed, flag keys in `migration-summary.json`, items blocked by experiments
 - **Path B**: flags created, flags skipped (already existed), incompatible flags
 - **Path D**: targeting applied, flags skipped as `skipped_lossy`, approximated operators
-- **Path C**: metrics converted, metrics skipped, DATA LOSS warnings
-- **Path E**: warehouse integrations set up (data export + experimentation), data sources created, warehouse-native metrics created, metric types skipped (`ratio` / `funnel` / `composite` / `undefined` have no LD equivalent)
+- **Path E**: warehouse integrations set up (data export + experimentation), data sources created (call out their LD keys so the user can confirm they line up with C's `--ld-data-source` / `--source-mapping`), warehouse-native metrics created, metric types skipped (`ratio` / `funnel` / `composite` / `undefined` have no LD equivalent)
+- **Path C**: metrics converted, metrics skipped, DATA LOSS warnings, `no LD data source specified` warnings (if any — points to misaligned `--ld-data-source` from E)
 - **Next steps**: experiment migration (manual in LD), parallel SDK testing checklist, segments to recreate in LD UI, [`docs/migration-playbook.md`](docs/migration-playbook.md) for the rest
 
 ## Credentials reference
