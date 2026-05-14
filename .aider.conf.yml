@@ -1,0 +1,5 @@
+# Aider project config for the statsig-to-ld repo.
+# Auto-loads the agent operator guide as read-only context in every Aider
+# session opened against this repo. See AGENTS.md for the full guide.
+read:
+  - AGENTS.md
