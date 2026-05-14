@@ -2,18 +2,19 @@
 
 A CLI for migrating from Statsig to LaunchDarkly.
 
-> **Important — read this first.** This tool migrates **flag and metric definitions, and targeting rules**, from Statsig to LaunchDarkly. It does **not** change your application code. It does not run experiments. It does not recreate every Statsig feature 1:1. See [`docs/migration-playbook.md`](docs/migration-playbook.md) for what you still need to do yourself.
+> **Important — read this first.** This tool migrates **flag and metric definitions, and targeting rules**, from Statsig to LaunchDarkly. For the SDK code rewrite (Statsig SDK calls → LaunchDarkly SDK calls), use the bundled Claude Code skill at [`skills/statsig-to-launchdarkly-migrator/`](skills/statsig-to-launchdarkly-migrator/SKILL.md). It does not run experiments. It does not recreate every Statsig feature 1:1. See [`docs/migration-playbook.md`](docs/migration-playbook.md) for what you still need to do yourself.
 
 ## Overview
 
-Four subcommands:
+Four CLI subcommands plus a bundled Claude Code skill:
 
-| Subcommand | What it does | Writes to |
+| Surface | What it does | Writes to |
 |---|---|---|
-| [`analyze`](#analyze) | Read-only Statsig project survey + sizing report | Nothing |
-| [`flags import`](#flags-import) | Create LaunchDarkly flag shells from Statsig gates and dynamic configs | LaunchDarkly |
-| [`targeting import`](#targeting-import) | Apply per-environment targeting rules, rollouts, and overrides | LaunchDarkly |
-| [`metrics convert`](#metrics-convert) | Convert Statsig metric definitions | LaunchDarkly |
+| [`analyze`](#analyze) (CLI) | Read-only Statsig project survey + sizing report | Nothing |
+| [`flags import`](#flags-import) (CLI) | Create LaunchDarkly flag shells from Statsig gates and dynamic configs | LaunchDarkly |
+| [`targeting import`](#targeting-import) (CLI) | Apply per-environment targeting rules, rollouts, and overrides | LaunchDarkly |
+| [`metrics convert`](#metrics-convert) (CLI) | Convert Statsig metric definitions | LaunchDarkly |
+| [`skills/statsig-to-launchdarkly-migrator/`](skills/statsig-to-launchdarkly-migrator/SKILL.md) (Claude Code skill) | Rewrite Statsig SDK calls → LaunchDarkly SDK calls in your codebase | Your source files |
 
 ## Prerequisites
 
