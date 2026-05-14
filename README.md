@@ -47,17 +47,18 @@ read -rs LD_API_KEY && export LD_API_KEY
 # 2. Scope the migration: how much work, what won't import faithfully
 statsig-to-ld analyze --ld-project my-project
 
-# 3. Convert metrics first — low risk, no flag changes
-statsig-to-ld metrics convert --all --ld-project my-project
-
-# 4. Create flag shells — off in all envs, no production impact
+# 3. Create flag shells — off in all envs, no production impact
 statsig-to-ld flags import --all --ld-project my-project
 
-# 5. Preview targeting — fail-closed by default
+# 4. Preview targeting — fail-closed by default
 statsig-to-ld targeting import --all --ld-project my-project --dry-run
 
-# 6. Apply targeting (review the dry-run report first)
+# 5. Apply targeting (review the dry-run report first)
 statsig-to-ld targeting import --all --ld-project my-project
+
+# 6. Convert metrics last — most likely to need manual cleanup, so do this
+#    after flags + targeting are validated
+statsig-to-ld metrics convert --all --ld-project my-project
 
 # 7. Read the migration playbook before changing your app
 cat docs/migration-playbook.md
@@ -267,9 +268,27 @@ git push origin v0.2.0
 
 Release notes are generated from commits since the previous tag.
 
+## Using with AI coding agents
+
+This repo ships a single, agent-agnostic operator guide at [`AGENTS.md`](AGENTS.md) covering build, API-key handling, the recommended migration sequence, per-subcommand usage, report analysis, and troubleshooting. Treat it as authoritative.
+
+Agent-specific shims point back at the same guide so each agent's native discovery surface works without duplicating content:
+
+| Agent | File | How it loads |
+|---|---|---|
+| **Codex** + any agent reading the `AGENTS.md` convention | [`AGENTS.md`](AGENTS.md) | OpenAI Codex auto-loads `AGENTS.md` from the repo root as part of its system prompt; other agents that follow the convention (recent Cursor, Sourcegraph, etc.) do the same. Point any other agent at it manually. |
+| **Cursor** | [`.cursor/rules/statsig-to-ld.mdc`](.cursor/rules/statsig-to-ld.mdc) | Auto-attaches when the conversation matches the rule's description (Statsig→LD migration topics). |
+| **GitHub Copilot** | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) | Auto-loaded into every Copilot Chat session in this repo. |
+| **Aider** | [`.aider.conf.yml`](.aider.conf.yml) | Project config `read:` list auto-loads `AGENTS.md` as read-only context for every Aider session in this repo. |
+| **Claude Code** (skill) | [`.claude/skills/statsig-to-ld/SKILL.md`](.claude/skills/statsig-to-ld/SKILL.md) | Auto-loads on trigger phrases (subcommand names, API-key env vars, report filenames). |
+| **Claude Code** (subagent) | [`.claude/agents/statsig-to-ld.md`](.claude/agents/statsig-to-ld.md) | Invoke via the Task tool for a delegated end-to-end migration in a separate context. |
+
+Each shim `@`-imports `AGENTS.md`, so a change there propagates to every agent. If your agent isn't listed, point it at `AGENTS.md` directly.
+
 ## See also
 
 - [`docs/migration-playbook.md`](docs/migration-playbook.md) — what this tool **doesn't** do (SDK rewrites, layers, experiments, holdouts, segment recreation, cutover, rollback)
+- [`AGENTS.md`](AGENTS.md) — operator guide for AI agents driving the CLI
 - [`CHANGELOG.md`](CHANGELOG.md)
 - [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - [`SECURITY.md`](SECURITY.md)

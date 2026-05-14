@@ -93,11 +93,11 @@ A reasonable order for a real migration. Adjust to your team's tolerance for par
 
 1. **`statsig-to-ld analyze`** — scope the migration. Numbers: how many flags? how many metrics? how many use lossy features?
 2. **Set up the LD project** — create the project, configure SCIM/SSO if needed, decide on context kinds, generate the API token for the CLI.
-3. **`statsig-to-ld metrics convert`** — low-risk and order-independent. Metrics in LD don't affect anything until you reference them.
-4. **`statsig-to-ld flags import`** — creates shells. Off in every env, no production impact.
-5. **Recreate segments** (manual) — for any flags you plan to target.
-6. **`statsig-to-ld targeting import --dry-run`** — preview the targeting application. Review the report for `skipped_lossy` entries.
-7. **`statsig-to-ld targeting import`** — apply the targeting. Strict by default; opt in via `--accept-data-loss=...` if needed. Flags now have the same targeting as Statsig, but your app still reads Statsig.
+3. **`statsig-to-ld flags import`** — creates shells. Off in every env, no production impact.
+4. **Recreate segments** (manual) — for any flags you plan to target.
+5. **`statsig-to-ld targeting import --dry-run`** — preview the targeting application. Review the report for `skipped_lossy` entries.
+6. **`statsig-to-ld targeting import`** — apply the targeting. Strict by default; opt in via `--accept-data-loss=...` if needed. Flags now have the same targeting as Statsig, but your app still reads Statsig.
+7. **`statsig-to-ld metrics convert`** — most likely to need manual cleanup (DATA LOSS warnings, unsupported metric types). Doing this after flags + targeting are validated avoids reworking orphan metrics. Metrics in LD don't affect anything until you reference them, so this is still order-independent — it's just easier to triage at this point.
 8. **Add the LaunchDarkly SDK alongside Statsig** — initialize it but don't read from it yet.
 9. **Validate** — see [Validation strategy](#validation-strategy).
 10. **Cut over reads** — flip your application to read from LD instead of Statsig. Keep Statsig writes in case of rollback.
