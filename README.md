@@ -17,16 +17,16 @@ Five CLI subcommands plus a bundled Claude Code skill:
 | [`warehouse`](docs/cli-reference.md#warehouse-native-migration) (CLI) | Set up LaunchDarkly warehouse integrations and metric data sources from Statsig (metric definitions are migrated separately by `metrics convert`) | LaunchDarkly + warehouse |
 | [`skills/statsig-to-launchdarkly-migrator/`](skills/statsig-to-launchdarkly-migrator/SKILL.md) (Claude Code skill) | Rewrite Statsig SDK calls → LaunchDarkly SDK calls in your codebase | Your source files |
 
-## Quick start (Claude Code)
+## Quick start (coding agent)
 
-Paste this into Claude Code (or any Claude interface with this repo on the filesystem):
+Paste this imto any coding agent
 
 ```
 Read the README at https://github.com/launchdarkly-labs/statsig-to-ld and follow
-the Agent Instructions section to help me migrate from Statsig to LaunchDarkly.
+the Agent Instructions section.
 ```
 
-Claude will then run the [Agent Instructions](#agent-instructions) below — asking which path(s) you need (SDK code, flags, targeting, metrics, warehouse-native integrations), prompting you to export credentials securely in your shell, and running the appropriate surface.
+Your agent will then run the [Agent Instructions](#agent-instructions) below — asking which path(s) you need (SDK code, flags, targeting, metrics, warehouse-native integrations), prompting you to export credentials securely in your shell, and running the appropriate surface.
 
 For running the CLI directly without an agent, see [`docs/cli-reference.md`](docs/cli-reference.md) — full subcommand reference, lossy-feature handling, warehouse walkthrough, and the AI-agent integration table.
 
