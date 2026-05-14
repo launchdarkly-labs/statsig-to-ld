@@ -34,7 +34,7 @@ For users running the CLI directly without an agent, see [Manual quick start](#m
 This section is the **path-selection bootstrap**: ask the user what to migrate, then delegate to the canonical guide for each path. The detail lives elsewhere — don't restate it here:
 
 - **Path A** (SDK code rewrite): canonical guide is [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md). Load it and run its phases.
-- **Paths B / D / C** (CLI): canonical guide is [`AGENTS.md`](AGENTS.md). Use its credentials, sequence, and per-subcommand sections.
+- **Paths B / D / C / E** (CLI): canonical guide is [`AGENTS.md`](AGENTS.md). Use its credentials, sequence, and per-subcommand sections. For Path E (warehouse-native experimentation), the agent shim at [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) has the warehouse-specific details — wizard prompts, SQL scripts, resume semantics — that aren't repeated in AGENTS.md.
 
 ### Step 1 — Optional pre-scope
 
@@ -47,20 +47,23 @@ Ask which the user wants (multi-select):
 - **A — Migrate SDK code** → the skill at [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md)
 - **B — Create LD flag shells** → `statsig-to-ld flags import` (see AGENTS.md)
 - **D — Migrate targeting rules** → `statsig-to-ld targeting import` (see AGENTS.md)
-- **C — Migrate metrics** → `statsig-to-ld metrics convert` (see AGENTS.md)
+- **C — Migrate metrics** (event-based) → `statsig-to-ld metrics convert` (see AGENTS.md)
+- **E — Migrate warehouse-native experimentation** (Snowflake / BigQuery / Databricks / Redshift integrations + warehouse-native data sources + metrics) → `statsig-to-ld warehouse` (see [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) for wizard prompts)
 
-If multiple are selected, execute in order **A → B → D → C**:
+C vs E: if the user has **warehouse-native** experimentation in Statsig (their metrics are computed from a data warehouse), use **E**. If their metrics are event-based (Statsig event ingestion), use **C**. Some teams have both. Run `statsig-to-ld analyze` to see which surfaces exist in the source project.
+
+If multiple are selected, execute in order **A → B → D → C → E**:
 
 1. **A first** — the skill emits `migration-summary.json` with the canonical flag-key list that B should match.
 2. **B before D** — targeting rules apply to flag shells, which must already exist.
-3. **C last** — metrics are independent of the flag work and most likely to need manual cleanup (DATA LOSS warnings, unsupported types); cheaper to triage after the flag side is settled.
+3. **C / E last** — metrics work (event-based or warehouse-native) is independent of the flag work and most likely to need manual cleanup (DATA LOSS warnings, unsupported types, warehouse wizard interactions); cheaper to triage after the flag side is settled. C and E are independent and can run in either order — surface that to the user if they're running both.
 
 ### Step 3 — Credentials (split by surface)
 
 **Never ask the user to paste keys into the chat.** The two surfaces have different key flows:
 
 - **Path A — skill.** Phase 2 of the skill calls `ldcli` interactively and writes `LD_CLIENT_SIDE_ID` (or `LD_SDK_KEY`) to `.env` without the key passing through the conversation. See [`skills/statsig-to-launchdarkly-migrator/references/sdk-key-setup.md`](skills/statsig-to-launchdarkly-migrator/references/sdk-key-setup.md).
-- **Paths B / D / C — CLI.** Instruct the user to export the two keys in the same shell they'll run the CLI from (no chat exposure, no history exposure):
+- **Paths B / D / C / E — CLI.** Instruct the user to export the two keys in the same shell they'll run the CLI from (no chat exposure, no history exposure):
 
   ```bash
   read -rs STATSIG_CONSOLE_KEY && export STATSIG_CONSOLE_KEY   # console-... from Statsig
@@ -69,10 +72,13 @@ If multiple are selected, execute in order **A → B → D → C**:
 
   Full handling rules and precedence in [`AGENTS.md` § API key handling](AGENTS.md). Wait for the user to confirm before running any CLI command.
 
+  **Path E additionally needs warehouse credentials.** Snowflake / BigQuery / Databricks / Redshift connection details are gathered by `statsig-to-ld warehouse` interactively (Phase 2 wizard) — don't ask for them in chat; let the wizard collect them.
+
 ### Step 4 — Run each path
 
 - **Path A.** Load [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md) and run its seven phases as written. The skill handles its own credentials, version resolution, code translation, and report.
 - **Paths B / D / C.** Follow [`AGENTS.md`](AGENTS.md) for the per-subcommand flow (`--dry-run` first, fail-closed semantics for targeting, `--accept-data-loss` opt-ins, idempotency notes, report locations). Confirm the LD project key with the user before applying. Always dry-run before apply.
+- **Path E.** Follow [`AGENTS.md`](AGENTS.md) for the cross-CLI conventions (credentials, dry-run, `--ld-project`), then [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) for the warehouse-specific flow: three phases (export → integration setup → data sources + metrics), interactive wizard for the warehouse type, `migration_state.json` for resume support, `--only data-sources` / `--only metrics` to scope a re-run.
 
 ### Step 5 — Summarize results
 
@@ -82,6 +88,7 @@ After all selected paths complete, present a per-path summary:
 - **Path B**: flags created, flags skipped (already existed), incompatible flags
 - **Path D**: targeting applied, flags skipped as `skipped_lossy`, approximated operators
 - **Path C**: metrics converted, metrics skipped, DATA LOSS warnings
+- **Path E**: warehouse integrations set up (data export + experimentation), data sources created, warehouse-native metrics created, metric types skipped (`ratio` / `funnel` / `composite` / `undefined` have no LD equivalent)
 - **Next steps**: experiment migration (manual in LD), parallel SDK testing checklist, segments to recreate in LD UI, [`docs/migration-playbook.md`](docs/migration-playbook.md) for the rest
 
 ## Credentials reference
@@ -90,6 +97,7 @@ After all selected paths complete, present a per-path summary:
 |---|---|---|
 | Path A — SDK code | `LD_CLIENT_SIDE_ID` (client SDKs) or `LD_SDK_KEY` (Node SDK) | Inserted into `.env` interactively by the skill via `ldcli`; never via chat |
 | Paths B / D / C — CLI | `LD_API_KEY` + `STATSIG_CONSOLE_KEY` | Shell export (`read -rs`), or `--ld-key` / `--statsig-key` flags, or interactive prompt |
+| Path E — warehouse CLI | `LD_API_KEY` + `STATSIG_CONSOLE_KEY` + warehouse connection details | Same shell export as B/D/C for the API keys; warehouse connection details (Snowflake / BigQuery / Databricks / Redshift) are gathered by the `warehouse` subcommand's interactive wizard |
 
 Where to find each key:
 
@@ -97,7 +105,7 @@ Where to find each key:
 - **`LD_CLIENT_SIDE_ID` / `LD_SDK_KEY`** — LaunchDarkly → Account settings → Projects → [project] → [environment]. Use Client-Side ID for browser/React; Server SDK key for Node.
 - **`STATSIG_CONSOLE_KEY`** — Statsig Console → Project Settings → Keys & Environments. The `console-...` Console API key, not the SDK keys.
 
-Paths B / D / C share `LD_API_KEY` + `STATSIG_CONSOLE_KEY` — export once and all three CLI paths work.
+Paths B / D / C / E share `LD_API_KEY` + `STATSIG_CONSOLE_KEY` — export once and all four CLI paths work.
 
 ## Prerequisites
 
@@ -503,7 +511,7 @@ Release notes are generated from commits since the previous tag.
 
 Two AI surfaces live in this repo:
 
-1. **CLI-driving surfaces** — for `analyze`, `flags import`, `targeting import`, `metrics convert`. Backed by the agent-agnostic [`AGENTS.md`](AGENTS.md) (build, API-key handling, recommended sequence, per-subcommand usage, report analysis, troubleshooting). Treat it as authoritative.
+1. **CLI-driving surfaces** — for `analyze`, `flags import`, `targeting import`, `metrics convert`, `warehouse`. Backed by the agent-agnostic [`AGENTS.md`](AGENTS.md) (build, API-key handling, recommended sequence, per-subcommand usage, report analysis, troubleshooting). Treat it as authoritative. The warehouse subcommand has additional shim-only detail in [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md).
 2. **SDK-rewrite skill** — for the application-code rewrite step (Statsig SDK calls → LaunchDarkly SDK calls). Lives at [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md). Standalone Claude Code skill with progressive-disclosure references, helper scripts, and eval harnesses; it is **not** a shim over `AGENTS.md`.
 
 The CLI-driving surfaces each `@`-import `AGENTS.md`, so a change there propagates to every agent:
@@ -515,7 +523,8 @@ The CLI-driving surfaces each `@`-import `AGENTS.md`, so a change there propagat
 | **GitHub Copilot** | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) | Auto-loaded into every Copilot Chat session in this repo. |
 | **Aider** | [`.aider.conf.yml`](.aider.conf.yml) | Project config `read:` list auto-loads `AGENTS.md` as read-only context for every Aider session in this repo. |
 | **Claude Code** (skill) | [`.claude/skills/statsig-to-ld/SKILL.md`](.claude/skills/statsig-to-ld/SKILL.md) | Auto-loads on trigger phrases (subcommand names, API-key env vars, report filenames). |
-| **Claude Code** (subagent) | [`.claude/agents/statsig-to-ld.md`](.claude/agents/statsig-to-ld.md) | Invoke via the Task tool for a delegated end-to-end migration in a separate context. |
+| **Claude Code** (subagent — end-to-end CLI) | [`.claude/agents/statsig-to-ld.md`](.claude/agents/statsig-to-ld.md) | Invoke via the Task tool for a delegated end-to-end migration in a separate context. |
+| **Claude Code** (subagent — warehouse only) | [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) | Invoke via the Task tool when the user only needs Path E (warehouse-native experimentation). Encodes the wizard flow, SQL setup, and resume semantics that aren't in `AGENTS.md`. |
 | **Claude Code** (SDK-rewrite skill) | [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md) | Symlink/copy into `~/.claude/skills/`; auto-loads when the conversation mentions migrating Statsig SDK code to LaunchDarkly. **Different concern** from the table above — handles application-code rewrites, not the CLI. |
 
 If your agent isn't listed, point it at `AGENTS.md` (for the CLI) or `skills/statsig-to-launchdarkly-migrator/SKILL.md` (for SDK rewrites) directly.
