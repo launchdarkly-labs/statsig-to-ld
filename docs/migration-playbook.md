@@ -29,11 +29,13 @@ const ldUser = { kind: 'user', key: user.id, email: user.email };
 if (ldClient.boolVariation('show_banner', ldUser, false)) { ... }
 ```
 
+> **Automate this step with the bundled skill.** For JavaScript / TypeScript / React / Node.js, the [`skills/statsig-to-launchdarkly-migrator/`](../skills/statsig-to-launchdarkly-migrator/SKILL.md) Claude Code skill rewrites call sites, resolves current LD SDK versions via live `npm view`, wires the LD Client-Side ID via `ldcli`, and emits a `migration-summary.json` you can feed into `statsig-to-ld flags import`. It handles imports, initialization, contexts, flag evaluations, and observability — and flags experiments as blocked rather than migrating them silently. Use the skill for the call-site rewrites; use the steps below for the project-level decisions the skill can't make for you.
+
 **Recommended approach:**
 
 1. **Add the LaunchDarkly SDK alongside the Statsig SDK** — don't remove Statsig yet.
 2. **Decide a context-kind mapping**. Statsig calls take a `user` object with `userID` and properties; LaunchDarkly takes a richer `context` object with one or more context kinds. Many teams start by mapping every Statsig user to an LD `user` context, even if they target on `companyID`-style attributes in Statsig today.
-3. **Rewrite call sites**. Either by hand (recommended if you have <100 sites) or via a codemod (recommended if you have >500). The mappings are:
+3. **Rewrite call sites**. Use the [skill](../skills/statsig-to-launchdarkly-migrator/SKILL.md) (recommended for JS/TS/React/Node), by hand (acceptable if you have <100 sites), or via a custom codemod. The mappings are:
    - `statsig.checkGate(name, user)` → `ldClient.boolVariation(name, ctx, false)`
    - `statsig.getConfig(name, user).get(key, default)` → `ldClient.jsonVariation(name, ctx, default)` (then read the key)
    - `statsig.getExperiment(name, user)` → use an LD flag for the experiment variant

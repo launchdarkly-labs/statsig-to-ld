@@ -22,10 +22,11 @@ Five CLI subcommands plus a bundled Claude Code skill:
 - Go 1.24+ (to build from source) or a pre-built binary from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page
 - A Statsig **Console API Key** (`console-xxx`) — create at Statsig Console > Project Settings > Keys & Environments
 - A LaunchDarkly **API access token** (`api-xxx`) — create at **Account settings → Authorization → Access tokens** with a role that can write flags, metrics, and (optionally) environments in the target project. The Writer role works.
+- **For the SDK-rewrite skill only:** Claude Code (or another Claude interface), `node` 18+ to run the skill's helper scripts, and [`ldcli`](https://github.com/launchdarkly/ldcli) (the skill auto-installs it if missing).
 
 ## Installation
 
-### From source
+### CLI (from source)
 
 ```bash
 go build -o statsig-to-ld .
@@ -35,9 +36,26 @@ go build -ldflags "-X github.com/launchdarkly-labs/statsig-to-ld/cmd.version=1.0
   -o statsig-to-ld .
 ```
 
-### Pre-built binaries
+### CLI (pre-built binary)
 
 Download from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page.
+
+### SDK-rewrite skill
+
+The Claude Code skill that rewrites Statsig SDK calls to LaunchDarkly is bundled in this repo at [`skills/statsig-to-launchdarkly-migrator/`](skills/statsig-to-launchdarkly-migrator/SKILL.md). To make it available to Claude Code in any project (not just this one), symlink or copy it into `~/.claude/skills/`:
+
+```bash
+mkdir -p ~/.claude/skills/
+
+# Symlink (recommended — picks up future updates from this repo)
+ln -s "$(pwd)/skills/statsig-to-launchdarkly-migrator" \
+  ~/.claude/skills/statsig-to-launchdarkly-migrator
+
+# Or, install a snapshot
+cp -R skills/statsig-to-launchdarkly-migrator ~/.claude/skills/
+```
+
+When running Claude Code inside *this* repository, no install step is needed — the skill auto-loads from `skills/`. A legacy compat shim at [`.claude/agents/statsig-to-launchdarkly-sdk-migrator.md`](.claude/agents/statsig-to-launchdarkly-sdk-migrator.md) redirects users who previously installed the older agent file.
 
 ## Quick start — full migration
 
@@ -401,9 +419,12 @@ Release notes are generated from commits since the previous tag.
 
 ## Using with AI coding agents
 
-This repo ships a single, agent-agnostic operator guide at [`AGENTS.md`](AGENTS.md) covering build, API-key handling, the recommended migration sequence, per-subcommand usage, report analysis, and troubleshooting. Treat it as authoritative.
+Two AI surfaces live in this repo:
 
-Agent-specific shims point back at the same guide so each agent's native discovery surface works without duplicating content:
+1. **CLI-driving surfaces** — for `analyze`, `flags import`, `targeting import`, `metrics convert`, `warehouse`. Backed by the agent-agnostic [`AGENTS.md`](AGENTS.md) (build, API-key handling, recommended sequence, per-subcommand usage, report analysis, troubleshooting). Treat it as authoritative. The warehouse subcommand has additional shim-only detail in [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md).
+2. **SDK-rewrite skill** — for the application-code rewrite step (Statsig SDK calls → LaunchDarkly SDK calls). Lives at [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md). Standalone Claude Code skill with progressive-disclosure references, helper scripts, and eval harnesses — **not** a shim over `AGENTS.md`.
+
+The CLI-driving surfaces each `@`-import `AGENTS.md`, so a change there propagates to every agent listed below:
 
 | Agent | File | How it loads |
 |---|---|---|
@@ -412,9 +433,11 @@ Agent-specific shims point back at the same guide so each agent's native discove
 | **GitHub Copilot** | [`.github/copilot-instructions.md`](.github/copilot-instructions.md) | Auto-loaded into every Copilot Chat session in this repo. |
 | **Aider** | [`.aider.conf.yml`](.aider.conf.yml) | Project config `read:` list auto-loads `AGENTS.md` as read-only context for every Aider session in this repo. |
 | **Claude Code** (skill) | [`.claude/skills/statsig-to-ld/SKILL.md`](.claude/skills/statsig-to-ld/SKILL.md) | Auto-loads on trigger phrases (subcommand names, API-key env vars, report filenames). |
-| **Claude Code** (subagent) | [`.claude/agents/statsig-to-ld.md`](.claude/agents/statsig-to-ld.md) | Invoke via the Task tool for a delegated end-to-end migration in a separate context. |
+| **Claude Code** (subagent — end-to-end CLI) | [`.claude/agents/statsig-to-ld.md`](.claude/agents/statsig-to-ld.md) | Invoke via the Task tool for a delegated end-to-end migration in a separate context. |
+| **Claude Code** (subagent — warehouse only) | [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) | Invoke via the Task tool when the user only needs Path E (warehouse-native experimentation). Encodes the wizard flow, SQL setup, and resume semantics that aren't in `AGENTS.md`. |
+| **Claude Code** (SDK-rewrite skill) | [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md) | Symlink/copy into `~/.claude/skills/` (see [Installation](#sdk-rewrite-skill)); auto-loads when the conversation mentions migrating Statsig SDK code to LaunchDarkly. **Different concern** from the CLI shims above — handles application-code rewrites, not the CLI. |
 
-Each shim `@`-imports `AGENTS.md`, so a change there propagates to every agent. If your agent isn't listed, point it at `AGENTS.md` directly.
+If your agent isn't listed, point it at [`AGENTS.md`](AGENTS.md) (for the CLI) or [`skills/statsig-to-launchdarkly-migrator/SKILL.md`](skills/statsig-to-launchdarkly-migrator/SKILL.md) (for SDK rewrites) directly.
 
 ## See also
 
