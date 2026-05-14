@@ -1,0 +1,12 @@
+{
+  "name": "expected-migration-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "launchdarkly-js-client-sdk": "^3.9.0",
+    "launchdarkly-react-client-sdk": "^3.9.0",
+    "@launchdarkly/node-server-sdk": "^9.10.0",
+    "@launchdarkly/observability": "^1.1.0",
+    "@launchdarkly/session-replay": "^1.1.0"
+  }
+}

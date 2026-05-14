@@ -1,3 +1,46 @@
+# Built binaries (anchored so they don't shadow same-named paths under skills/)
 /statsig-to-ld
 /statsig-metric-importer
+
+# CLI output
 migration-report.json
+
+# Claude local settings
+.claude/settings.local.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Skill dependencies (skills/statsig-to-launchdarkly-migrator/)
+node_modules/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp
+
+# Skill fixture migration outputs (skills/statsig-to-launchdarkly-migrator/tests/)
+skills/statsig-to-launchdarkly-migrator/tests/*.json
+skills/statsig-to-launchdarkly-migrator/tests/*launchdarkly*
+skills/statsig-to-launchdarkly-migrator/tests/*ld*
+
+# Skill output artifacts
+migration-versions.json
+migration-summary.json
