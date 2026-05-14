@@ -1,0 +1,188 @@
+{
+  "exported_at": "2026-05-13T20:00:00+00:00",
+  "warehouse_connection": {
+    "accountName": "LD_NATIVE_EXPERIMENTATION_DEV",
+    "snowflakeHostAddress": "IDMXGKA-LD_NATIVE_EXPERIMENTATION_DEV.snowflakecomputing.com",
+    "serviceUserName": "STATSIG_SERVICE_USER",
+    "stagingDatabaseName": "LD_EXPORT",
+    "stagingSchemaName": "EXPORT_SBODKE__NEW_ENVIRONMENT",
+    "computeWarehouse": "LD_EXPERIMENTATION_WH"
+  },
+  "metric_sources": [
+    {
+      "name": "product_activity_events",
+      "sourceType": "table",
+      "tableName": "LD_EXPORT.EXPORT_SBODKE__NEW_ENVIRONMENT.STAGING_METRIC_EVENTS",
+      "description": "Product activity events from user interactions",
+      "tags": ["production", "activity"],
+      "timestampColumn": "received_time",
+      "idTypeMapping": [
+        {
+          "statsigUnitID": "userID",
+          "column": "context_key"
+        }
+      ],
+      "customFieldMapping": [
+        {
+          "fieldName": "event_key",
+          "column": "event_key"
+        },
+        {
+          "fieldName": "event_value",
+          "column": "event_value"
+        }
+      ]
+    },
+    {
+      "name": "transaction_events",
+      "sourceType": "query",
+      "sql": "SELECT context_key, kind AS event_name, received_time AS timestamp, event_value FROM LD_EXPORT.EXPORT_SBODKE__NEW_ENVIRONMENT.STAGING_METRIC_EVENTS WHERE received_time >= DATEADD(day, -90, CURRENT_DATE())",
+      "description": "Transaction and billing events",
+      "tags": ["production", "billing"],
+      "timestampColumn": "received_time",
+      "idTypeMapping": [
+        {
+          "statsigUnitID": "userID",
+          "column": "context_key"
+        }
+      ],
+      "customFieldMapping": [
+        {
+          "fieldName": "event_name",
+          "column": "event_name"
+        },
+        {
+          "fieldName": "value",
+          "column": "event_value"
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "total_order_value",
+      "name": "Total Order Value",
+      "type": "sum",
+      "description": "Total order value per user",
+      "directionality": "increase",
+      "tags": ["revenue", "orders"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "transaction_events"
+          }
+        ]
+      }
+    },
+    {
+      "id": "trial_activation_rate",
+      "name": "Trial Activation Rate",
+      "type": "conversion",
+      "description": "Whether a user activated their trial",
+      "directionality": "increase",
+      "tags": ["onboarding", "growth"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "transaction_events"
+          }
+        ]
+      }
+    },
+    {
+      "id": "weekly_active_users",
+      "name": "Weekly Active Users",
+      "type": "user",
+      "description": "Count of unique active users per week",
+      "directionality": "increase",
+      "tags": ["engagement", "growth"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "product_activity_events"
+          }
+        ]
+      }
+    },
+    {
+      "id": "avg_response_time",
+      "name": "Average Response Time",
+      "type": "mean",
+      "description": "Mean API response time in milliseconds",
+      "directionality": "decrease",
+      "unit": "ms",
+      "tags": ["performance"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "product_activity_events"
+          }
+        ]
+      }
+    },
+    {
+      "id": "p99_load_time",
+      "name": "P99 Page Load Time",
+      "type": "percentile",
+      "description": "99th percentile page load time",
+      "directionality": "decrease",
+      "percentile": 99,
+      "unit": "ms",
+      "tags": ["performance"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "product_activity_events"
+          }
+        ]
+      }
+    },
+    {
+      "id": "onboarding_funnel",
+      "name": "Onboarding Funnel",
+      "type": "funnel",
+      "description": "Multi-step onboarding completion funnel",
+      "directionality": "increase",
+      "tags": ["onboarding"]
+    },
+    {
+      "id": "arpu_ratio",
+      "name": "Average Revenue Per User",
+      "type": "ratio",
+      "description": "Revenue divided by active user count",
+      "directionality": "increase",
+      "tags": []
+    },
+    {
+      "id": "draft_metric::not_ready",
+      "name": "DraftMetric",
+      "type": "undefined",
+      "description": "",
+      "directionality": "increase",
+      "tags": []
+    },
+    {
+      "id": "d14_retention",
+      "name": "14-Day Retention",
+      "type": "retention",
+      "description": "User retention at day 14",
+      "directionality": "increase",
+      "tags": ["retention", "growth"]
+    },
+    {
+      "id": "feature_click_count",
+      "name": "Feature Click Count",
+      "type": "event_count",
+      "description": "Total feature click events per user",
+      "directionality": "increase",
+      "tags": ["engagement", "product"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "product_activity_events"
+          }
+        ]
+      }
+    }
+  ]
+}

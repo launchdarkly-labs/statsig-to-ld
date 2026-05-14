@@ -6,7 +6,7 @@ A CLI for migrating from Statsig to LaunchDarkly.
 
 ## Overview
 
-Four CLI subcommands plus a bundled Claude Code skill:
+Five CLI subcommands plus a bundled Claude Code skill:
 
 | Surface | What it does | Writes to |
 |---|---|---|
@@ -14,6 +14,7 @@ Four CLI subcommands plus a bundled Claude Code skill:
 | [`flags import`](#flags-import) (CLI) | Create LaunchDarkly flag shells from Statsig gates and dynamic configs | LaunchDarkly |
 | [`targeting import`](#targeting-import) (CLI) | Apply per-environment targeting rules, rollouts, and overrides | LaunchDarkly |
 | [`metrics convert`](#metrics-convert) (CLI) | Convert Statsig metric definitions | LaunchDarkly |
+| [`warehouse`](#warehouse-native-migration) (CLI) | Migrate Statsig warehouse-native experimentation (integration + data sources + metrics) | LaunchDarkly + warehouse |
 | [`skills/statsig-to-launchdarkly-migrator/`](skills/statsig-to-launchdarkly-migrator/SKILL.md) (Claude Code skill) | Rewrite Statsig SDK calls → LaunchDarkly SDK calls in your codebase | Your source files |
 
 ## Prerequisites
@@ -226,6 +227,135 @@ There's also a softer category — **approximated operators** — that import wi
 |---|---|
 | `version_gte` | Emitted as `semVerGreaterThan` (LD has no `semVerGreaterThanOrEqual`) |
 | `version_lte` | Emitted as `semVerLessThan` |
+
+## Warehouse Native Migration
+
+The `warehouse` subcommand migrates Statsig's warehouse-native experimentation setup to LaunchDarkly. It handles the full pipeline: warehouse integration setup, metric data source creation, and metric migration.
+
+### How it works
+
+The migration runs in three phases:
+
+1. **Export** — Fetches warehouse connection config, metric sources, and metrics from Statsig (or loads from a JSON export file)
+2. **Warehouse setup** — Sets up data export and experimentation integrations in LaunchDarkly (interactive wizards for Snowflake, BigQuery, Databricks, Redshift)
+3. **Migrate** — Creates metric data sources and metrics in LaunchDarkly, using the warehouse preview API to discover real column schemas
+
+### Quick start
+
+```bash
+# 1. Preview what will happen (no LD changes)
+statsig-to-ld warehouse \
+  --statsig-key console-YOUR_KEY \
+  --dry-run
+
+# 2. Run the full migration
+statsig-to-ld warehouse \
+  --statsig-key console-YOUR_KEY \
+  --ld-key api-YOUR_KEY \
+  --ld-project my-project \
+  --ld-environment production
+```
+
+### From an export file
+
+You can export Statsig data to a JSON file first, then run the migration from that file. This is useful for reviewing the data before migrating, or for running the migration in a different environment.
+
+```bash
+# Export first (dry-run saves a statsig_export_*.json file)
+statsig-to-ld warehouse \
+  --statsig-key console-YOUR_KEY --dry-run
+
+# Migrate from the export file (no Statsig key needed)
+statsig-to-ld warehouse \
+  --ld-key api-YOUR_KEY \
+  --ld-project my-project \
+  --ld-environment production \
+  --statsig-export-file statsig_export_2026-05-13_120000.json
+```
+
+### Resuming a failed migration
+
+If the migration fails partway through, use `--resume` to pick up where it left off. The tool saves progress to `migration_state.json` and skips already-created entities.
+
+```bash
+statsig-to-ld warehouse \
+  --ld-key api-YOUR_KEY \
+  --ld-project my-project \
+  --ld-environment production \
+  --statsig-export-file export.json \
+  --resume
+```
+
+### Migrating only data sources or metrics
+
+```bash
+# Only create data sources (skip metrics)
+statsig-to-ld warehouse \
+  --ld-key api-YOUR_KEY --ld-project my-project --ld-environment production \
+  --statsig-export-file export.json --only data-sources
+
+# Only create metrics (skip data sources)
+statsig-to-ld warehouse \
+  --ld-key api-YOUR_KEY --ld-project my-project --ld-environment production \
+  --statsig-export-file export.json --only metrics
+```
+
+### Skipping warehouse setup
+
+If data export and experimentation integrations are already configured in LD, the tool detects them automatically and skips setup. To skip the check entirely:
+
+```bash
+statsig-to-ld warehouse \
+  --ld-key api-YOUR_KEY --ld-project my-project --ld-environment production \
+  --statsig-export-file export.json --skip-warehouse
+```
+
+### Warehouse flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--statsig-key` | — | Statsig Console API key (or `STATSIG_CONSOLE_KEY` env) |
+| `--statsig-url` | Statsig Cloud | Statsig API base URL override |
+| `--statsig-export-file` | — | Load Statsig data from a JSON export file |
+| `--ld-key` | — | LaunchDarkly API access token (or `LD_API_KEY` env) |
+| `--ld-url` | US Cloud | LaunchDarkly API base URL (for EU/FedRAMP) |
+| `--ld-project` | — | LaunchDarkly project key (required) |
+| `--ld-environment` | — | LaunchDarkly environment key (required) |
+| `--dry-run` | `false` | Export and preview mapping without writing to LD |
+| `--resume` | `false` | Resume from `migration_state.json` |
+| `--skip-warehouse` | `false` | Skip warehouse connection setup (Phase 2) |
+| `--only` | — | Migrate only `data-sources` or `metrics` |
+| `--overwrite` | `false` | Overwrite existing entities in LD |
+| `--verbose` | `false` | Show detailed API request/response info |
+| `--no-color` | `false` | Disable colored terminal output |
+
+### Supported warehouse types
+
+| Warehouse | Data export | Experimentation | Interactive setup |
+|---|---|---|---|
+| Snowflake | Automated (SQL script + connection test) | Automated (SQL script + verification) | Yes |
+| BigQuery | Manual (LD UI) | Automated (service account key) | Yes |
+| Databricks | Manual (LD UI) | Automated (access token) | Yes |
+| Redshift | Manual (LD UI) | Automated (IAM role + SQL scripts) | Yes |
+
+### Warehouse metric type mapping
+
+| Statsig type | LD mapping | Notes |
+|---|---|---|
+| `sum` | numeric, unitAggregationType: sum | |
+| `mean` | numeric, unitAggregationType: average | |
+| `event_count` | numeric, unitAggregationType: sum | |
+| `count_distinct` | numeric, unitAggregationType: sum | |
+| `percentile` | numeric, analysisType: percentile | eventDefault disabled |
+| `user` / `user_count` | non-numeric (conversion) | |
+| `conversion` | non-numeric (conversion) | |
+| `retention` | non-numeric (conversion) | |
+| `ratio` | — | Skipped (no LD equivalent) |
+| `funnel` | — | Skipped (no LD equivalent) |
+| `composite` | — | Skipped (no LD equivalent) |
+| `undefined` | — | Skipped (metric not configured) |
+
+> **Internal API endpoints.** The metric data source CRUD operations use LaunchDarkly's `/internal/` API endpoints. These endpoints accept API key authentication but are not part of the public API and may change without notice.
 
 ## Statsig features not carried over (metrics convert)
 

@@ -1,0 +1,192 @@
+{
+  "exported_at": "2026-05-12T20:00:00+00:00",
+  "warehouse_connection": {
+    "accountName": "LD_NATIVE_EXPERIMENTATION_DEV",
+    "snowflakeHostAddress": "IDMXGKA-LD_NATIVE_EXPERIMENTATION_DEV.snowflakecomputing.com",
+    "serviceUserName": "STATSIG_SERVICE_USER",
+    "stagingDatabaseName": "LD_EXPORT",
+    "stagingSchemaName": "EXPORT_SBODKE__NEW_ENVIRONMENT",
+    "computeWarehouse": "LD_EXPERIMENTATION_WH"
+  },
+  "metric_sources": [
+    {
+      "name": "daily_user_metrics_v2",
+      "sourceType": "table",
+      "tableName": "LD_EXPORT.EXPORT_SBODKE__NEW_ENVIRONMENT.STAGING_METRIC_EVENTS",
+      "description": "Daily aggregated user metrics from product events",
+      "tags": ["production", "daily"],
+      "timestampColumn": "received_time",
+      "idTypeMapping": [
+        {
+          "statsigUnitID": "userID",
+          "column": "context_key"
+        },
+        {
+          "statsigUnitID": "companyID",
+          "column": "context_key"
+        }
+      ],
+      "customFieldMapping": [
+        {
+          "fieldName": "event_key",
+          "column": "event_key"
+        },
+        {
+          "fieldName": "event_value",
+          "column": "event_value"
+        }
+      ]
+    },
+    {
+      "name": "conversion_events",
+      "sourceType": "query",
+      "sql": "SELECT context_key, kind AS event_name, received_time AS timestamp, event_value FROM LD_EXPORT.EXPORT_SBODKE__NEW_ENVIRONMENT.STAGING_METRIC_EVENTS WHERE received_time >= DATEADD(day, -90, CURRENT_DATE())",
+      "description": "Conversion and purchase events",
+      "tags": ["production"],
+      "timestampColumn": "received_time",
+      "idTypeMapping": [
+        {
+          "statsigUnitID": "userID",
+          "column": "context_key"
+        }
+      ],
+      "customFieldMapping": [
+        {
+          "fieldName": "event_name",
+          "column": "event_name"
+        },
+        {
+          "fieldName": "value",
+          "column": "event_value"
+        }
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "id": "purchase_revenue",
+      "name": "Purchase Revenue",
+      "type": "sum",
+      "description": "Total purchase revenue per user",
+      "directionality": "increase",
+      "tags": ["revenue", "★ Core KPI"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "conversion_events"
+          }
+        ]
+      }
+    },
+    {
+      "id": "signup_conversion",
+      "name": "Signup Conversion Rate",
+      "type": "conversion",
+      "description": "Whether a user completed signup",
+      "directionality": "increase",
+      "tags": ["onboarding"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "conversion_events"
+          }
+        ]
+      }
+    },
+    {
+      "id": "daily_active_users",
+      "name": "Daily Active Users",
+      "type": "user",
+      "description": "Count of unique active users per day",
+      "directionality": "increase",
+      "tags": ["★ Core KPI", "engagement"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "daily_user_metrics_v2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "avg_session_duration",
+      "name": "Average Session Duration",
+      "type": "mean",
+      "description": "Mean session duration in seconds",
+      "directionality": "increase",
+      "unit": "seconds",
+      "tags": ["engagement"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "daily_user_metrics_v2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "p95_latency",
+      "name": "P95 Latency",
+      "type": "percentile",
+      "description": "95th percentile response latency",
+      "directionality": "decrease",
+      "percentile": 95,
+      "unit": "ms",
+      "tags": ["performance"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "daily_user_metrics_v2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "checkout_funnel",
+      "name": "Checkout Funnel",
+      "type": "funnel",
+      "description": "Multi-step checkout funnel conversion",
+      "directionality": "increase",
+      "tags": ["revenue"]
+    },
+    {
+      "id": "revenue_per_session_ratio",
+      "name": "Revenue per Session",
+      "type": "ratio",
+      "description": "Revenue divided by session count",
+      "directionality": "increase",
+      "tags": []
+    },
+    {
+      "id": "incomplete_metric::setup_incomplete",
+      "name": "IncompleteMetric",
+      "type": "undefined",
+      "description": "",
+      "directionality": "increase",
+      "tags": []
+    },
+    {
+      "id": "d7_retention",
+      "name": "7-Day Retention",
+      "type": "retention",
+      "description": "User retention at day 7",
+      "directionality": "increase",
+      "tags": ["retention", "★ Core KPI"]
+    },
+    {
+      "id": "event_count_pageviews",
+      "name": "Total Pageviews",
+      "type": "event_count",
+      "description": "Total pageview events per user",
+      "directionality": "increase",
+      "tags": ["engagement"],
+      "warehouseNative": {
+        "metricSources": [
+          {
+            "metricSourceName": "daily_user_metrics_v2"
+          }
+        ]
+      }
+    }
+  ]
+}

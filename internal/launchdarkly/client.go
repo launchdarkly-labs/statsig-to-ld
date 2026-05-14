@@ -56,6 +56,10 @@ type Client struct {
 	projectKey string
 	apiBase    string
 	httpClient *http.Client
+
+	// EnvironmentKey is set by the warehouse command for environment-scoped operations.
+	// The convert command does not use it.
+	EnvironmentKey string
 }
 
 // NewClient creates a new LaunchDarkly REST API client.
