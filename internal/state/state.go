@@ -21,7 +21,6 @@ type Error struct {
 type Data struct {
 	WarehouseSetup     bool     `json:"warehouse_setup"`
 	DataSourcesCreated []string `json:"data_sources_created"`
-	MetricsCreated     []string `json:"metrics_created"`
 	Errors             []Error  `json:"errors"`
 }
 
@@ -79,22 +78,6 @@ func (s *MigrationState) IsDataSourceDone(key string) bool {
 // MarkDataSourceDone records a data source as created.
 func (s *MigrationState) MarkDataSourceDone(key string) {
 	s.data.DataSourcesCreated = append(s.data.DataSourcesCreated, key)
-	s.Save()
-}
-
-// IsMetricDone returns true if the metric was created in a previous run.
-func (s *MigrationState) IsMetricDone(key string) bool {
-	for _, k := range s.data.MetricsCreated {
-		if k == key {
-			return true
-		}
-	}
-	return false
-}
-
-// MarkMetricDone records a metric as created.
-func (s *MigrationState) MarkMetricDone(key string) {
-	s.data.MetricsCreated = append(s.data.MetricsCreated, key)
 	s.Save()
 }
 

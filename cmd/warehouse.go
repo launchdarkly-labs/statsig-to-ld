@@ -30,7 +30,6 @@ var (
 	whFlagLDEnvironment     string
 	whFlagDryRun            bool
 	whFlagResume            bool
-	whFlagSkipWarehouse     bool
 	whFlagOnly              string
 	whFlagOverwrite         bool
 	whFlagVerbose           bool
@@ -39,22 +38,28 @@ var (
 
 var warehouseCmd = &cobra.Command{
 	Use:   "warehouse",
-	Short: "Migrate Statsig warehouse-native experimentation to LaunchDarkly",
-	Long: `Set up warehouse connections, migrate data sources, and create
-warehouse-native metrics in LaunchDarkly from a Statsig export.
+	Short: "Set up LaunchDarkly warehouse integrations and metric data sources from Statsig",
+	Long: `Set up LaunchDarkly warehouse integrations and metric data sources from a
+Statsig warehouse-native project.
 
-This command runs a 3-phase migration:
-  Phase 1: Export/load Statsig warehouse config, metric sources, and metrics
-  Phase 2: Set up data export and experimentation integrations in LD
-  Phase 3: Create metric data sources and metrics in LD
+Does NOT migrate metric definitions. After this completes, run
+'statsig-to-ld metrics convert --source-mapping source-mapping.json' to migrate
+the warehouse-native metrics — the source-mapping.json file is written by this
+command and binds each Statsig metric source to the LD data source key it just
+created.
+
+This command runs in three phases:
+  Phase 1: Export warehouse config and metric sources from Statsig
+  Phase 2: Set up data export + experimentation integrations in LD (interactive wizard)
+  Phase 3: Create LD metric data sources
 
 Examples:
-  # Full migration from live Statsig API
+  # Full flow from live Statsig API
   statsig-to-ld warehouse \
     --statsig-key console-XXX --ld-key api-XXX \
     --ld-project my-project --ld-environment production
 
-  # Migration from a previously exported JSON file
+  # From a previously exported JSON file
   statsig-to-ld warehouse \
     --ld-key api-XXX --ld-project my-project --ld-environment production \
     --statsig-export-file statsig_export.json
@@ -63,7 +68,17 @@ Examples:
   statsig-to-ld warehouse \
     --statsig-key console-XXX --dry-run
 
-  # Resume a failed migration
+  # Set up integrations only (skip data source creation)
+  statsig-to-ld warehouse \
+    --ld-key api-XXX --ld-project my-project --ld-environment production \
+    --statsig-export-file statsig_export.json --only warehouse
+
+  # Set up data sources only (skip integrations wizard — assumes integrations exist in LD)
+  statsig-to-ld warehouse \
+    --ld-key api-XXX --ld-project my-project --ld-environment production \
+    --statsig-export-file statsig_export.json --only data-sources
+
+  # Resume a failed run
   statsig-to-ld warehouse \
     --ld-key api-XXX --ld-project my-project --ld-environment production \
     --statsig-export-file statsig_export.json --resume`,
@@ -80,10 +95,9 @@ func init() {
 	warehouseCmd.Flags().StringVar(&whFlagLDURL, "ld-url", "", "LaunchDarkly API base URL")
 	warehouseCmd.Flags().StringVar(&whFlagLDProject, "ld-project", "", "LaunchDarkly project key (required)")
 	warehouseCmd.Flags().StringVar(&whFlagLDEnvironment, "ld-environment", "", "LaunchDarkly environment key (required)")
-	warehouseCmd.Flags().BoolVar(&whFlagDryRun, "dry-run", false, "Export and show mapping without writing to LD")
+	warehouseCmd.Flags().BoolVar(&whFlagDryRun, "dry-run", false, "Export and preview data source mapping without writing to LD")
 	warehouseCmd.Flags().BoolVar(&whFlagResume, "resume", false, "Resume from migration_state.json")
-	warehouseCmd.Flags().BoolVar(&whFlagSkipWarehouse, "skip-warehouse", false, "Skip warehouse connection setup")
-	warehouseCmd.Flags().StringVar(&whFlagOnly, "only", "", "Migrate only 'data-sources' or 'metrics'")
+	warehouseCmd.Flags().StringVar(&whFlagOnly, "only", "", "Run only 'warehouse' (Phase 2) or 'data-sources' (Phase 3)")
 	warehouseCmd.Flags().BoolVar(&whFlagOverwrite, "overwrite", false, "Overwrite existing entities in LD")
 	warehouseCmd.Flags().BoolVar(&whFlagVerbose, "verbose", false, "Show detailed API request/response info")
 	warehouseCmd.Flags().BoolVar(&whFlagNoColor, "no-color", false, "Disable colored output")
@@ -99,7 +113,6 @@ type reportCounts struct {
 
 type migrationReport struct {
 	DataSources reportCounts `json:"data_sources"`
-	Metrics     reportCounts `json:"metrics"`
 	Warehouse   struct {
 		Created bool `json:"created"`
 		Skipped bool `json:"skipped"`
@@ -121,7 +134,6 @@ type migrationEngine struct {
 	environmentKey string
 	exportFile     string
 	dryRun         bool
-	skipWarehouse  bool
 	only           string
 	overwrite      bool
 	verbose        bool
@@ -129,7 +141,6 @@ type migrationEngine struct {
 	whConnections map[string]any
 	whPrefilled   map[string]string
 	metricSources []map[string]any
-	metrics       []map[string]any
 
 	environmentID string
 	projectID     string
@@ -184,7 +195,6 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 		environmentKey: whFlagLDEnvironment,
 		exportFile:     whFlagStatsigExportFile,
 		dryRun:         whFlagDryRun,
-		skipWarehouse:  whFlagSkipWarehouse,
 		only:           whFlagOnly,
 		overwrite:      whFlagOverwrite,
 		verbose:        whFlagVerbose,
@@ -197,6 +207,13 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 func (e *migrationEngine) run() error {
 	output.Banner()
 
+	switch e.only {
+	case "", "warehouse", "data-sources":
+		// valid
+	default:
+		return fmt.Errorf("--only must be 'warehouse' or 'data-sources' (got %q)", e.only)
+	}
+
 	// Phase 1
 	if e.exportFile != "" {
 		e.phase1LoadFromFile()
@@ -208,6 +225,11 @@ func (e *migrationEngine) run() error {
 
 	if e.dryRun {
 		e.printDryRunReport()
+		if e.only != "warehouse" {
+			if err := e.writeSourceMapping(); err != nil {
+				output.Warn(fmt.Sprintf("Could not write source-mapping.json: %v", err))
+			}
+		}
 		return nil
 	}
 
@@ -216,8 +238,8 @@ func (e *migrationEngine) run() error {
 		return err
 	}
 
-	// Phase 2
-	if !e.skipWarehouse && e.only != "metrics" {
+	// Phase 2 — set up warehouse integrations
+	if e.only != "data-sources" {
 		if e.whConnections != nil {
 			if err := e.phase2WarehouseSetup(); err != nil {
 				return err
@@ -227,16 +249,19 @@ func (e *migrationEngine) run() error {
 		}
 	}
 
-	// Phase 3
-	if e.only != "metrics" {
+	// Phase 3 — create LD metric data sources
+	if e.only != "warehouse" {
 		e.phase3aMigrateDataSources()
-	}
-	if e.only != "data-sources" {
-		e.phase3bMigrateMetrics()
 	}
 
 	e.printReport()
 	e.saveReport()
+	if e.only != "warehouse" {
+		if err := e.writeSourceMapping(); err != nil {
+			output.Warn(fmt.Sprintf("Could not write source-mapping.json: %v", err))
+		}
+		e.printHandoff()
+	}
 	return nil
 }
 
@@ -321,13 +346,6 @@ func (e *migrationEngine) phase1Export() error {
 	sqlConfig := warehouse.ExtractFromSQLParsing(e.metricSources)
 	e.whPrefilled = warehouse.MergeConfigs(sqlConfig, whConfig)
 
-	fmt.Fprint(os.Stderr, "  Fetching metrics... ")
-	e.metrics, err = e.sg.ListAllMetricsRaw(e.ctx)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "found %d metrics\n", len(e.metrics))
-
 	// Save export
 	ts := time.Now().Format("2006-01-02_150405")
 	exportPath := fmt.Sprintf("statsig_export_%s.json", ts)
@@ -336,7 +354,6 @@ func (e *migrationEngine) phase1Export() error {
 		"warehouse_connection":       e.whConnections,
 		"warehouse_config_prefilled": e.whPrefilled,
 		"metric_sources":             e.metricSources,
-		"metrics":                    e.metrics,
 	}
 	raw, _ := json.MarshalIndent(exportData, "", "  ")
 	_ = os.WriteFile(exportPath, raw, 0o644)
@@ -360,7 +377,6 @@ func (e *migrationEngine) phase1LoadFromFile() {
 
 	e.whConnections = jsonutil.GetMap(data, "warehouse_connection")
 	e.metricSources = jsonutil.ExtractMapSlice(data, "metric_sources")
-	e.metrics = jsonutil.ExtractMapSlice(data, "metrics")
 
 	whConfig := map[string]string{}
 	if e.whConnections != nil {
@@ -370,7 +386,6 @@ func (e *migrationEngine) phase1LoadFromFile() {
 	e.whPrefilled = warehouse.MergeConfigs(sqlConfig, whConfig)
 
 	output.Ok(fmt.Sprintf("Loaded %d metric sources", len(e.metricSources)))
-	output.Ok(fmt.Sprintf("Loaded %d metrics", len(e.metrics)))
 	if e.whConnections != nil {
 		output.Ok("Loaded warehouse connection config")
 	}
@@ -633,87 +648,6 @@ func (e *migrationEngine) phase3aMigrateDataSources() {
 	}
 }
 
-func (e *migrationEngine) phase3bMigrateMetrics() {
-	fmt.Fprintln(os.Stderr)
-	output.Info("Migrating metrics...")
-
-	if len(e.metrics) == 0 {
-		output.Info("No metrics to migrate.")
-		return
-	}
-
-	dsKeyLookup := map[string]string{}
-	for _, source := range e.metricSources {
-		name := jsonutil.GetStr(source, "name")
-		dsKeyLookup[name] = warehouse.SanitizeKey(name)
-	}
-
-	existingKeys := map[string]bool{}
-	if !e.overwrite {
-		for _, m := range e.ld.ListMetricsRaw(e.ctx) {
-			existingKeys[jsonutil.GetStr(m, "key")] = true
-		}
-	}
-
-	total := len(e.metrics)
-	for i, statsigMetric := range e.metrics {
-		metricType := strings.ToLower(jsonutil.GetStr(statsigMetric, "type"))
-		if metricType == "" {
-			metricType = "custom"
-		}
-		name := jsonutil.GetStr(statsigMetric, "name")
-		if name == "" {
-			name = fmt.Sprintf("metric-%d", i+1)
-		}
-
-		body, warning := warehouse.MapMetric(statsigMetric, dsKeyLookup)
-		if warning != "" {
-			e.report.Warnings = append(e.report.Warnings, warning)
-		}
-
-		if body == nil {
-			output.Progress(i+1, total, name, metricType)
-			output.Skip(fmt.Sprintf("unsupported type: %s", metricType))
-			e.report.Metrics.Skipped++
-			continue
-		}
-
-		key := jsonutil.GetStr(body, "key")
-		output.Progress(i+1, total, name, metricType)
-
-		if e.state.IsMetricDone(key) {
-			output.Skip("already migrated")
-			e.report.Metrics.Skipped++
-			continue
-		}
-		if existingKeys[key] && !e.overwrite {
-			output.Skip("already exists in LD")
-			e.state.MarkMetricDone(key)
-			e.report.Metrics.Skipped++
-			continue
-		}
-
-		_, err := e.ld.CreateMetricRaw(e.ctx, body)
-		if err != nil {
-			errStr := err.Error()
-			if strings.Contains(errStr, "409") || strings.Contains(errStr, "onflict") || strings.Contains(errStr, "uplicate") {
-				output.Skip("already exists in LD")
-				e.state.MarkMetricDone(key)
-				e.report.Metrics.Skipped++
-				continue
-			}
-			output.Fail(jsonutil.Truncate(errStr, 80))
-			e.state.AddError("metric", key, errStr)
-			e.report.Metrics.Failed++
-			e.report.Errors = append(e.report.Errors, fmt.Sprintf("Metric \"%s\": %v", name, err))
-		} else {
-			output.Done()
-			e.state.MarkMetricDone(key)
-			e.report.Metrics.Created++
-		}
-	}
-}
-
 func (e *migrationEngine) printDryRunReport() {
 	fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 60))
 	fmt.Fprintln(os.Stderr, "  DRY RUN -- No changes were made to LaunchDarkly")
@@ -738,24 +672,11 @@ func (e *migrationEngine) printDryRunReport() {
 		fmt.Fprintf(os.Stderr, "    - %s (%s)\n", name, st)
 	}
 
-	var supported, unsupported int
-	for _, m := range e.metrics {
-		mt := strings.ToLower(jsonutil.GetStr(m, "type"))
-		if warehouse.UnsupportedMetricTypes[mt] {
-			unsupported++
-		} else {
-			supported++
-		}
-	}
-	fmt.Fprintf(os.Stderr, "\n  Metrics that would be created: %d\n", supported)
-	if unsupported > 0 {
-		fmt.Fprintf(os.Stderr, "  Metrics that would be SKIPPED (unsupported type): %d\n", unsupported)
-	}
+	fmt.Fprintln(os.Stderr, "\n  Note: metric definitions are migrated separately by `statsig-to-ld metrics convert`.")
 }
 
 func (e *migrationEngine) printReport() {
 	ds := e.report.DataSources
-	mt := e.report.Metrics
 
 	fmt.Fprintf(os.Stderr, "\n%s\n", strings.Repeat("=", 60))
 	fmt.Fprintln(os.Stderr, "  Migration Complete")
@@ -769,7 +690,6 @@ func (e *migrationEngine) printReport() {
 	}
 	fmt.Fprintf(os.Stderr, "  Warehouse Connection:  %s\n", whStatus)
 	fmt.Fprintf(os.Stderr, "  Metric Data Sources:   %d created, %d skipped, %d failed\n", ds.Created, ds.Skipped, ds.Failed)
-	fmt.Fprintf(os.Stderr, "  Metrics:               %d created, %d skipped, %d failed\n", mt.Created, mt.Skipped, mt.Failed)
 
 	if len(e.report.Warnings) > 0 {
 		fmt.Fprintf(os.Stderr, "\n  Warnings:\n")
@@ -791,4 +711,47 @@ func (e *migrationEngine) saveReport() {
 	raw, _ := json.MarshalIndent(e.report, "", "  ")
 	_ = os.WriteFile(path, raw, 0o644)
 	fmt.Fprintf(os.Stderr, "\n  Full report: %s\n", path)
+}
+
+// writeSourceMapping writes a source-mapping.json that maps each Statsig
+// metric source name to the LD data source key created in Phase 3a. This
+// is the input format `statsig-to-ld metrics convert --source-mapping`
+// expects, so the user can chain the two commands without hand-building
+// the mapping.
+func (e *migrationEngine) writeSourceMapping() error {
+	if len(e.metricSources) == 0 {
+		return nil
+	}
+	mapping := map[string]string{}
+	for _, source := range e.metricSources {
+		name := jsonutil.GetStr(source, "name")
+		if name == "" {
+			continue
+		}
+		mapping[name] = warehouse.SanitizeKey(name)
+	}
+	if len(mapping) == 0 {
+		return nil
+	}
+	raw, err := json.MarshalIndent(mapping, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile("source-mapping.json", raw, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "  Source mapping:        source-mapping.json (%d entries)\n", len(mapping))
+	return nil
+}
+
+// printHandoff prints the next-step command the user should run to migrate
+// warehouse-native metric definitions, now that data sources exist in LD.
+func (e *migrationEngine) printHandoff() {
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  Next step — migrate metric definitions:")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "    statsig-to-ld metrics convert --all \\\n")
+	fmt.Fprintf(os.Stderr, "      --ld-project %s \\\n", e.projectKey)
+	fmt.Fprintln(os.Stderr, "      --source-mapping source-mapping.json")
+	fmt.Fprintln(os.Stderr)
 }
