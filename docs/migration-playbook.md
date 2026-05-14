@@ -1,49 +1,56 @@
 # Migration playbook: Statsig → LaunchDarkly
 
-This document covers everything **outside** the `statsig-to-ld` CLI. The CLI migrates flag/metric definitions and targeting rules; this document covers the rest of what a successful Statsig → LaunchDarkly migration needs.
+This document covers the parts of a Statsig → LaunchDarkly migration **that this repo doesn't fully automate**. The repo ships two automated surfaces:
 
-If you've already read the [README](../README.md), you know what the CLI does. This playbook is about what it doesn't do.
+- The **`statsig-to-ld` CLI** for flag/metric/targeting definitions and warehouse-native experimentation.
+- The **`skills/statsig-to-launchdarkly-migrator/` Claude Code skill** for application-code SDK rewrites.
+
+Once you've run those, several non-trivial project decisions are still on you: layers, experiment setup, segment recreation, validation strategy, cutover, and rollback. That's what this document is about.
+
+> Coming from the [README](../README.md)? The README's **Agent Instructions** section is the bootstrap — it orchestrates the CLI and the skill end-to-end. This playbook covers what neither tool does.
 
 ## The fundamental scoping decision
 
-`statsig-to-ld` moves **definitions** (flag shells, targeting rules, metric configurations) from Statsig into LaunchDarkly. After running it end-to-end:
+The repo's automated surfaces cover three things end-to-end:
 
-- Your LaunchDarkly project has flags with the same names, rules, rollouts, and overrides as Statsig.
-- Your LaunchDarkly metrics dashboard has your metrics.
-- **Your application still calls Statsig.** The LD flags evaluate; nothing reads them.
+- **Application code that calls Statsig** is rewritten to call LaunchDarkly by the [skill](../skills/statsig-to-launchdarkly-migrator/SKILL.md).
+- **Flag, metric, and targeting *definitions*** are moved from Statsig to LaunchDarkly by `statsig-to-ld`.
+- **Warehouse-native experimentation** (Snowflake / BigQuery / Databricks / Redshift integrations + data sources + warehouse-native metrics) is set up by `statsig-to-ld warehouse`.
 
-The migration isn't done until your application code reads from LaunchDarkly. That's outside this tool's scope.
+After running all of the above end-to-end, you still need to make project decisions about segments, layers, experiments, validation, cutover, and rollback. Those decisions are what this document covers.
 
-## What the CLI does NOT do
+## What this repo does NOT fully automate
 
-### 1. SDK call-site rewrites
+### 1. SDK call-site rewrites — use the bundled skill, then validate
 
-Statsig SDK calls in your application still hit Statsig. The CLI does not modify your code.
+For JavaScript / TypeScript / React / Node.js codebases, the application-code rewrite is automated by the bundled [`skills/statsig-to-launchdarkly-migrator/`](../skills/statsig-to-launchdarkly-migrator/SKILL.md) Claude Code skill. The skill walks the codebase, resolves current LD SDK versions via live `npm view` (avoiding stale package names), wires the LD Client-Side ID via `ldcli` without exposing it in chat, rewrites imports / initialization / contexts / flag evaluations / observability, and emits a `migration-summary.json` containing the canonical flag-key list you can feed into `statsig-to-ld flags import`. Experiments are flagged and left in place rather than migrated silently.
+
+For other languages (Go, Java, Python, Ruby, Swift, Kotlin), the rewrite is currently manual. The mapping is the same:
 
 ```js
-// Before (and still, until you change it):
+// Before:
 if (statsig.checkGate('show_banner', user)) { ... }
 
-// After (you need to write this):
+// After:
 const ldUser = { kind: 'user', key: user.id, email: user.email };
 if (ldClient.boolVariation('show_banner', ldUser, false)) { ... }
 ```
 
-> **Automate this step with the bundled skill.** For JavaScript / TypeScript / React / Node.js, the [`skills/statsig-to-launchdarkly-migrator/`](../skills/statsig-to-launchdarkly-migrator/SKILL.md) Claude Code skill rewrites call sites, resolves current LD SDK versions via live `npm view`, wires the LD Client-Side ID via `ldcli`, and emits a `migration-summary.json` you can feed into `statsig-to-ld flags import`. It handles imports, initialization, contexts, flag evaluations, and observability — and flags experiments as blocked rather than migrating them silently. Use the skill for the call-site rewrites; use the steps below for the project-level decisions the skill can't make for you.
+The call-shape translations:
 
-**Recommended approach:**
+- `statsig.checkGate(name, user)` → `ldClient.boolVariation(name, ctx, false)`
+- `statsig.getConfig(name, user).get(key, default)` → `ldClient.jsonVariation(name, ctx, default)` (then read the key)
+- `statsig.getExperiment(name, user)` → use an LD flag for the experiment variant
 
-1. **Add the LaunchDarkly SDK alongside the Statsig SDK** — don't remove Statsig yet.
+**Decisions the skill (or a manual rewrite) leaves to you:**
+
+1. **Add the LaunchDarkly SDK alongside the Statsig SDK first** — don't remove Statsig until cutover is done.
 2. **Decide a context-kind mapping**. Statsig calls take a `user` object with `userID` and properties; LaunchDarkly takes a richer `context` object with one or more context kinds. Many teams start by mapping every Statsig user to an LD `user` context, even if they target on `companyID`-style attributes in Statsig today.
-3. **Rewrite call sites**. Use the [skill](../skills/statsig-to-launchdarkly-migrator/SKILL.md) (recommended for JS/TS/React/Node), by hand (acceptable if you have <100 sites), or via a custom codemod. The mappings are:
-   - `statsig.checkGate(name, user)` → `ldClient.boolVariation(name, ctx, false)`
-   - `statsig.getConfig(name, user).get(key, default)` → `ldClient.jsonVariation(name, ctx, default)` (then read the key)
-   - `statsig.getExperiment(name, user)` → use an LD flag for the experiment variant
-4. **Validate** by running both SDKs in parallel for a period — see [Validation strategy](#validation-strategy).
-5. **Cut over reads** to LD once parity is confirmed.
-6. **Remove the Statsig SDK** once you're confident.
+3. **Validate** by running both SDKs in parallel for a period — see [Validation strategy](#validation-strategy).
+4. **Cut over reads** to LD once parity is confirmed.
+5. **Remove the Statsig SDK** once you're confident.
 
-There's no automated codemod in this tool. Open an issue if you'd find one useful.
+If your codebase isn't covered by the skill and you'd find an automated codemod useful, open an issue.
 
 ### 2. Statsig segments
 
@@ -91,20 +98,21 @@ The CLI creates LD environments (auto-create on by default), but it doesn't fetc
 
 ## Recommended cutover sequence
 
-A reasonable order for a real migration. Adjust to your team's tolerance for parallel evaluation cost and rollback complexity.
+A reasonable order for a real migration. Adjust to your team's tolerance for parallel evaluation cost and rollback complexity. Matches the order the README's Agent Instructions follow.
 
-1. **`statsig-to-ld analyze`** — scope the migration. Numbers: how many flags? how many metrics? how many use lossy features?
+1. **`statsig-to-ld analyze`** — scope the migration. Numbers: how many flags? how many metrics? how many use lossy features? Does the project use warehouse-native experimentation?
 2. **Set up the LD project** — create the project, configure SCIM/SSO if needed, decide on context kinds, generate the API token for the CLI.
-3. **`statsig-to-ld flags import`** — creates shells. Off in every env, no production impact.
-4. **Recreate segments** (manual) — for any flags you plan to target.
-5. **`statsig-to-ld targeting import --dry-run`** — preview the targeting application. Review the report for `skipped_lossy` entries.
-6. **`statsig-to-ld targeting import`** — apply the targeting. Strict by default; opt in via `--accept-data-loss=...` if needed. Flags now have the same targeting as Statsig, but your app still reads Statsig.
-7. **`statsig-to-ld metrics convert`** — most likely to need manual cleanup (DATA LOSS warnings, unsupported metric types). Doing this after flags + targeting are validated avoids reworking orphan metrics. Metrics in LD don't affect anything until you reference them, so this is still order-independent — it's just easier to triage at this point.
-8. **Add the LaunchDarkly SDK alongside Statsig** — initialize it but don't read from it yet.
-9. **Validate** — see [Validation strategy](#validation-strategy).
-10. **Cut over reads** — flip your application to read from LD instead of Statsig. Keep Statsig writes in case of rollback.
-11. **Soak** — let LD serve production for an agreed period.
-12. **Remove the Statsig SDK** — once you're confident the migration is stable.
+3. **SDK code rewrite** — run the [skill](../skills/statsig-to-launchdarkly-migrator/SKILL.md) (if your codebase is JS/TS/React/Node) or rewrite by hand. Output is the canonical flag-key list (`migration-summary.json`) that step 4 keys off.
+4. **`statsig-to-ld flags import`** — creates shells. Off in every env, no production impact.
+5. **Recreate segments** (manual) — for any flags you plan to target. See [§2 below](#2-statsig-segments).
+6. **`statsig-to-ld targeting import --dry-run`** — preview the targeting application. Review the report for `skipped_lossy` entries.
+7. **`statsig-to-ld targeting import`** — apply the targeting. Strict by default; opt in via `--accept-data-loss=...` if needed. Flags now have the same targeting as Statsig, but your app still reads Statsig.
+8. **`statsig-to-ld warehouse`** (only if the project uses warehouse-native experimentation) — sets up warehouse integrations + data sources + warehouse-native metrics in one pass.
+9. **`statsig-to-ld metrics convert`** — for event-based metrics (and idempotently no-ops on warehouse-native metrics already created in step 8). Most likely to need manual cleanup (DATA LOSS warnings, unsupported metric types). Metrics in LD don't affect anything until you reference them, so this is still order-independent — it's just easier to triage at this point.
+10. **Validate** — see [Validation strategy](#validation-strategy).
+11. **Cut over reads** — flip your application to read from LD instead of Statsig. Keep Statsig writes in case of rollback.
+12. **Soak** — let LD serve production for an agreed period.
+13. **Remove the Statsig SDK** — once you're confident the migration is stable.
 
 ## Validation strategy
 

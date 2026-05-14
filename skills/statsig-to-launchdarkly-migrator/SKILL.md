@@ -7,6 +7,8 @@ description: Migrate JavaScript/TypeScript/React/Node.js code from the Statsig S
 
 Convert Statsig SDK code (JavaScript, TypeScript, React, Node.js) to LaunchDarkly while preserving experiments, ensuring the latest SDK versions, and writing the LD Client-Side ID to `.env` via `ldcli`. Migrates feature gates and dynamic configs; preserves and flags experiments.
 
+This skill covers **application-code rewrites only**. For the matching flag/metric/targeting *definitions* in LaunchDarkly (so the flag keys this skill writes resolve to something), the user runs the bundled `statsig-to-ld` CLI — see the README's [Agent Instructions](../../README.md#agent-instructions) for the end-to-end orchestration and [`AGENTS.md`](../../AGENTS.md) for the CLI operator guide. This skill emits `migration-summary.json` with the canonical flag-key list the CLI's `flags import` expects.
+
 ## When this skill runs
 
 Trigger phrases include: "migrate from Statsig", "replace Statsig with LaunchDarkly", "port these flags to LaunchDarkly", "convert StatsigUser to LDContext", or pasted Statsig code with a request to translate it.
@@ -191,6 +193,17 @@ See `evals/README.md` for details and rubric.
 - Never emit `launchdarkly-node-server-sdk` (legacy unscoped name) — the current package is `@launchdarkly/node-server-sdk`
 - Never migrate experiments
 - Never skip Phase 1 (version resolution) — stale SDK versions are the #1 reliability failure for agentic migrations
+
+## Beyond SDK code (what this skill doesn't do)
+
+After this skill runs, application code is migrated and `migration-summary.json` has the canonical flag-key list. The rest of the migration is the CLI's territory:
+
+- **Flag shells in LD** (matching the keys this skill wrote) → `statsig-to-ld flags import` — see [`AGENTS.md`](../../AGENTS.md#subcommand-flags-import)
+- **Per-environment targeting** (rules, rollouts, overrides) → `statsig-to-ld targeting import` — see [`AGENTS.md`](../../AGENTS.md#subcommand-targeting-import)
+- **Metric definitions** → `statsig-to-ld metrics convert` (event-based) or `statsig-to-ld warehouse` (warehouse-native) — see [`AGENTS.md`](../../AGENTS.md#subcommand-metrics-convert)
+- **Segment recreation, experiments, validation, cutover, rollback** → see [`docs/migration-playbook.md`](../../docs/migration-playbook.md)
+
+The [README's Agent Instructions](../../README.md#agent-instructions) orchestrate all of these together.
 
 ## Reference docs
 
