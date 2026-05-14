@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/launchdarkly"
-	"github.com/launchdarkly-labs/statsig-metric-importer-cli/internal/statsig"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 )
 
 const maxLDKeyLength = 256
