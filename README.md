@@ -36,7 +36,7 @@ This section is for AI coding agents (Claude Code, Codex, Cursor, etc.) helping 
 
 ### Step 1 — Ask what to migrate
 
-Ask the user which paths they need (multi-select):
+Ask the user which paths they need (multi-select). Do this even if you are operating in auto-mode:
 
 | Path | What | Where to go |
 |---|---|---|
