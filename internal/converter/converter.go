@@ -291,12 +291,13 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		Tags:                tags,
 	}
 
-	// Default missing units to 0 for numeric metrics
-	if isNumeric {
-		result.LDMetric.EventDefault = &launchdarkly.EventDefault{
-			Disabled: false,
-			Value:    0,
-		}
+	// Statsig sum divides total value by all exposed units, implicitly imputing
+	// 0 for units without events; mean divides by record count, excluding them.
+	switch sg.Type {
+	case "sum":
+		result.LDMetric.EventDefault = &launchdarkly.EventDefault{Disabled: false, Value: 0}
+	case "mean":
+		result.LDMetric.EventDefault = &launchdarkly.EventDefault{Disabled: true}
 	}
 
 	// ---------------------------------------------------------------
