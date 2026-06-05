@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-05
+
+### Fixed
+
+- **`metrics convert`**: Statsig `mean` metrics now map to LaunchDarkly with `eventDefault.disabled = true`, so units exposed to the experiment but without recorded events are excluded from the analysis — matching Statsig's `SUM(value) / SUM(records)` group-level formula. Previously the converter imputed 0 for missing units, which silently changed the metric from "average per event-emitting unit" to "average per exposed unit." `sum` and the binary/count metric mappings are unchanged. ([#30](https://github.com/launchdarkly-labs/statsig-to-ld/pull/30))
+
 ## [0.2.0] - 2026-05-12
 
 This release renames the project from `statsig-metric-importer` to `statsig-to-ld` and expands it from a metrics-only tool to a full Statsig→LaunchDarkly migration CLI. The metric importer is unchanged; three new subcommands cover flag and targeting import.
@@ -54,7 +60,8 @@ This release renames the project from `statsig-metric-importer` to `statsig-to-l
 - Idempotent re-runs, parallel processing, and structured migration reports.
 - CI and release workflow.
 
-[Unreleased]: https://github.com/launchdarkly-labs/statsig-to-ld/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/launchdarkly-labs/statsig-to-ld/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/launchdarkly-labs/statsig-to-ld/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/launchdarkly-labs/statsig-to-ld/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/launchdarkly-labs/statsig-to-ld/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/launchdarkly-labs/statsig-to-ld/releases/tag/v0.1.0
