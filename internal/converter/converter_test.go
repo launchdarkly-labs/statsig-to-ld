@@ -122,6 +122,9 @@ func TestConvert_Mean(t *testing.T) {
 	if ld.SuccessCriteria != "LowerThanBaseline" {
 		t.Errorf("SuccessCriteria = %q, want \"LowerThanBaseline\"", ld.SuccessCriteria)
 	}
+	if ld.EventDefault == nil || !ld.EventDefault.Disabled {
+		t.Errorf("EventDefault should be {Disabled:true} for mean metrics, got %+v", ld.EventDefault)
+	}
 }
 
 func TestConvert_EventUser(t *testing.T) {

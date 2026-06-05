@@ -73,6 +73,8 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	var isNumeric bool
 	var unitAgg string
 	var analysisType string
+	// nil means: let LD use its default (include missing units at 0).
+	var eventDefault *launchdarkly.EventDefault
 
 	switch sg.Type {
 	case "event_count_custom", "event_count":
@@ -83,10 +85,13 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		isNumeric = true
 		unitAgg = "sum"
 		analysisType = "mean"
+		eventDefault = &launchdarkly.EventDefault{Disabled: false, Value: 0}
 	case "mean":
+		// Statsig mean excludes units without events; LD must too.
 		isNumeric = true
 		unitAgg = "average"
 		analysisType = "mean"
+		eventDefault = &launchdarkly.EventDefault{Disabled: true}
 	case "event_user", "event_user_window":
 		isNumeric = false
 		unitAgg = "average"
@@ -291,13 +296,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		Tags:                tags,
 	}
 
-	// Default missing units to 0 for numeric metrics
-	if isNumeric {
-		result.LDMetric.EventDefault = &launchdarkly.EventDefault{
-			Disabled: false,
-			Value:    0,
-		}
-	}
+	result.LDMetric.EventDefault = eventDefault
 
 	// ---------------------------------------------------------------
 	// Warehouse Native data source resolution
