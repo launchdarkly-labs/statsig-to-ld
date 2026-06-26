@@ -154,7 +154,8 @@ func TestConvert_EventUserWindow(t *testing.T) {
 // --- Incompatible types ---
 
 func TestConvert_IncompatibleTypes(t *testing.T) {
-	incompatible := []string{"ratio", "funnel", "composite", "composite_sum", "percentile", "user"}
+	// "ratio" was removed: see TestConvert_Ratio_* for the real branch.
+	incompatible := []string{"funnel", "composite", "composite_sum", "percentile", "user"}
 	for _, typ := range incompatible {
 		sg := baseMetric(typ)
 		_, err := Convert(sg, Options{})
@@ -580,6 +581,189 @@ func TestConvert_NoMetricEvents(t *testing.T) {
 	}
 	if IsIncompatible(err) {
 		t.Error("missing events should not be IncompatibleError")
+	}
+}
+
+// --- Ratio metrics ---
+
+// ratioBaseMetric returns a Statsig ratio referencing two component names.
+// Tests supply the actual components via MetricsByName.
+func ratioBaseMetric(numName, denName string) *statsig.Metric {
+	return &statsig.Metric{
+		ID:             "checkout_per_visit::ratio",
+		Name:           "checkout_per_visit",
+		Type:           "ratio",
+		Description:    "Checkouts per visit",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		MetricComponentMetrics: []statsig.ComponentMetric{
+			{Name: numName, Type: "event_count"},
+			{Name: denName, Type: "event_count"},
+		},
+		Tags: []string{"experiment"},
+	}
+}
+
+func componentMetric(name, typ, eventName string) *statsig.Metric {
+	return &statsig.Metric{
+		ID:           name + "::" + typ,
+		Name:         name,
+		Type:         typ,
+		UnitTypes:    []string{"userID"},
+		MetricEvents: []statsig.MetricEvent{{Name: eventName, Type: "count"}},
+	}
+}
+
+func TestConvert_Ratio_HappyPath(t *testing.T) {
+	num := componentMetric("checkouts", "event_count", "checkout_completed")
+	den := componentMetric("visits", "event_count", "page_view")
+	sg := ratioBaseMetric("checkouts", "visits")
+
+	result, err := Convert(sg, Options{
+		MetricsByName: map[string]*statsig.Metric{
+			"checkouts": num,
+			"visits":    den,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.EventKey != "checkout_completed" {
+		t.Errorf("EventKey = %q, want %q", result.LDMetric.EventKey, "checkout_completed")
+	}
+	if result.LDMetric.UnitAggregationType != "sum" {
+		t.Errorf("numerator UAT = %q, want %q", result.LDMetric.UnitAggregationType, "sum")
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Errorf("IsNumeric = %v, want pointer to false", result.LDMetric.IsNumeric)
+	}
+	if result.LDMetric.Denominator == nil {
+		t.Fatal("Denominator is nil; ratio metric should populate it")
+	}
+	if result.LDMetric.Denominator.EventName != "page_view" {
+		t.Errorf("Denominator.EventName = %q, want %q", result.LDMetric.Denominator.EventName, "page_view")
+	}
+	if result.LDMetric.Denominator.UnitAggregationType != "sum" {
+		t.Errorf("Denominator.UAT = %q, want %q", result.LDMetric.Denominator.UnitAggregationType, "sum")
+	}
+	if result.LDMetric.Denominator.IsNumeric {
+		t.Error("Denominator.IsNumeric = true for event_count component, want false")
+	}
+}
+
+func TestConvert_Ratio_MixedTermShapes(t *testing.T) {
+	// Numerator is a numeric sum metric; denominator is a count-style event.
+	num := componentMetric("revenue", "sum", "purchase")
+	den := componentMetric("visits", "event_count", "page_view")
+	sg := ratioBaseMetric("revenue", "visits")
+
+	result, err := Convert(sg, Options{
+		MetricsByName: map[string]*statsig.Metric{
+			"revenue": num,
+			"visits":  den,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.IsNumeric == nil || !*result.LDMetric.IsNumeric {
+		t.Error("numerator IsNumeric should be true for sum component")
+	}
+	if result.LDMetric.UnitAggregationType != "sum" {
+		t.Errorf("numerator UAT = %q, want sum", result.LDMetric.UnitAggregationType)
+	}
+	if result.LDMetric.Denominator.IsNumeric {
+		t.Error("denominator IsNumeric should be false for event_count component")
+	}
+	if result.LDMetric.Denominator.UnitAggregationType != "sum" {
+		t.Errorf("denominator UAT = %q, want sum", result.LDMetric.Denominator.UnitAggregationType)
+	}
+}
+
+func TestConvert_Ratio_WrongComponentCount(t *testing.T) {
+	sg := ratioBaseMetric("a", "b")
+	sg.MetricComponentMetrics = []statsig.ComponentMetric{{Name: "only_one", Type: "event_count"}}
+
+	_, err := Convert(sg, Options{
+		MetricsByName: map[string]*statsig.Metric{
+			"only_one": componentMetric("only_one", "event_count", "ev"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for ratio with 1 component")
+	}
+	if IsIncompatible(err) {
+		t.Error("wrong component count should be a hard error, not IncompatibleError")
+	}
+	if !strings.Contains(err.Error(), "got 1") {
+		t.Errorf("error should mention the actual count: %v", err)
+	}
+}
+
+func TestConvert_Ratio_MissingComponent(t *testing.T) {
+	sg := ratioBaseMetric("checkouts", "missing_metric")
+
+	_, err := Convert(sg, Options{
+		MetricsByName: map[string]*statsig.Metric{
+			"checkouts": componentMetric("checkouts", "event_count", "checkout_completed"),
+			// "missing_metric" intentionally absent
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when a component is missing from the lookup")
+	}
+	if !strings.Contains(err.Error(), "missing_metric") {
+		t.Errorf("error should name the missing component: %v", err)
+	}
+}
+
+func TestConvert_Ratio_NoLookup(t *testing.T) {
+	sg := ratioBaseMetric("a", "b")
+	_, err := Convert(sg, Options{}) // MetricsByName is nil
+	if err == nil {
+		t.Fatal("expected error when MetricsByName is nil for a ratio metric")
+	}
+	if !strings.Contains(err.Error(), "MetricsByName") {
+		t.Errorf("error should hint at the missing option: %v", err)
+	}
+}
+
+func TestConvert_Ratio_OfRatios(t *testing.T) {
+	// A ratio component is itself an exotic type for v1.
+	num := &statsig.Metric{Name: "inner_ratio", Type: "ratio"}
+	den := componentMetric("visits", "event_count", "page_view")
+	sg := ratioBaseMetric("inner_ratio", "visits")
+
+	_, err := Convert(sg, Options{
+		MetricsByName: map[string]*statsig.Metric{
+			"inner_ratio": num,
+			"visits":      den,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for ratio-of-ratios")
+	}
+	if !IsIncompatible(err) {
+		t.Errorf("ratio-of-ratios should surface as IncompatibleError, got %T: %v", err, err)
+	}
+}
+
+func TestConvert_Ratio_FunnelComponent(t *testing.T) {
+	num := componentMetric("checkouts", "event_count", "checkout_completed")
+	den := &statsig.Metric{Name: "user_funnel", Type: "funnel"}
+	sg := ratioBaseMetric("checkouts", "user_funnel")
+
+	_, err := Convert(sg, Options{
+		MetricsByName: map[string]*statsig.Metric{
+			"checkouts":   num,
+			"user_funnel": den,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error when a ratio component is funnel-typed")
+	}
+	if !IsIncompatible(err) {
+		t.Errorf("funnel component should surface as IncompatibleError, got %T: %v", err, err)
 	}
 }
 
