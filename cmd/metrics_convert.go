@@ -212,7 +212,6 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	includeTags := parseCommaSeparated(flagIncludeTags)
 	includeTypes := parseCommaSeparated(flagIncludeTypes)
 
-	// Build converter options
 	convOpts := converter.Options{
 		LDDataSource:    flagLDDataSource,
 		SourceMapping:   sourceMapping,
@@ -232,6 +231,10 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	var metrics []statsig.Metric
 	var err error
 
+	// lookupSource carries every fetched metric (for ratio component
+	// resolution); `metrics` is the subset we actually convert.
+	var lookupSource []statsig.Metric
+
 	if flagAll {
 		log.Printf("Fetching all Statsig metrics...")
 		metrics, err = sgClient.ListAllMetrics(ctx)
@@ -239,6 +242,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("fetching Statsig metrics: %w", err)
 		}
 		log.Printf("Fetched %d Statsig metrics", len(metrics))
+		lookupSource = metrics
 	} else {
 		log.Printf("Fetching Statsig metric %q...", flagMetric)
 		m, err := sgClient.GetMetricByName(ctx, flagMetric)
@@ -246,11 +250,31 @@ func runConvert(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("fetching Statsig metric %q: %w", flagMetric, err)
 		}
 		metrics = []statsig.Metric{*m}
+		// Ratio metrics need every other metric in scope to resolve their
+		// component references by name.
+		if m.Type == "ratio" {
+			log.Printf("Metric %q is a ratio — fetching all metrics to resolve numerator/denominator components...", flagMetric)
+			all, err := sgClient.ListAllMetrics(ctx)
+			if err != nil {
+				return fmt.Errorf("fetching component metrics for ratio %q: %w", flagMetric, err)
+			}
+			lookupSource = all
+		} else {
+			lookupSource = metrics
+		}
 	}
 
 	if len(metrics) == 0 {
 		log.Printf("WARNING: Statsig returned 0 metrics — verify your --statsig-key and Statsig project configuration")
 	}
+
+	// Index by name for ratio component resolution. Includes filter-excluded
+	// metrics so they're still discoverable as ratio components.
+	metricsByName := make(map[string]*statsig.Metric, len(lookupSource))
+	for i := range lookupSource {
+		metricsByName[lookupSource[i].Name] = &lookupSource[i]
+	}
+	convOpts.MetricsByName = metricsByName
 
 	// Apply filters
 	if len(includeTags) > 0 || len(includeTypes) > 0 {
