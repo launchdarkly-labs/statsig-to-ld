@@ -33,11 +33,6 @@ type Options struct {
 	// e.g. {"companyID": "company", "teamID": "team"}.
 	// Takes precedence over the default lowercase behavior.
 	UnitTypeMapping map[string]string
-
-	// MetricsByName keys all in-scope metrics by Statsig name so ratio
-	// metrics can resolve their component references. Required for ratio
-	// metrics; ignored otherwise.
-	MetricsByName map[string]*statsig.Metric
 }
 
 // Result holds the converted LD metric and any warnings about Statsig features
@@ -384,58 +379,79 @@ func termSpecFor(typ string) (termSpec, error) {
 	}
 }
 
-// convertRatio resolves the numerator and denominator components from
-// MetricComponentMetrics, maps each through termSpecFor, and emits a single
-// LD MetricPost where the numerator settings sit at the top level and the
+// ratioTermSpec maps a ratio component event's Statsig aggregation type to its
+// LD term shape, reusing the simple-metric mapping via termSpecFor. Statsig
+// ratio events use count / count_distinct / value / metadata aggregations.
+// Returns any lossy-conversion warnings alongside the spec.
+func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []string, error) {
+	var warnings []string
+	var metricType string
+	switch ev.Type {
+	case "count", "":
+		metricType = "event_count_custom"
+	case "count_distinct":
+		metricType = "event_count_custom"
+		warnings = append(warnings,
+			fmt.Sprintf("Statsig counts distinct %q values — LaunchDarkly will count all occurrences instead", ev.MetadataKey))
+	case "value", "sum":
+		metricType = "sum"
+	case "metadata":
+		metricType = "sum"
+		warnings = append(warnings,
+			fmt.Sprintf("Statsig aggregates metadata field %q — LaunchDarkly will aggregate the track() metricValue; ensure events send the same value in metricValue", ev.MetadataKey))
+	default:
+		return termSpec{}, nil, fmt.Errorf("unsupported ratio term aggregation %q on event %q", ev.Type, ev.Name)
+	}
+	spec, err := termSpecFor(metricType)
+	return spec, warnings, err
+}
+
+// convertRatio converts a Statsig (cloud) ratio metric. The numerator and
+// denominator are carried inline as metricEvents[0] and metricEvents[1] — this
+// is how the Statsig Console API actually represents a ratio (verified against
+// the live API). Statsig does NOT use metricComponentMetrics for ratios (that
+// field is for composite metrics) and rejects a ratio defined that way. The
+// numerator's settings sit at the top level of the LD MetricPost; the
 // denominator populates the Denominator subfield. Identity and shared fields
 // (key, name, tags, randomizationUnits, etc.) come from the ratio metric.
 func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
-	if len(sg.MetricComponentMetrics) != 2 {
-		return nil, fmt.Errorf("ratio metric %q expected 2 component metrics (numerator + denominator), got %d", sg.Name, len(sg.MetricComponentMetrics))
+	if len(sg.MetricEvents) != 2 {
+		return nil, fmt.Errorf("ratio metric %q expected 2 metric events (numerator + denominator), got %d", sg.Name, len(sg.MetricEvents))
 	}
-	if opts.MetricsByName == nil {
-		return nil, fmt.Errorf("ratio metric %q requires Options.MetricsByName for component resolution", sg.Name)
+	result := &Result{}
+
+	numEv := sg.MetricEvents[0]
+	denEv := sg.MetricEvents[1]
+	if numEv.Name == "" {
+		return nil, fmt.Errorf("ratio metric %q: numerator event has an empty name — cannot determine LD eventKey", sg.Name)
+	}
+	if denEv.Name == "" {
+		return nil, fmt.Errorf("ratio metric %q: denominator event has an empty name — cannot determine LD denominator eventName", sg.Name)
 	}
 
-	numRef := sg.MetricComponentMetrics[0]
-	denRef := sg.MetricComponentMetrics[1]
-	numerator, ok := opts.MetricsByName[numRef.Name]
-	if !ok {
-		return nil, fmt.Errorf("ratio metric %q: numerator component %q not found in MetricsByName", sg.Name, numRef.Name)
+	numSpec, numWarn, err := ratioTermSpec(numEv)
+	if err != nil {
+		return nil, fmt.Errorf("ratio metric %q numerator: %w", sg.Name, err)
 	}
-	denominator, ok := opts.MetricsByName[denRef.Name]
-	if !ok {
-		return nil, fmt.Errorf("ratio metric %q: denominator component %q not found in MetricsByName", sg.Name, denRef.Name)
+	denSpec, denWarn, err := ratioTermSpec(denEv)
+	if err != nil {
+		return nil, fmt.Errorf("ratio metric %q denominator: %w", sg.Name, err)
+	}
+	for _, w := range numWarn {
+		result.Warnings = append(result.Warnings, "numerator: "+w)
+	}
+	for _, w := range denWarn {
+		result.Warnings = append(result.Warnings, "denominator: "+w)
 	}
 
-	numSpec, err := termSpecFor(numerator.Type)
-	if err != nil {
-		if IsIncompatible(err) {
-			return nil, &IncompatibleError{
-				StatsigType: sg.Type,
-				Reason:      fmt.Sprintf("ratio metric %q: numerator component %q has unsupported type %q", sg.Name, numerator.Name, numerator.Type),
-			}
-		}
-		return nil, fmt.Errorf("ratio metric %q numerator %q: %w", sg.Name, numerator.Name, err)
+	// Event filter criteria are not carried over (parity with the simple path).
+	if len(numEv.Criteria) > 0 {
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("DATA LOSS: %d numerator event filter criteria will NOT be applied — the LD metric matches all %q events. Manual filter setup required in LD.", len(numEv.Criteria), numEv.Name))
 	}
-	denSpec, err := termSpecFor(denominator.Type)
-	if err != nil {
-		if IsIncompatible(err) {
-			return nil, &IncompatibleError{
-				StatsigType: sg.Type,
-				Reason:      fmt.Sprintf("ratio metric %q: denominator component %q has unsupported type %q", sg.Name, denominator.Name, denominator.Type),
-			}
-		}
-		return nil, fmt.Errorf("ratio metric %q denominator %q: %w", sg.Name, denominator.Name, err)
-	}
-
-	numEventKey, err := firstEventKey(numerator)
-	if err != nil {
-		return nil, fmt.Errorf("ratio metric %q numerator %q: %w", sg.Name, numerator.Name, err)
-	}
-	denEventKey, err := firstEventKey(denominator)
-	if err != nil {
-		return nil, fmt.Errorf("ratio metric %q denominator %q: %w", sg.Name, denominator.Name, err)
+	if len(denEv.Criteria) > 0 {
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("DATA LOSS: %d denominator event filter criteria will NOT be applied — the LD metric matches all %q events. Manual filter setup required in LD.", len(denEv.Criteria), denEv.Name))
 	}
 
 	ldKey := SanitizeKey(sg.ID)
@@ -444,6 +460,8 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	if len(ldKey) > maxLDKeyLength {
 		ldKey = ldKey[:maxLDKeyLength]
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("LD metric key truncated to %d characters (original Statsig ID was very long)", maxLDKeyLength))
 	}
 
 	successCriteria := "HigherThanBaseline"
@@ -467,12 +485,14 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 			randUnits = append(randUnits, "user")
 		default:
 			randUnits = append(randUnits, strings.ToLower(u))
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("Statsig unitType %q may not match an LD context kind — verify in LD or use --unit-type-mapping", u))
 		}
 	}
 
 	desc := sg.Description
 	if desc == "" {
-		desc = fmt.Sprintf("Converted from Statsig ratio metric %q (numerator=%q, denominator=%q)", sg.Name, numerator.Name, denominator.Name)
+		desc = fmt.Sprintf("Converted from Statsig ratio metric %q (numerator=%q, denominator=%q)", sg.Name, numEv.Name, denEv.Name)
 	} else {
 		desc = fmt.Sprintf("%s [converted from Statsig ratio metric %q]", desc, sg.Name)
 	}
@@ -494,54 +514,39 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		}
 	}
 
-	result := &Result{
-		LDMetric: launchdarkly.MetricPost{
-			Key:                 ldKey,
-			Kind:                "custom",
-			Name:                sg.Name,
-			Description:         desc,
-			EventKey:            numEventKey,
-			IsNumeric:           &numSpec.isNumeric,
-			SuccessCriteria:     successCriteria,
-			UnitAggregationType: numSpec.unitAgg,
-			AnalysisType:        numSpec.analysisType,
-			RandomizationUnits:  randUnits,
-			Unit:                unit,
-			Tags:                tags,
-			EventDefault:        numSpec.eventDefault,
-			Denominator: &launchdarkly.DenominatorPost{
-				EventName:           denEventKey,
-				IsNumeric:           denSpec.isNumeric,
-				UnitAggregationType: denSpec.unitAgg,
-			},
+	result.LDMetric = launchdarkly.MetricPost{
+		Key:                 ldKey,
+		Kind:                "custom",
+		Name:                sg.Name,
+		Description:         desc,
+		EventKey:            numEv.Name,
+		IsNumeric:           &numSpec.isNumeric,
+		SuccessCriteria:     successCriteria,
+		UnitAggregationType: numSpec.unitAgg,
+		AnalysisType:        numSpec.analysisType,
+		RandomizationUnits:  randUnits,
+		Unit:                unit,
+		Tags:                tags,
+		EventDefault:        numSpec.eventDefault,
+		Denominator: &launchdarkly.DenominatorPost{
+			EventName:           denEv.Name,
+			IsNumeric:           denSpec.isNumeric,
+			UnitAggregationType: denSpec.unitAgg,
 		},
 	}
 
-	// Data source resolution: ratio metric → numerator → denominator → default.
+	// Data source resolution. LaunchDarkly ratio metrics are warehouse-native:
+	// the API rejects a ratio without a data source ("Ratio metrics require a
+	// warehouse data source", HTTP 400). Resolve from the Statsig source name
+	// (mapped) or the --ld-data-source default; if neither yields one, warn at
+	// convert time — surfaced even in dry-run — so the user supplies one rather
+	// than hitting the 400 at create time.
 	if dsKey := resolveDataSource(sg.MetricSourceName, opts); dsKey != "" {
 		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: dsKey}
-	} else if dsKey := resolveDataSource(numerator.MetricSourceName, opts); dsKey != "" {
-		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: dsKey}
-	} else if dsKey := resolveDataSource(denominator.MetricSourceName, opts); dsKey != "" {
-		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: dsKey}
-	} else if opts.LDDataSource != "" {
-		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: opts.LDDataSource}
 	} else {
 		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("ratio metric %q has no LD data source binding — set one in LD before running the experiment", sg.Name))
+			"LaunchDarkly ratio metrics require a warehouse data source — none resolved; pass --ld-data-source <key> (or --source-mapping) or LD will reject creation (HTTP 400)")
 	}
 
 	return result, nil
-}
-
-// firstEventKey returns metricEvents[0].name, matching how the simple-metric
-// path picks an eventKey.
-func firstEventKey(m *statsig.Metric) (string, error) {
-	if len(m.MetricEvents) == 0 {
-		return "", fmt.Errorf("metric %q has no metricEvents — cannot determine LD eventKey", m.Name)
-	}
-	if m.MetricEvents[0].Name == "" {
-		return "", fmt.Errorf("metric %q has an empty metricEvents[0].name", m.Name)
-	}
-	return m.MetricEvents[0].Name, nil
 }
