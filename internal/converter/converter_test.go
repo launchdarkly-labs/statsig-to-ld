@@ -750,20 +750,27 @@ func TestConvert_Ratio_CountDistinctDenominator(t *testing.T) {
 	}
 }
 
-func TestConvert_Ratio_CountDistinctMissingField(t *testing.T) {
-	// count_distinct needs a column; LD requires unitAggregationField. If the
-	// Statsig event has no metadata key, fail with a clear error rather than
-	// emitting a metric LD will reject.
-	sg := ratioMetric("add_to_cart", "count_distinct", "page_view", "count")
-	// numerator MetadataKey intentionally left empty
+func TestConvert_Ratio_CountDistinctNoColumn(t *testing.T) {
+	// A cloud ratio's count_distinct event carries no column (it counts distinct
+	// units/users). LD count(distinct) needs a column, so fall back to a plain
+	// count and warn — don't error, and don't silently mislabel it.
+	sg := ratioMetric("purchase", "count_distinct", "page_view", "count")
+	// numerator MetadataKey intentionally empty, like a real cloud ratio
 
-	_, err := Convert(sg, Options{})
-	if err == nil {
-		t.Fatal("expected error when a count_distinct event has no metadata field")
+	result, err := Convert(sg, Options{LDDataSource: "snowflake-staging"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "metadata field") {
-		t.Errorf("error should explain the missing distinct column: %v", err)
+	if result.LDMetric.UnitAggregationType != "sum" {
+		t.Errorf("numerator UAT = %q, want sum (count fallback)", result.LDMetric.UnitAggregationType)
 	}
+	if result.LDMetric.UnitAggregationField != "" {
+		t.Errorf("UnitAggregationField should be empty in the count fallback, got %q", result.LDMetric.UnitAggregationField)
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Error("count fallback must be non-numeric")
+	}
+	assertHasWarning(t, result.Warnings, "count-distinct")
 }
 
 func TestConvert_Ratio_NoDataSourceWarns(t *testing.T) {
