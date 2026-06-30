@@ -704,7 +704,10 @@ func TestConvert_Ratio_EmptyEventName(t *testing.T) {
 	}
 }
 
-func TestConvert_Ratio_CountDistinctWarns(t *testing.T) {
+func TestConvert_Ratio_CountDistinctNumerator(t *testing.T) {
+	// LD ratio terms support count(distinct <field>) natively — it maps to
+	// unitAggregationType=count_distinct + unitAggregationField, non-numeric,
+	// and (unlike the simple-metric path) without a data-loss warning.
 	sg := ratioMetric("add_to_cart", "count_distinct", "page_view", "count")
 	sg.MetricEvents[0].MetadataKey = "item_category"
 
@@ -712,7 +715,55 @@ func TestConvert_Ratio_CountDistinctWarns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertHasWarning(t, result.Warnings, "distinct")
+	if result.LDMetric.UnitAggregationType != "count_distinct" {
+		t.Errorf("numerator UAT = %q, want count_distinct", result.LDMetric.UnitAggregationType)
+	}
+	if result.LDMetric.UnitAggregationField != "item_category" {
+		t.Errorf("numerator UnitAggregationField = %q, want item_category", result.LDMetric.UnitAggregationField)
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Error("count_distinct numerator must be non-numeric")
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(strings.ToLower(w), "count all occurrences") {
+			t.Errorf("ratio count_distinct must not warn about counting all occurrences, got: %q", w)
+		}
+	}
+}
+
+func TestConvert_Ratio_CountDistinctDenominator(t *testing.T) {
+	sg := ratioMetric("purchase", "count", "session_start", "count_distinct")
+	sg.MetricEvents[1].MetadataKey = "session_id"
+
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.Denominator.UnitAggregationType != "count_distinct" {
+		t.Errorf("denominator UAT = %q, want count_distinct", result.LDMetric.Denominator.UnitAggregationType)
+	}
+	if result.LDMetric.Denominator.UnitAggregationField != "session_id" {
+		t.Errorf("denominator UnitAggregationField = %q, want session_id", result.LDMetric.Denominator.UnitAggregationField)
+	}
+	if result.LDMetric.Denominator.IsNumeric {
+		t.Error("count_distinct denominator must be non-numeric")
+	}
+}
+
+func TestConvert_Ratio_CountDistinctMissingField(t *testing.T) {
+	// count_distinct needs a column; LD requires unitAggregationField. If the
+	// Statsig event has no metadata key, fail with a clear error rather than
+	// emitting a metric LD will reject.
+	sg := ratioMetric("add_to_cart", "count_distinct", "page_view", "count")
+	// numerator MetadataKey intentionally left empty
+
+	_, err := Convert(sg, Options{})
+	if err == nil {
+		t.Fatal("expected error when a count_distinct event has no metadata field")
+	}
+	if !strings.Contains(err.Error(), "metadata field") {
+		t.Errorf("error should explain the missing distinct column: %v", err)
+	}
 }
 
 func TestConvert_Ratio_NoDataSourceWarns(t *testing.T) {

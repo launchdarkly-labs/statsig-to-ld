@@ -338,6 +338,9 @@ type termSpec struct {
 	unitAgg      string
 	analysisType string
 	eventDefault *launchdarkly.EventDefault
+	// unitAggField is the column for a count_distinct aggregation. Only set by
+	// the ratio path; LD requires it when unitAgg is "count_distinct".
+	unitAggField string
 }
 
 // termSpecFor maps a Statsig metric type to its LD term shape. Returns
@@ -385,25 +388,29 @@ func termSpecFor(typ string) (termSpec, error) {
 // Returns any lossy-conversion warnings alongside the spec.
 func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []string, error) {
 	var warnings []string
-	var metricType string
 	switch ev.Type {
-	case "count", "":
-		metricType = "event_count_custom"
 	case "count_distinct":
-		metricType = "event_count_custom"
-		warnings = append(warnings,
-			fmt.Sprintf("Statsig counts distinct %q values — LaunchDarkly will count all occurrences instead", ev.MetadataKey))
-	case "value", "sum":
-		metricType = "sum"
+		// LD ratio terms support count(distinct <field>) natively (unlike the
+		// simple-metric path), so this is not lossy. LD requires the distinct
+		// column via unitAggregationField; it's the Statsig event's metadata key.
+		if ev.MetadataKey == "" {
+			return termSpec{}, nil, fmt.Errorf("count_distinct event %q has no metadata field to count distinct on", ev.Name)
+		}
+		return termSpec{isNumeric: false, unitAgg: "count_distinct", analysisType: "mean", unitAggField: ev.MetadataKey}, nil, nil
 	case "metadata":
-		metricType = "sum"
 		warnings = append(warnings,
 			fmt.Sprintf("Statsig aggregates metadata field %q — LaunchDarkly will aggregate the track() metricValue; ensure events send the same value in metricValue", ev.MetadataKey))
+		spec, err := termSpecFor("sum")
+		return spec, warnings, err
+	case "count", "":
+		spec, err := termSpecFor("event_count_custom")
+		return spec, warnings, err
+	case "value", "sum":
+		spec, err := termSpecFor("sum")
+		return spec, warnings, err
 	default:
 		return termSpec{}, nil, fmt.Errorf("unsupported ratio term aggregation %q on event %q", ev.Type, ev.Name)
 	}
-	spec, err := termSpecFor(metricType)
-	return spec, warnings, err
 }
 
 // convertRatio converts a Statsig (cloud) ratio metric. The numerator and
@@ -423,10 +430,10 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	numEv := sg.MetricEvents[0]
 	denEv := sg.MetricEvents[1]
 	if numEv.Name == "" {
-		return nil, fmt.Errorf("ratio metric %q: numerator event has an empty name — cannot determine LD eventKey", sg.Name)
+		return nil, fmt.Errorf("ratio metric %q: its Statsig numerator event has no name, so there is no event key to map to the LaunchDarkly metric", sg.Name)
 	}
 	if denEv.Name == "" {
-		return nil, fmt.Errorf("ratio metric %q: denominator event has an empty name — cannot determine LD denominator eventName", sg.Name)
+		return nil, fmt.Errorf("ratio metric %q: its Statsig denominator event has no name, so there is no event name to map to the LaunchDarkly denominator", sg.Name)
 	}
 
 	numSpec, numWarn, err := ratioTermSpec(numEv)
@@ -515,23 +522,25 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 
 	result.LDMetric = launchdarkly.MetricPost{
-		Key:                 ldKey,
-		Kind:                "custom",
-		Name:                sg.Name,
-		Description:         desc,
-		EventKey:            numEv.Name,
-		IsNumeric:           &numSpec.isNumeric,
-		SuccessCriteria:     successCriteria,
-		UnitAggregationType: numSpec.unitAgg,
-		AnalysisType:        numSpec.analysisType,
-		RandomizationUnits:  randUnits,
-		Unit:                unit,
-		Tags:                tags,
-		EventDefault:        numSpec.eventDefault,
+		Key:                  ldKey,
+		Kind:                 "custom",
+		Name:                 sg.Name,
+		Description:          desc,
+		EventKey:             numEv.Name,
+		IsNumeric:            &numSpec.isNumeric,
+		SuccessCriteria:      successCriteria,
+		UnitAggregationType:  numSpec.unitAgg,
+		UnitAggregationField: numSpec.unitAggField,
+		AnalysisType:         numSpec.analysisType,
+		RandomizationUnits:   randUnits,
+		Unit:                 unit,
+		Tags:                 tags,
+		EventDefault:         numSpec.eventDefault,
 		Denominator: &launchdarkly.DenominatorPost{
-			EventName:           denEv.Name,
-			IsNumeric:           denSpec.isNumeric,
-			UnitAggregationType: denSpec.unitAgg,
+			EventName:            denEv.Name,
+			IsNumeric:            denSpec.isNumeric,
+			UnitAggregationType:  denSpec.unitAgg,
+			UnitAggregationField: denSpec.unitAggField,
 		},
 	}
 
