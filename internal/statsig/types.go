@@ -175,12 +175,12 @@ type Override struct {
 // Private list-response shapes
 // ============================================================================
 
-// metricListResponse is the cursor-paginated /metrics/list response.
+// metricListResponse is the page-number-paginated /metrics/list response. Its
+// pagination block mirrors the gates / dynamic-config endpoints.
 type metricListResponse struct {
-	Message    string   `json:"message"`
-	Data       []Metric `json:"data"`
-	HasMore    bool     `json:"has_more"`
-	NextCursor string   `json:"next_page"`
+	Message    string     `json:"message"`
+	Data       []Metric   `json:"data"`
+	Pagination pagination `json:"pagination"`
 }
 
 // pagination is the page-number pagination block returned by /gates and
