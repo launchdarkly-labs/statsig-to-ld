@@ -445,7 +445,9 @@ func TestConvert_WarningCriteria_DataLoss(t *testing.T) {
 	assertHasWarning(t, result.Warnings, "electronics")
 }
 
-func TestConvert_WarningWinsorization(t *testing.T) {
+func TestConvert_Winsorization(t *testing.T) {
+	// Statsig winsorization bounds are fractions (0–1); LaunchDarkly expects
+	// percentiles (0–100). 0.05/0.95 → 5/95. No warning when it maps.
 	sg := baseMetric("sum")
 	sg.MetricEvents[0] = statsig.MetricEvent{Name: "purchase", Type: "value"}
 	sg.WarehouseNative = &statsig.WarehouseNative{
@@ -456,7 +458,51 @@ func TestConvert_WarningWinsorization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertHasWarning(t, result.Warnings, "winsorization")
+	if result.LDMetric.WinsorLowerPercentile == nil || *result.LDMetric.WinsorLowerPercentile != 5 {
+		t.Errorf("WinsorLowerPercentile = %v, want 5", result.LDMetric.WinsorLowerPercentile)
+	}
+	if result.LDMetric.WinsorUpperPercentile == nil || *result.LDMetric.WinsorUpperPercentile != 95 {
+		t.Errorf("WinsorUpperPercentile = %v, want 95", result.LDMetric.WinsorUpperPercentile)
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(strings.ToLower(w), "winsor") {
+			t.Errorf("should not warn about winsorization when it maps, got: %q", w)
+		}
+	}
+}
+
+func TestConvert_WinsorizationOnlyLowerBound(t *testing.T) {
+	sg := baseMetric("sum")
+	sg.MetricEvents[0] = statsig.MetricEvent{Name: "purchase", Type: "value"}
+	sg.WarehouseNative = &statsig.WarehouseNative{WinsorizationLow: float64Ptr(0.01)}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.WinsorLowerPercentile == nil || *result.LDMetric.WinsorLowerPercentile != 1 {
+		t.Errorf("WinsorLowerPercentile = %v, want 1", result.LDMetric.WinsorLowerPercentile)
+	}
+	if result.LDMetric.WinsorUpperPercentile != nil {
+		t.Errorf("WinsorUpperPercentile should be nil, got %v", *result.LDMetric.WinsorUpperPercentile)
+	}
+}
+
+func TestConvert_WinsorizationOnOccurrenceMetricWarns(t *testing.T) {
+	// LD rejects winsorization on occurrence metrics (non-numeric average, e.g.
+	// event_user). Skip it and warn rather than emit a metric LD will reject.
+	sg := baseMetric("event_user")
+	sg.WarehouseNative = &statsig.WarehouseNative{
+		WinsorizationLow:  float64Ptr(0.05),
+		WinsorizationHigh: float64Ptr(0.95),
+	}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.WinsorLowerPercentile != nil || result.LDMetric.WinsorUpperPercentile != nil {
+		t.Error("winsorization must not be set on an occurrence metric")
+	}
+	assertHasWarning(t, result.Warnings, "winsor")
 }
 
 func TestConvert_WarningCapping(t *testing.T) {
@@ -481,7 +527,33 @@ func TestConvert_WarningLogTransform(t *testing.T) {
 	assertHasWarning(t, result.Warnings, "log transform")
 }
 
-func TestConvert_WarningCustomWindow(t *testing.T) {
+func TestConvert_WindowWithDataSource(t *testing.T) {
+	// A custom rollup window (days) maps to LD window offsets (milliseconds)
+	// when a data source is bound — LD requires a snowflake source for windows.
+	// 0–3 days → 0 .. 259_200_000 ms.
+	sg := baseMetric("event_user")
+	sg.RollupTimeWindow = "custom"
+	sg.CustomRollUpStart = float64Ptr(0)
+	sg.CustomRollUpEnd = float64Ptr(3)
+	result, err := Convert(sg, Options{LDDataSource: "snowflake-staging"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.WindowStartOffset == nil || *result.LDMetric.WindowStartOffset != 0 {
+		t.Errorf("WindowStartOffset = %v, want 0", result.LDMetric.WindowStartOffset)
+	}
+	if result.LDMetric.WindowEndOffset == nil || *result.LDMetric.WindowEndOffset != 259_200_000 {
+		t.Errorf("WindowEndOffset = %v, want 259200000 (3 days in ms)", result.LDMetric.WindowEndOffset)
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(strings.ToLower(w), "window") {
+			t.Errorf("should not warn about the window when it maps, got: %q", w)
+		}
+	}
+}
+
+func TestConvert_WindowWithoutDataSourceWarns(t *testing.T) {
+	// Without a data source LD rejects window offsets, so warn and don't set them.
 	sg := baseMetric("event_user")
 	sg.RollupTimeWindow = "custom"
 	sg.CustomRollUpStart = float64Ptr(0)
@@ -490,7 +562,10 @@ func TestConvert_WarningCustomWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertHasWarning(t, result.Warnings, "custom rollup window")
+	if result.LDMetric.WindowStartOffset != nil || result.LDMetric.WindowEndOffset != nil {
+		t.Error("window offsets must not be set without a data source")
+	}
+	assertHasWarning(t, result.Warnings, "data source")
 }
 
 func TestConvert_WarningDailyParticipation(t *testing.T) {
