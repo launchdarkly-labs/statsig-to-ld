@@ -668,8 +668,10 @@ func TestConvert_NoMetricEvents(t *testing.T) {
 // "Metric event is empty"). Each event's Type is its aggregation ("count",
 // "count_distinct", "value", "metadata").
 
-// ratioMetric builds a Statsig cloud ratio: numerator = metricEvents[0],
-// denominator = metricEvents[1]. numType/denType are per-event aggregations.
+// ratioMetric builds a Statsig cloud ratio in the order Statsig actually stores
+// them: metricEvents[0] = denominator, metricEvents[1] = numerator (verified
+// against the Statsig console). Params stay (numerator, denominator) for
+// readable call sites.
 func ratioMetric(numEvent, numType, denEvent, denType string) *statsig.Metric {
 	return &statsig.Metric{
 		ID:             "checkout_per_visit::ratio",
@@ -679,10 +681,41 @@ func ratioMetric(numEvent, numType, denEvent, denType string) *statsig.Metric {
 		Directionality: "increase",
 		UnitTypes:      []string{"userID"},
 		MetricEvents: []statsig.MetricEvent{
-			{Name: numEvent, Type: numType},
-			{Name: denEvent, Type: denType},
+			{Name: denEvent, Type: denType}, // index 0 = denominator
+			{Name: numEvent, Type: numType}, // index 1 = numerator
 		},
 		Tags: []string{"experiment"},
+	}
+}
+
+func TestConvert_Ratio_NumeratorIsSecondEvent(t *testing.T) {
+	// Statsig stores a cloud ratio positionally with no explicit numerator/
+	// denominator field. Verified against the Statsig console: metricEvents[0] is
+	// the DENOMINATOR and metricEvents[1] is the NUMERATOR. This ratio is
+	// "checkout_completed per page_view" — numerator = checkout_completed
+	// (index 1), denominator = page_view (index 0). Built inline (not via the
+	// helper) so it independently pins the numerator/denominator direction.
+	sg := &statsig.Metric{
+		ID:             "checkouts_per_visit::ratio",
+		Name:           "checkouts_per_visit",
+		Type:           "ratio",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		MetricEvents: []statsig.MetricEvent{
+			{Name: "page_view", Type: "count"},          // index 0 = denominator
+			{Name: "checkout_completed", Type: "count"}, // index 1 = numerator
+		},
+	}
+
+	result, err := Convert(sg, Options{LDDataSource: "snowflake"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.EventKey != "checkout_completed" {
+		t.Errorf("numerator (EventKey) = %q, want checkout_completed (metricEvents[1])", result.LDMetric.EventKey)
+	}
+	if result.LDMetric.Denominator == nil || result.LDMetric.Denominator.EventName != "page_view" {
+		t.Errorf("denominator EventName = %+v, want page_view (metricEvents[0])", result.LDMetric.Denominator)
 	}
 }
 
@@ -784,7 +817,7 @@ func TestConvert_Ratio_CountDistinctNumerator(t *testing.T) {
 	// unitAggregationType=count_distinct + unitAggregationField, non-numeric,
 	// and (unlike the simple-metric path) without a data-loss warning.
 	sg := ratioMetric("add_to_cart", "count_distinct", "page_view", "count")
-	sg.MetricEvents[0].MetadataKey = "item_category"
+	sg.MetricEvents[1].MetadataKey = "item_category" // numerator = metricEvents[1]
 
 	result, err := Convert(sg, Options{})
 	if err != nil {
@@ -808,7 +841,7 @@ func TestConvert_Ratio_CountDistinctNumerator(t *testing.T) {
 
 func TestConvert_Ratio_CountDistinctDenominator(t *testing.T) {
 	sg := ratioMetric("purchase", "count", "session_start", "count_distinct")
-	sg.MetricEvents[1].MetadataKey = "session_id"
+	sg.MetricEvents[0].MetadataKey = "session_id" // denominator = metricEvents[0]
 
 	result, err := Convert(sg, Options{})
 	if err != nil {

@@ -470,8 +470,11 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	result := &Result{}
 
-	numEv := sg.MetricEvents[0]
-	denEv := sg.MetricEvents[1]
+	// Statsig stores a cloud ratio's two events positionally, with no explicit
+	// numerator/denominator field. Verified against the Statsig console:
+	// metricEvents[0] is the DENOMINATOR and metricEvents[1] is the NUMERATOR.
+	denEv := sg.MetricEvents[0]
+	numEv := sg.MetricEvents[1]
 	if numEv.Name == "" {
 		return nil, fmt.Errorf("ratio metric %q: its Statsig numerator event has no name, so there is no event key to map to the LaunchDarkly metric", sg.Name)
 	}
