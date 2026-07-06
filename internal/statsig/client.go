@@ -50,30 +50,26 @@ func NewClient(apiKey, baseURL string) *Client {
 // Metric endpoints (cursor pagination)
 // ============================================================================
 
-// ListAllMetrics fetches all metrics from the Statsig project, handling pagination.
+// ListAllMetrics fetches all metrics from the Statsig project, following the
+// page-number pagination in the response's `pagination` block (same mechanism
+// as the gates / dynamic-config endpoints). The list endpoint caps a page at
+// `limit` items and advances via `page`; stopping on an empty `nextPage` or a
+// short page is what keeps large projects (>100 metrics) from being under-read.
 func (c *Client) ListAllMetrics(ctx context.Context) ([]Metric, error) {
-	var all []Metric
-	cursor := ""
-
-	for {
-		reqURL := fmt.Sprintf("%s/metrics/list?limit=100", c.apiBase)
-		if cursor != "" {
-			reqURL += "&cursor=" + url.QueryEscape(cursor)
-		}
-
-		batch, nextCursor, err := c.fetchMetricsPage(ctx, reqURL)
+	all := make([]Metric, 0)
+	for page := 1; page <= maxPages; page++ {
+		reqURL := fmt.Sprintf("%s/metrics/list?limit=%d&page=%d", c.apiBase, pageSize, page)
+		batch, nextPage, err := c.fetchMetricsPage(ctx, reqURL)
 		if err != nil {
 			return nil, err
 		}
 		all = append(all, batch...)
 
-		if nextCursor == "" {
-			break
+		if nextPage == "" || len(batch) < pageSize {
+			return all, nil
 		}
-		cursor = nextCursor
 	}
-
-	return all, nil
+	return all, fmt.Errorf("Statsig metrics pagination exceeded %d pages", maxPages)
 }
 
 // GetMetricByName fetches all metrics and returns the one matching the given name.
@@ -115,12 +111,7 @@ func (c *Client) fetchMetricsPage(ctx context.Context, reqURL string) ([]Metric,
 		return nil, "", fmt.Errorf("parsing response: %w (body: %s)", err, httputil.Truncate(string(body), 200))
 	}
 
-	nextCursor := ""
-	if listResp.HasMore {
-		nextCursor = listResp.NextCursor
-	}
-
-	return listResp.Data, nextCursor, nil
+	return listResp.Data, listResp.Pagination.NextPage, nil
 }
 
 // ============================================================================

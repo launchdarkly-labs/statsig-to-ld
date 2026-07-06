@@ -20,6 +20,16 @@ type MetricPost struct {
 	Tags                []string      `json:"tags,omitempty"`
 	EventDefault        *EventDefault `json:"eventDefault,omitempty"`
 	DataSource          *DataSource   `json:"dataSource,omitempty"`
+
+	// Measurement window offsets, in milliseconds. LD only accepts these on
+	// metrics backed by a snowflake-experimentation data source.
+	WindowStartOffset *int64 `json:"windowStartOffset,omitempty"`
+	WindowEndOffset   *int64 `json:"windowEndOffset,omitempty"`
+
+	// Winsorization percentiles on a 0–100 scale. Not valid on occurrence
+	// metrics (non-numeric average).
+	WinsorLowerPercentile *float32 `json:"winsorLowerPercentile,omitempty"`
+	WinsorUpperPercentile *float32 `json:"winsorUpperPercentile,omitempty"`
 }
 
 // EventDefault configures the default event value for missing units.

@@ -129,6 +129,63 @@ func TestListGates_Pagination_ExactlyFullLastPage(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// ListAllMetrics — pagination via the `pagination` object (page-number based)
+// ============================================================================
+
+func TestListAllMetrics_Pagination(t *testing.T) {
+	// Statsig /metrics/list paginates with a `pagination` object
+	// (itemsPerPage / pageNumber / totalItems / nextPage), NOT top-level
+	// has_more/next_page. With 122 metrics the client must fetch page 1 (100)
+	// AND page 2 (22) — regression guard for the importer under-reading large
+	// projects.
+	all := make([]Metric, 122)
+	for i := range all {
+		all[i] = Metric{ID: fmt.Sprintf("m_%d::sum", i), Name: fmt.Sprintf("m_%d", i), Type: "sum"}
+	}
+	type pag struct {
+		ItemsPerPage int    `json:"itemsPerPage"`
+		PageNumber   int    `json:"pageNumber"`
+		TotalItems   int    `json:"totalItems"`
+		NextPage     string `json:"nextPage"`
+	}
+	type resp struct {
+		Message    string   `json:"message"`
+		Data       []Metric `json:"data"`
+		Pagination pag      `json:"pagination"`
+	}
+	var pageHits []string
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics/list" {
+			t.Errorf("got path %q, want /metrics/list", r.URL.Path)
+		}
+		page := r.URL.Query().Get("page")
+		pageHits = append(pageHits, page)
+		switch page {
+		case "", "1":
+			_ = json.NewEncoder(w).Encode(resp{
+				Data:       all[:100],
+				Pagination: pag{ItemsPerPage: 100, PageNumber: 1, TotalItems: 122, NextPage: "/console/v1/metrics/list?page=2&limit=100"},
+			})
+		case "2":
+			_ = json.NewEncoder(w).Encode(resp{
+				Data:       all[100:],
+				Pagination: pag{ItemsPerPage: 100, PageNumber: 2, TotalItems: 122, NextPage: ""},
+			})
+		default:
+			t.Errorf("unexpected page param %q", page)
+		}
+	})
+
+	got, err := client.ListAllMetrics(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllMetrics: %v", err)
+	}
+	if len(got) != 122 {
+		t.Errorf("got %d metrics, want 122 (server saw pages: %v)", len(got), pageHits)
+	}
+}
+
 func TestListGates_HTTPError(t *testing.T) {
 	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)

@@ -15,6 +15,10 @@ import (
 
 const maxLDKeyLength = 256
 
+// millisPerDay converts a Statsig custom-rollup-window bound (expressed in days)
+// to a LaunchDarkly window offset (expressed in milliseconds).
+const millisPerDay = 24 * 60 * 60 * 1000
+
 // Options configures the conversion behavior.
 type Options struct {
 	// LDDataSource is the default LD data source key applied to all Warehouse
@@ -164,12 +168,27 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 
 	// Warehouse Native advanced features
+	var winsorLower, winsorUpper *float32
 	if sg.WarehouseNative != nil {
 		wn := sg.WarehouseNative
 		if wn.WinsorizationHigh != nil || wn.WinsorizationLow != nil {
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("winsorization (low=%s, high=%s) is not yet supported in LaunchDarkly — outlier clipping will not be applied",
-					fmtOptFloat(wn.WinsorizationLow), fmtOptFloat(wn.WinsorizationHigh)))
+			// LD supports winsorization on numeric and count metrics, expressed
+			// as 0–100 percentiles (Statsig gives 0–1 fractions). It is rejected
+			// on occurrence metrics (non-numeric average), so skip + warn there.
+			if !isNumeric && unitAgg == "average" {
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("winsorization (low=%s, high=%s) not applied — LaunchDarkly does not support winsorization on occurrence metrics",
+						fmtOptFloat(wn.WinsorizationLow), fmtOptFloat(wn.WinsorizationHigh)))
+			} else {
+				if wn.WinsorizationLow != nil {
+					v := float32(*wn.WinsorizationLow * 100)
+					winsorLower = &v
+				}
+				if wn.WinsorizationHigh != nil {
+					v := float32(*wn.WinsorizationHigh * 100)
+					winsorUpper = &v
+				}
+			}
 		}
 		if wn.Cap != nil {
 			result.Warnings = append(result.Warnings,
@@ -181,12 +200,8 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		}
 	}
 
-	// Custom rollup windows
-	if sg.RollupTimeWindow == "custom" && sg.CustomRollUpStart != nil && sg.CustomRollUpEnd != nil {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("custom rollup window (days %v–%v) is not yet supported in LaunchDarkly — measurement window will not be applied",
-				*sg.CustomRollUpStart, *sg.CustomRollUpEnd))
-	}
+	// Custom rollup windows are mapped to LD window offsets after the metric is
+	// built (they depend on whether a data source is bound). See below.
 
 	// Daily participation rate
 	if sg.RollupTimeWindow == "daily_participation_rate" {
@@ -294,6 +309,9 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		RandomizationUnits:  randUnits,
 		Unit:                unit,
 		Tags:                tags,
+
+		WinsorLowerPercentile: winsorLower,
+		WinsorUpperPercentile: winsorUpper,
 	}
 
 	result.LDMetric.EventDefault = eventDefault
@@ -312,6 +330,25 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	} else if opts.LDDataSource != "" {
 		// No explicit source name on the metric, but a global default was provided
 		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: opts.LDDataSource}
+	}
+
+	// ---------------------------------------------------------------
+	// Windowed metrics: map a Statsig custom rollup window (days) to LD window
+	// offsets (milliseconds). LD only accepts window offsets on metrics backed
+	// by a warehouse (snowflake-experimentation) data source, so set them only
+	// when a data source is bound; otherwise warn.
+	// ---------------------------------------------------------------
+	if sg.RollupTimeWindow == "custom" && sg.CustomRollUpStart != nil && sg.CustomRollUpEnd != nil {
+		if result.LDMetric.DataSource != nil {
+			start := int64(*sg.CustomRollUpStart * millisPerDay)
+			end := int64(*sg.CustomRollUpEnd * millisPerDay)
+			result.LDMetric.WindowStartOffset = &start
+			result.LDMetric.WindowEndOffset = &end
+		} else {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
+					*sg.CustomRollUpStart, *sg.CustomRollUpEnd))
+		}
 	}
 
 	return result, nil
