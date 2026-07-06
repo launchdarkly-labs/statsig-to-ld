@@ -6,21 +6,22 @@ package launchdarkly
 
 // MetricPost is the request body for creating an LD metric via the REST API.
 type MetricPost struct {
-	Key                 string           `json:"key"`
-	Kind                string           `json:"kind"`
-	Name                string           `json:"name,omitempty"`
-	Description         string           `json:"description,omitempty"`
-	EventKey            string           `json:"eventKey,omitempty"`
-	IsNumeric           *bool            `json:"isNumeric,omitempty"`
-	SuccessCriteria     string           `json:"successCriteria,omitempty"`
-	UnitAggregationType string           `json:"unitAggregationType,omitempty"`
-	AnalysisType        string           `json:"analysisType,omitempty"`
-	RandomizationUnits  []string         `json:"randomizationUnits,omitempty"`
-	Unit                string           `json:"unit,omitempty"`
-	Tags                []string         `json:"tags,omitempty"`
-	EventDefault        *EventDefault    `json:"eventDefault,omitempty"`
-	DataSource          *DataSource      `json:"dataSource,omitempty"`
-	Denominator         *DenominatorPost `json:"denominator,omitempty"`
+	Key                  string           `json:"key"`
+	Kind                 string           `json:"kind"`
+	Name                 string           `json:"name,omitempty"`
+	Description          string           `json:"description,omitempty"`
+	EventKey             string           `json:"eventKey,omitempty"`
+	IsNumeric            *bool            `json:"isNumeric,omitempty"`
+	SuccessCriteria      string           `json:"successCriteria,omitempty"`
+	UnitAggregationType  string           `json:"unitAggregationType,omitempty"`
+	UnitAggregationField string           `json:"unitAggregationField,omitempty"`
+	AnalysisType         string           `json:"analysisType,omitempty"`
+	RandomizationUnits   []string         `json:"randomizationUnits,omitempty"`
+	Unit                 string           `json:"unit,omitempty"`
+	Tags                 []string         `json:"tags,omitempty"`
+	EventDefault         *EventDefault    `json:"eventDefault,omitempty"`
+	DataSource           *DataSource      `json:"dataSource,omitempty"`
+	Denominator          *DenominatorPost `json:"denominator,omitempty"`
 
 	// Measurement window offsets, in milliseconds. LD only accepts these on
 	// metrics backed by a snowflake-experimentation data source.
