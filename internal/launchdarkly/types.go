@@ -41,6 +41,9 @@ type DenominatorPost struct {
 	IsNumeric            bool   `json:"isNumeric"`
 	UnitAggregationType  string `json:"unitAggregationType"`
 	UnitAggregationField string `json:"unitAggregationField,omitempty"`
+	// DataSource is the denominator's warehouse data source, independent of the
+	// numerator's (top-level) DataSource. Omit for SDK-hosted (cloud) ratios.
+	DataSource *DataSource `json:"dataSource,omitempty"`
 }
 
 // EventDefault configures the default event value for missing units.

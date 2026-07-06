@@ -1000,3 +1000,117 @@ func assertHasWarning(t *testing.T, warnings []string, substr string) {
 	}
 	t.Errorf("expected warning containing %q, got: %v", substr, warnings)
 }
+
+// --- Warehouse-native routing ---
+
+func TestConvert_WarehouseNativeSum_RoutesByAggregation(t *testing.T) {
+	// Top-level type is user_warehouse; the real shape is in warehouseNative.
+	sg := &statsig.Metric{
+		ID:             "revenue::user_warehouse",
+		Name:           "revenue",
+		Type:           "user_warehouse",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		WarehouseNative: &statsig.WarehouseNative{
+			Aggregation:   "sum",
+			MetricSources: []statsig.MetricSource{{MetricSourceName: "purchase_src", ValueColumn: "price_usd"}},
+		},
+	}
+	result, err := Convert(sg, Options{SourceMapping: map[string]string{"purchase_src": "ld-purchase"}})
+	if err != nil {
+		t.Fatalf("unexpected error (WN sum should route via aggregation, not error as unknown type): %v", err)
+	}
+	if result.LDMetric.UnitAggregationType != "sum" {
+		t.Errorf("UnitAggregationType = %q, want \"sum\"", result.LDMetric.UnitAggregationType)
+	}
+	if result.LDMetric.EventKey != "price_usd" {
+		t.Errorf("EventKey = %q, want \"price_usd\"", result.LDMetric.EventKey)
+	}
+	if result.LDMetric.DataSource == nil || result.LDMetric.DataSource.Key != "ld-purchase" {
+		t.Errorf("DataSource = %+v, want key ld-purchase", result.LDMetric.DataSource)
+	}
+}
+
+func TestConvert_WarehouseNativeRatio_PerTermSources(t *testing.T) {
+	sg := &statsig.Metric{
+		ID:             "rev-per-visitor::user_warehouse",
+		Name:           "rev-per-visitor",
+		Type:           "user_warehouse",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		WarehouseNative: &statsig.WarehouseNative{
+			Aggregation:                 "ratio",
+			MetricSources:               []statsig.MetricSource{{MetricSourceName: "purchase_src", ValueColumn: "price_usd"}},
+			NumeratorAggregation:        "sum",
+			DenominatorMetricSourceName: "visitor_src",
+			DenominatorAggregation:      "count",
+		},
+	}
+	result, err := Convert(sg, Options{SourceMapping: map[string]string{
+		"purchase_src": "ld-purchase",
+		"visitor_src":  "ld-visitor",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.DataSource == nil || result.LDMetric.DataSource.Key != "ld-purchase" {
+		t.Errorf("numerator DataSource = %+v, want key ld-purchase", result.LDMetric.DataSource)
+	}
+	if result.LDMetric.Denominator == nil {
+		t.Fatalf("Denominator is nil, want a denominator term")
+	}
+	if result.LDMetric.Denominator.DataSource == nil || result.LDMetric.Denominator.DataSource.Key != "ld-visitor" {
+		t.Errorf("denominator DataSource = %+v, want key ld-visitor (independent of numerator)", result.LDMetric.Denominator.DataSource)
+	}
+}
+
+func TestMetric_WarehouseNativeHelpers(t *testing.T) {
+	wn := &statsig.Metric{Type: "user_warehouse", WarehouseNative: &statsig.WarehouseNative{
+		Aggregation:   "count_distinct",
+		MetricSources: []statsig.MetricSource{{MetricSourceName: "src_a"}},
+	}}
+	if !wn.IsWarehouseNative() {
+		t.Error("IsWarehouseNative() = false, want true")
+	}
+	if wn.EffectiveType() != "count_distinct" {
+		t.Errorf("EffectiveType() = %q, want \"count_distinct\"", wn.EffectiveType())
+	}
+	if wn.NumeratorSourceName() != "src_a" {
+		t.Errorf("NumeratorSourceName() = %q, want \"src_a\"", wn.NumeratorSourceName())
+	}
+
+	cloud := &statsig.Metric{Type: "sum", MetricSourceName: "top_src"}
+	if cloud.IsWarehouseNative() {
+		t.Error("IsWarehouseNative() = true for cloud metric, want false")
+	}
+	if cloud.EffectiveType() != "sum" {
+		t.Errorf("EffectiveType() = %q, want \"sum\"", cloud.EffectiveType())
+	}
+	if cloud.NumeratorSourceName() != "top_src" {
+		t.Errorf("NumeratorSourceName() = %q, want \"top_src\"", cloud.NumeratorSourceName())
+	}
+}
+
+func TestConvert_WarehouseNativeNoAggregation_ExplicitError(t *testing.T) {
+	// type user_warehouse but no aggregation (parsing gap / incomplete metric):
+	// should fail with a clear error, not a generic "unknown type", and not be
+	// treated as a known-incompatible skip.
+	sg := &statsig.Metric{
+		ID:              "broken::user_warehouse",
+		Name:            "broken",
+		Type:            "user_warehouse",
+		Directionality:  "increase",
+		UnitTypes:       []string{"userID"},
+		WarehouseNative: &statsig.WarehouseNative{}, // Aggregation == ""
+	}
+	_, err := Convert(sg, Options{})
+	if err == nil {
+		t.Fatal("expected an error for warehouse-native metric with no aggregation")
+	}
+	if IsIncompatible(err) {
+		t.Errorf("should be a hard error, not an IncompatibleError skip: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no aggregation") {
+		t.Errorf("error should mention the missing aggregation, got: %v", err)
+	}
+}

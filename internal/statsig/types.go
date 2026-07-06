@@ -46,13 +46,77 @@ type Criterion struct {
 	Values    []string `json:"values"`
 }
 
-// WarehouseNative contains Statsig Warehouse Native-specific metric configuration.
+// WarehouseNative holds Statsig warehouse-native metric config. For these
+// metrics the top-level Metric.Type is "user_warehouse"/"hybrid_warehouse" and
+// the real shape lives in Aggregation. Field names follow the Statsig
+// api-reference (GET /console/v1/metrics/{id}), unconfirmed against a live
+// /metrics/list response.
 type WarehouseNative struct {
+	// Aggregation is the real shape: count | sum | mean | count_distinct |
+	// percentile | daily_participation | ratio | funnel.
+	Aggregation string `json:"aggregation"`
+
+	MetricSources []MetricSource `json:"metricSources"`
+	// MetricSourceName is the deprecated single-source form; use MetricSources.
+	MetricSourceName string `json:"metricSourceName"`
+
+	// NumeratorAggregation is the numerator term's aggregation (top-level
+	// Aggregation is "ratio"). Unconfirmed in the Console API response.
+	NumeratorAggregation string `json:"numeratorAggregation"`
+
+	DenominatorMetricSourceName string `json:"denominatorMetricSourceName"`
+	DenominatorAggregation      string `json:"denominatorAggregation"`
+
 	WinsorizationHigh *float64 `json:"winsorizationHigh"`
 	WinsorizationLow  *float64 `json:"winsorizationLow"`
 	Cap               *float64 `json:"cap"`
 	Percentile        *float64 `json:"percentile"`
 	UseLogTransform   *bool    `json:"useLogTransform"`
+}
+
+// MetricSource is a numerator-side warehouse source. The criteria sub-shape is
+// unverified against a live Console API response.
+type MetricSource struct {
+	MetricSourceName string      `json:"metricSourceName"`
+	Criteria         []Criterion `json:"criteria"`
+	ValueColumn      string      `json:"valueColumn"`
+}
+
+// IsWarehouseNative reports whether the metric's real aggregation lives in
+// WarehouseNative.Aggregation rather than the top-level Type.
+func (m *Metric) IsWarehouseNative() bool {
+	return m.Type == "user_warehouse" || m.Type == "hybrid_warehouse" || m.HasWarehouseAggregation()
+}
+
+// HasWarehouseAggregation reports whether an explicit warehouse-native
+// aggregation is set (the value EffectiveType returns).
+func (m *Metric) HasWarehouseAggregation() bool {
+	return m.WarehouseNative != nil && m.WarehouseNative.Aggregation != ""
+}
+
+// EffectiveType returns the aggregation to dispatch on: the warehouse-native
+// aggregation when present, else the top-level type. (Convert rejects a
+// warehouse-native metric that reaches it without an aggregation, so the
+// fallback is only a defensive default.)
+func (m *Metric) EffectiveType() string {
+	if m.HasWarehouseAggregation() {
+		return m.WarehouseNative.Aggregation
+	}
+	return m.Type
+}
+
+// NumeratorSourceName returns the numerator's warehouse source name, preferring
+// MetricSources over the deprecated single-source fields.
+func (m *Metric) NumeratorSourceName() string {
+	if m.WarehouseNative != nil {
+		if len(m.WarehouseNative.MetricSources) > 0 && m.WarehouseNative.MetricSources[0].MetricSourceName != "" {
+			return m.WarehouseNative.MetricSources[0].MetricSourceName
+		}
+		if m.WarehouseNative.MetricSourceName != "" {
+			return m.WarehouseNative.MetricSourceName
+		}
+	}
+	return m.MetricSourceName
 }
 
 // ComponentMetric is a reference to another metric used in composite metrics.
