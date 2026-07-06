@@ -38,7 +38,7 @@ what's live vs. in review.
 | `mean` | custom, numeric, `average`, `eventDefault {disabled:true}` | main | 🟢 Unit-tested |
 | `event_user` | custom, non-numeric, `average` | main | ✅ Verified E2E³ |
 | `event_user_window` | same as `event_user` (window applied via custom rollup — see below) | main | 🟢 Unit-tested |
-| `ratio` — cloud / event-based | LD ratio: numerator = `metricEvents[0]`, denominator = `metricEvents[1]` | ratio PR | ✅ Verified E2E |
+| `ratio` — cloud / event-based | LD ratio: numerator = `metricEvents[1]`, denominator = `metricEvents[0]` — Statsig stores the pair positionally with index 1 = numerator (confirmed against the console) | ratio PR | ✅ Created E2E; num/den direction unit-tested⁴ |
 | `ratio` — warehouse-native | numerator/denominator are not in `metricEvents`; converter fails loudly instead of mis-converting | ratio PR | 🚫 Warehouse-native only (unimplemented + untestable) |
 | ratio whose component is itself a ratio | — | ratio PR | ⛔ Incompatible |
 | `funnel` | — | main | ⛔ Incompatible |
@@ -63,7 +63,7 @@ what's live vs. in review.
 | Log transform | `warehouseNative.useLogTransform` | unsupported in LD; warns | main | ⚠️ Lossy + 🚫 source |
 | Daily participation rate | `rollupTimeWindow=daily_participation_rate` | not carried over; warns (standard binary conversion) | main | ⚠️ Lossy |
 
-¹ The `count` term shape was emitted by the converter and accepted by LD as a ratio numerator/denominator during the ratio E2E. ² The `sum` shape was confirmed accepted by LD via a direct winsorization create. ³ The windowed E2E metric is an `event_user` metric — its successful creation confirms the base `event_user` mapping.
+¹ The `count` term shape was emitted by the converter and accepted by LD as ratio terms during the ratio E2E. ² The `sum` shape was confirmed accepted by LD via a direct winsorization create. ³ The windowed E2E metric is an `event_user` metric — its successful creation confirms the base `event_user` mapping. ⁴ The ratio E2E created the metric and field-checked its structure, but did not verify the numerator/denominator *direction* — which was in fact inverted at the time. Direction is now correct (numerator = `metricEvents[1]`, verified against the Statsig console) and covered by a unit test.
 
 ## The warehouse-native wall (experimental / not testable on a cloud project)
 
@@ -98,7 +98,9 @@ these fields, so they can't be produced or exercised end to end:
 
 ## Bottom line
 
-Fully proven end to end today: **cloud ratios** and **windowed metrics**. Solidly
-covered: the base metric types and **winsorization** (both halves verified, just
-not joined). Everything in the warehouse-native section should be treated as
-experimental until a warehouse-native Statsig project is available to test against.
+Proven in LaunchDarkly today: **windowed metrics** (fully end to end) and **cloud
+ratios** (created end to end; numerator/denominator direction fixed after review
+and now unit-tested — see ⁴). Solidly covered: the base metric types and
+**winsorization** (both halves verified, just not joined). Everything in the
+warehouse-native section should be treated as experimental until a
+warehouse-native Statsig project is available to test against.
