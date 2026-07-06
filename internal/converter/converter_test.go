@@ -750,10 +750,11 @@ func TestConvert_Ratio_CountDistinctDenominator(t *testing.T) {
 	}
 }
 
-func TestConvert_Ratio_CountDistinctNoColumn(t *testing.T) {
-	// A cloud ratio's count_distinct event carries no column (it counts distinct
-	// units/users). LD count(distinct) needs a column, so fall back to a plain
-	// count and warn — don't error, and don't silently mislabel it.
+func TestConvert_Ratio_CountDistinctNoColumnIsBinary(t *testing.T) {
+	// A cloud ratio's count_distinct event carries no column — it counts distinct
+	// units (users). The LaunchDarkly equivalent is a binary metric: non-numeric,
+	// average aggregation (== count distinct of the analysis unit). Faithful, so
+	// no warning.
 	sg := ratioMetric("purchase", "count_distinct", "page_view", "count")
 	// numerator MetadataKey intentionally empty, like a real cloud ratio
 
@@ -761,16 +762,20 @@ func TestConvert_Ratio_CountDistinctNoColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.LDMetric.UnitAggregationType != "sum" {
-		t.Errorf("numerator UAT = %q, want sum (count fallback)", result.LDMetric.UnitAggregationType)
+	if result.LDMetric.UnitAggregationType != "average" {
+		t.Errorf("numerator UAT = %q, want average (binary metric)", result.LDMetric.UnitAggregationType)
 	}
 	if result.LDMetric.UnitAggregationField != "" {
-		t.Errorf("UnitAggregationField should be empty in the count fallback, got %q", result.LDMetric.UnitAggregationField)
+		t.Errorf("UnitAggregationField should be empty for a binary term, got %q", result.LDMetric.UnitAggregationField)
 	}
 	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
-		t.Error("count fallback must be non-numeric")
+		t.Error("binary term must be non-numeric")
 	}
-	assertHasWarning(t, result.Warnings, "count-distinct")
+	for _, w := range result.Warnings {
+		if strings.Contains(strings.ToLower(w), "distinct") {
+			t.Errorf("count-distinct-of-users maps faithfully to a binary metric; should not warn, got: %q", w)
+		}
+	}
 }
 
 func TestConvert_Ratio_NoDataSourceWarns(t *testing.T) {

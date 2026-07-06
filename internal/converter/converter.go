@@ -390,16 +390,19 @@ func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []string, error) {
 	var warnings []string
 	switch ev.Type {
 	case "count_distinct":
-		// LD ratio terms support count(distinct <column>) natively. When the
-		// Statsig event names a column, map straight to it (non-numeric). Cloud
-		// ratios, though, store count_distinct with no column — it counts distinct
-		// units/users — and LD count(distinct) requires a column. Rather than
-		// error, fall back to a plain count and flag the gap.
+		// A named column → count(distinct <column>), which LaunchDarkly supports
+		// only on warehouse-native metrics (not hosted). Map to count_distinct +
+		// the field; on a hosted metric LD will reject it, which is correct — the
+		// feature genuinely isn't available there.
 		if ev.MetadataKey != "" {
 			return termSpec{isNumeric: false, unitAgg: "count_distinct", analysisType: "mean", unitAggField: ev.MetadataKey}, nil, nil
 		}
-		spec, _ := termSpecFor("event_count_custom")
-		return spec, []string{fmt.Sprintf("event %q uses Statsig count-distinct with no column (a cloud ratio counts distinct units) — converted as a plain count; LaunchDarkly supports count(distinct) for ratios, so set it on the metric in LD if you need distinct counting", ev.Name)}, nil
+		// No column: a cloud count_distinct counts distinct units (users). The
+		// LaunchDarkly equivalent is a binary metric — non-numeric with average
+		// aggregation, which is exactly "count distinct of the analysis unit".
+		// This is a faithful mapping, so no warning.
+		spec, _ := termSpecFor("event_user")
+		return spec, nil, nil
 	case "metadata":
 		warnings = append(warnings,
 			fmt.Sprintf("Statsig aggregates metadata field %q — LaunchDarkly will aggregate the track() metricValue; ensure events send the same value in metricValue", ev.MetadataKey))
