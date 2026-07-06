@@ -55,7 +55,7 @@ what's live vs. in review.
 | Randomization unit | `unitTypes` (e.g. `userID`) | `randomizationUnits` (`user`); override via `--unit-type-mapping` | main | ✅ |
 | Windowed (custom rollup) | `rollupTimeWindow=custom`, `customRollUpStart/End` (days) | `windowStartOffset` / `windowEndOffset` (ms) **when a data source is bound**; otherwise a warning (LD windows are snowflake-experimentation only) | windowed+winsor PR | ✅ Verified E2E |
 | Winsorization | `warehouseNative.winsorizationLow/High` (fractions, 0–1) | `winsorLowerPercentile` / `winsorUpperPercentile` (0–100); skipped with a warning on occurrence metrics | windowed+winsor PR | 🟡 conversion unit-tested + LD accepts the shape (verified); source side 🚫 (see below) |
-| Count distinct — ratio term | `metricEvents[i].type=count_distinct` | `count_distinct` + `unitAggregationField` when a column is present; otherwise falls back to a plain count + warning | ratio PR | 🟢 cloud fallback unit-tested; column path 🚫 |
+| Count distinct — ratio term | `metricEvents[i].type=count_distinct` | No column (cloud = distinct users) → LD **binary** metric (non-numeric, `average`), i.e. count distinct of the analysis unit — a faithful mapping, no warning. Named column → `count_distinct` + `unitAggregationField` (warehouse-native only in LD) | ratio PR | 🟢 binary/no-column path unit-tested; named-column path 🚫 |
 | Count distinct — simple metric | `metricEvents[0].type=count_distinct` | not carried over; warns that LD counts all occurrences | main | ⚠️ Lossy |
 | Metadata aggregation | `metricEvents[0].type=metadata` | not carried over; warns (LD aggregates the tracked value) | main | ⚠️ Lossy |
 | Event filters / criteria | `metricEvents[0].criteria` | **data loss** — not applied; the LD metric matches all events; warns | main | ⚠️ Lossy |
@@ -79,7 +79,9 @@ these fields, so they can't be produced or exercised end to end:
   the emitted shape are each proven independently; the joined run is untestable
   because Statsig only stores winsorization on warehouse-native metrics.
 - **Count distinct over a named column** (ratio terms) — cloud ratios carry no
-  column, so only the count-fallback path is exercised.
+  column (their count_distinct is distinct-users, mapped to a binary metric), so
+  only the binary path is exercised; the named-column path is warehouse-native
+  and unverified.
 - **Per-unit capping / log transform** — warehouse-native only in Statsig, and
   unsupported in LaunchDarkly regardless.
 
