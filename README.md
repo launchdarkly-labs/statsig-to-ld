@@ -50,10 +50,13 @@ Ask the user which paths they need (multi-select). Do this even if you are opera
 
 Ask one follow-up:
 
+- **"My LaunchDarkly metric data sources already exist — I don't need to create anything."** (Common when the warehouse integration was provisioned for you, set up in the LD UI, or managed via Terraform — this is the **Figma** case.) → **Skip `warehouse` entirely; don't run it at all.** Go straight to path D and tell `metrics convert` which data source to bind to: `--ld-data-source <key>` for a single source, or hand-write a `source-mapping.json` and pass `--source-mapping`. Full detail and the JSON shape are in [Already have LD data sources? Skip `warehouse`](docs/cli-reference.md#already-have-ld-data-sources-skip-warehouse).
 - **"I already have the LaunchDarkly warehouse integration set up; I only need to migrate metric data sources."** → [`statsig-to-ld warehouse --only data-sources`](docs/cli-reference.md#running-only-one-phase). Skips the integrations wizard, creates LD data sources, writes `source-mapping.json`.
 - **"I haven't set up the LaunchDarkly warehouse integration yet — do all of it."** → [`statsig-to-ld warehouse`](docs/cli-reference.md#warehouse-native-migration) with no `--only` flag. Runs the full pipeline: integrations wizard + data sources + `source-mapping.json`.
 
-Either path produces a `source-mapping.json` file. **Then run path D** to migrate the warehouse-native metric definitions: `statsig-to-ld metrics convert --source-mapping source-mapping.json` binds each metric to the LD data source `warehouse` just created. The agent shim at [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) has the wizard-by-wizard detail for the warehouse subcommand.
+**Then run path D** to migrate the warehouse-native metric definitions: `statsig-to-ld metrics convert --source-mapping source-mapping.json` (or `--ld-data-source <key>`) binds each metric to its LD data source. The middle and last paths write `source-mapping.json` for you; the first path (data sources already exist) is where you supply the mapping — or a single `--ld-data-source` key — yourself. The agent shim at [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) has the wizard-by-wizard detail for the warehouse subcommand.
+
+> Warehouse-native conversion is the newest, least-tested path. If a metric isn't recognized or converts wrong, run `statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json` (Statsig key only) to export the raw metric definitions, then share that file — redacted — with the LaunchDarkly team. See [Debugging a conversion](docs/cli-reference.md#debugging-a-conversion---dump-raw).
 
 ### Step 3 — Check credentials before running anything
 
@@ -85,14 +88,16 @@ Only after both env vars are confirmed set should you run any `statsig-to-ld <su
 
 ## Prerequisites
 
-- Go 1.24+ (to build from source) or a pre-built binary from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page
+- **Go 1.25 or higher** on macOS or Linux — this tool is built from source (see [Installation](#installation))
 - A Statsig **Console API Key** (`console-xxx`) — create at Statsig Console > Project Settings > Keys & Environments
 - A LaunchDarkly **API access token** (`api-xxx`) — create at **Account settings → Authorization → Access tokens** with a role that can write flags, metrics, and (optionally) environments in the target project. The Writer role works.
 - **For the SDK-rewrite skill only:** Claude Code (or another Claude interface), `node` 18+ to run the skill's helper scripts, and [`ldcli`](https://github.com/launchdarkly/ldcli) (the skill auto-installs it if missing).
 
 ## Installation
 
-### CLI (from source)
+### CLI (build from source)
+
+Install **Go 1.25 or higher** ([go.dev/dl](https://go.dev/dl/)) on macOS or Linux, then build the binary from the repo root:
 
 ```bash
 go build -o statsig-to-ld .
@@ -102,9 +107,15 @@ go build -ldflags "-X github.com/launchdarkly-labs/statsig-to-ld/cmd.version=1.0
   -o statsig-to-ld .
 ```
 
-### CLI (pre-built binary)
+This produces a `statsig-to-ld` binary in the repo root. Run it from there, passing the subcommand you want:
 
-Download from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page.
+```bash
+./statsig-to-ld --help
+./statsig-to-ld metrics convert --help
+./statsig-to-ld analyze --ld-project my-project
+```
+
+> **Release binaries vs. building from source.** Building from source with `go build` (above) is the recommended path. The tagged release binaries are published mainly for Linux, and for shipping major collections of updates and bug fixes.
 
 ### SDK-rewrite skill
 

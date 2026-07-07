@@ -28,13 +28,13 @@ It does **not** modify application code (for that, use the [SDK-rewrite skill](s
 
 ## Tool Location and Setup
 
-The CLI source is in this repository. Build it before first use:
+The CLI source is in this repository. Requires **Go 1.25 or higher** (macOS or Linux). Build it before first use:
 
 ```bash
 go build -o statsig-to-ld .
 ```
 
-The binary is `./statsig-to-ld`. All commands below assume you are in the repository root.
+The binary is `./statsig-to-ld`. All commands below assume you are in the repository root. Building from source with `go build` is the recommended path; the tagged release binaries are mainly for Linux or for major collections of updates and bug fixes.
 
 ## API Key Setup
 
@@ -108,9 +108,10 @@ If the user is also rewriting application code from the Statsig SDK to the Launc
 
 | Statsig usage | What to run | Why |
 |---|---|---|
-| Warehouse-native (any usage) | `warehouse` (step 4) → `metrics convert --source-mapping source-mapping.json` (step 5). | `warehouse` creates the integrations + data sources but **not** the metrics. `metrics convert` then creates every metric definition and binds the warehouse-native ones to the data sources via the mapping. |
+| Warehouse-native, **LD data sources already exist** (set up in the LD UI, via Terraform, or provisioned for the account — the **Figma** case) | **Skip `warehouse`.** `metrics convert` (step 5) with `--ld-data-source <key>` (one source for all) or `--source-mapping source-mapping.json` (per-source), supplied by you. | Nothing to create in LD, so `warehouse` has no job. You just tell `metrics convert` which existing data source key to bind each warehouse-native metric to. See the [`metrics convert` Warehouse Native section](#warehouse-native) for the JSON shape. |
+| Warehouse-native, data sources **do not** exist yet | `warehouse` (step 4) → `metrics convert --source-mapping source-mapping.json` (step 5). | `warehouse` creates the integrations + data sources but **not** the metrics, and writes the `source-mapping.json`. `metrics convert` then creates every metric definition and binds the warehouse-native ones to the data sources via the mapping. |
 | Event-based metrics only (Statsig Cloud, no warehouse-native) | `metrics convert` (step 5). Skip `warehouse` (step 4). | `warehouse` would have nothing to do — there are no data sources to create. |
-| Mixed (both) | Same as warehouse-native: `warehouse` (step 4) → `metrics convert --source-mapping source-mapping.json` (step 5). | `metrics convert` walks all metrics; event-based ones don't need a data source binding, warehouse-native ones do — the mapping file resolves both in one pass. |
+| Mixed (both) | Same as warehouse-native: `warehouse` (step 4, unless data sources already exist) → `metrics convert --source-mapping source-mapping.json` (step 5). | `metrics convert` walks all metrics; event-based ones don't need a data source binding, warehouse-native ones do — the mapping file resolves both in one pass. |
 
 Re-running any subcommand is safe — existing LD resources are detected by sanitized key and skipped.
 
@@ -195,13 +196,19 @@ The accepted `--accept-data-loss` values are: `segments`, `prerequisites`, `cust
 Converts Statsig metric definitions into LaunchDarkly metrics. Supports Statsig Cloud and Warehouse Native, with idempotent re-runs and parallel processing.
 
 ```bash
+# List available metric names/types, then exit (only the Statsig key needed)
+./statsig-to-ld metrics convert --list
+
+# Export every metric's raw Statsig JSON for debugging (Statsig key only)
+./statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json
+
 # Dry-run preview (only Statsig key needed)
 ./statsig-to-ld metrics convert --all --dry-run
 
 # Bulk convert
 ./statsig-to-ld metrics convert --all --ld-project my-project
 
-# Single metric
+# Single metric (get the exact name from --list first)
 ./statsig-to-ld metrics convert --metric purchase_revenue --ld-project my-project
 
 # Incremental migration (safest types first)
@@ -212,20 +219,38 @@ Converts Statsig metric definitions into LaunchDarkly metrics. Supports Statsig 
 ./statsig-to-ld metrics convert --all --ld-project my-project
 ```
 
-### Warehouse Native
+`--ld-project` also reads the `LD_PROJECT` environment variable, so you can `export LD_PROJECT=my-project` once instead of passing the flag on every run.
+
+By default, metrics whose conversion would be **lossy** (a Statsig feature dropped or approximated — event filters, per-unit capping, log transform, daily participation rate, count-distinct, metadata aggregation, or extra metric events) are **skipped** and recorded as `skipped_lossy` in the report. Add `--convert-lossy` to convert them anyway and accept the imperfect result:
 
 ```bash
-# Single source for all metrics
+./statsig-to-ld metrics convert --all --ld-project my-project --convert-lossy
+```
+
+### Warehouse Native
+
+Warehouse-native metrics must bind to an LD metric **data source**. If you ran `warehouse` (step 4), pass the `source-mapping.json` it wrote. **If the data sources already exist** (LD UI, Terraform, or provisioned for the account — e.g. Figma), skip `warehouse` and supply the binding here yourself, either as a single default or a per-source mapping you hand-write.
+
+```bash
+# Single source for all metrics — every warehouse-native metric binds to this key
 ./statsig-to-ld metrics convert --all --ld-project my-project \
   --ld-data-source snowflake-ds
 
-# Per-source mapping
-cat > sources.json << 'EOF'
-{"purchases_table": "snowflake-purchases-ds", "sessions_table": "snowflake-sessions-ds"}
+# Per-source mapping — hand-written, same format warehouse would have produced:
+# Statsig metric source name -> existing LD data source key
+cat > source-mapping.json << 'EOF'
+{
+  "purchases_table": "snowflake-purchases-ds",
+  "sessions_table": "snowflake-sessions-ds"
+}
 EOF
 ./statsig-to-ld metrics convert --all --ld-project my-project \
-  --source-mapping sources.json
+  --source-mapping source-mapping.json
 ```
+
+The keys are each metric's `metricSourceName` (from the Statsig metrics API / console; a `warehouse --dry-run` also writes every source name to its export file); the values are the keys of the existing LD data sources. A warehouse-native metric resolved by neither flag is created without a data source binding (a `no LD data source specified` warning), and ratio metrics are rejected by LD without one.
+
+Warehouse-native conversion is newer and less battle-tested than the cloud path. If a warehouse-native metric isn't recognized or converts wrong, capture its raw Statsig definition with `--dump-raw <file>` (Statsig key only) and share it — redacted — with the LaunchDarkly team; the tool sees a metric only through that JSON, so it's exactly what conversion works from.
 
 ### Custom unit types (company-level experiments)
 
@@ -248,20 +273,24 @@ Without this mapping, non-`userID` unit types are lowercased and a warning is em
 | `mean` | custom (numeric, average) | Supported |
 | `event_user` | custom | Supported |
 | `event_user_window` | custom | Supported |
-| `ratio` | — | Not yet supported in LD |
-| `funnel` | — | Requires LD metric group |
+| `ratio` | custom + denominator | Supported — requires a warehouse data source (`--ld-data-source` / `--source-mapping`) |
+| `funnel` | — | Not converted — would need an LD metric group |
 | `composite` | — | No LD equivalent |
 | `percentile` | — | LD uses percentile as analysisType, not metric type |
 
+Windowed metrics (`event_user_window`, or a custom rollup window) and winsorization convert too — winsorization needs a numeric metric, and a custom window needs a warehouse data source (otherwise it's dropped; see below).
+
 ### Metric warnings to surface to the user
+
+Many of these mark a conversion **lossy**: by default the metric is skipped (`skipped_lossy` in the report) with the warning as the reason, and `--convert-lossy` converts it anyway. Advisory warnings (the unit-type nudge, a truncated key) do **not** cause a skip.
 
 | Warning | Severity | What to do |
 |---|---|---|
-| `DATA LOSS: ... filter criteria` | High | LD metric matches ALL events, not just the filtered subset. Review dropped filters and set up manually in LD. |
-| `N metric events — only the first is used` | Medium | Multi-event metrics only use the first event. |
-| `winsorization ... not yet supported` | Low | Outlier clipping not applied. |
-| `per-unit capping` | Low | Daily cap not applied. |
-| `custom rollup window` | Low | LD uses full experiment duration. |
+| `DATA LOSS: ... filter criteria` | High | Lossy — skipped by default. The LD metric would match ALL events, not just the filtered subset; set the filters up manually in LD, or `--convert-lossy` to accept the loss. |
+| `N metric events — only the first is used` | Medium | Lossy — only the first event is used; extra events are dropped. |
+| `winsorization ... occurrence metric` | Low | Lossy — LD can't winsorize an occurrence metric (numeric metrics winsorize fine). |
+| `per-unit capping` | Low | Lossy — per-unit cap not applied. |
+| `custom rollup window` | Low | Lossy only when no data source is bound; pass `--ld-data-source` (snowflake) to apply the window. |
 | `unitType ... may not match an LD context kind` | Medium | Use `--unit-type-mapping` to map explicitly. |
 | `no LD data source specified` | Medium | Warehouse-native metric is being created without a data source binding. Fix: run `statsig-to-ld warehouse` first (it creates the data sources and writes `source-mapping.json`), then re-run `metrics convert --source-mapping source-mapping.json`. If the data sources already exist (set up by hand or via Terraform), pass `--ld-data-source` or `--source-mapping` directly. |
 
@@ -336,7 +365,7 @@ Useful `jq` queries:
 
 ```bash
 # metrics convert: summary counts
-cat migration-report.json | jq '{total: .statsig_metrics_total, converted: .converted, with_warnings: .converted_with_warnings, skipped_incompatible: .skipped_incompatible, failed: .failed}'
+cat migration-report.json | jq '{total: .statsig_metrics_total, dry_run, converted, with_warnings: .converted_with_warnings, skipped_existing, skipped_incompatible, skipped_lossy, failed}'
 
 # metrics convert: DATA LOSS warnings (most critical)
 cat migration-report.json | jq '.metrics[] | select(.warnings[]? | contains("DATA LOSS")) | {name: .statsig_name, warnings}'
@@ -362,10 +391,10 @@ All subcommands accept `--ld-url` and `--statsig-url` overrides. URLs must inclu
 `--ld-url` or `--statsig-url` is missing `https://`. Use `https://example.com`, not `example.com`.
 
 ### Many FAIL results with "HTTP 429"
-Rate limiting. Lower `--concurrency` (default 10) to 5 or 3.
+LaunchDarkly rate-limiting. Throttled requests are retried automatically, but a very large project can still exhaust the retries. The default `--concurrency` is 4 (deliberately conservative); if you still see 429s, lower it further (e.g. `--concurrency 2`). Re-running is safe — already-created metrics are skipped (`E` in the progress line), so only the throttled ones are retried.
 
 ### "metric not found among N Statsig metrics"
-`--metric` requires an exact name match. Run `--all --dry-run` first to see available names in the report.
+`--metric` requires an exact name match. Run `metrics convert --list` to print the available metric names and types (Statsig key only), or `--all --dry-run` to preview full conversions in the report.
 
 ### All metrics or flags show "skipped_existing"
 Already created in a previous run — expected and safe. The tool is idempotent.
@@ -383,7 +412,7 @@ Either the LD token lacks `createEnvironment` permission (run `targeting import 
 
 Before running the tool, confirm:
 
-1. **API keys set?** User should set `STATSIG_CONSOLE_KEY` and `LD_API_KEY` env vars.
+1. **API keys set?** User should set `STATSIG_CONSOLE_KEY` and `LD_API_KEY` env vars (and optionally `LD_PROJECT`, so `--ld-project` isn't needed on every run).
 2. **LD project key?** The `--ld-project` value. Required for everything except a Statsig-only `analyze` or `metrics convert --dry-run`.
 3. **Migration scope?** All gates + dynamic configs + metrics, or a subset (via `--import-type`, `--include-tag`, `--include-types`, `--metric`)?
 4. **Lossy targeting?** Run `analyze` first; if there are lossy sources the user wants to import, decide which `--accept-data-loss` features they'll accept.

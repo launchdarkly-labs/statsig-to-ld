@@ -16,6 +16,7 @@ const (
 	StatusConverted           = "converted"
 	StatusSkippedExisting     = "skipped_existing"
 	StatusSkippedIncompatible = "skipped_incompatible"
+	StatusSkippedLossy        = "skipped_lossy"
 	StatusFailed              = "failed"
 )
 
@@ -24,11 +25,13 @@ type Report struct {
 	mu sync.Mutex
 
 	Timestamp           string        `json:"timestamp"`
+	DryRun              bool          `json:"dry_run"`
 	StatsigMetricsTotal int           `json:"statsig_metrics_total"`
 	Converted           int           `json:"converted"`
 	ConvertedWithWarn   int           `json:"converted_with_warnings"`
 	SkippedExisting     int           `json:"skipped_existing"`
 	SkippedIncompatible int           `json:"skipped_incompatible"`
+	SkippedLossy        int           `json:"skipped_lossy"`
 	Failed              int           `json:"failed"`
 	Metrics             []MetricEntry `json:"metrics"`
 }
@@ -94,6 +97,22 @@ func (r *Report) AddSkippedIncompatible(name, typ, id, reason string) {
 	})
 }
 
+// AddSkippedLossy records a metric skipped because its conversion would be lossy
+// (a Statsig feature dropped or approximated) and --convert-lossy was not set.
+// The specific lossy reasons are recorded as warnings. Thread-safe.
+func (r *Report) AddSkippedLossy(name, typ, id string, reasons []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Metrics = append(r.Metrics, MetricEntry{
+		StatsigName: name,
+		StatsigType: typ,
+		StatsigID:   id,
+		Status:      StatusSkippedLossy,
+		Reason:      "lossy conversion — skipped; re-run with --convert-lossy to convert it anyway",
+		Warnings:    reasons,
+	})
+}
+
 // AddFailed records a metric that failed during conversion or creation. Thread-safe.
 func (r *Report) AddFailed(name, typ, id, reason string) {
 	r.mu.Lock()
@@ -116,6 +135,7 @@ func (r *Report) Finalize(totalMetrics int) {
 	r.ConvertedWithWarn = 0
 	r.SkippedExisting = 0
 	r.SkippedIncompatible = 0
+	r.SkippedLossy = 0
 	r.Failed = 0
 
 	for _, m := range r.Metrics {
@@ -129,6 +149,8 @@ func (r *Report) Finalize(totalMetrics int) {
 			r.SkippedExisting++
 		case StatusSkippedIncompatible:
 			r.SkippedIncompatible++
+		case StatusSkippedLossy:
+			r.SkippedLossy++
 		case StatusFailed:
 			r.Failed++
 		}
@@ -159,17 +181,35 @@ func (r *Report) WriteCSV(w io.Writer) error {
 // PrintSummaryTable writes a formatted summary table to the given writer.
 func (r *Report) PrintSummaryTable(w io.Writer) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	title := "Migration Summary"
+	convertedLabel := "  Converted:"
+	if r.DryRun {
+		title = "Migration Summary (dry run — no metrics created)"
+		convertedLabel = "  Would convert:"
+	}
 	fmt.Fprintln(tw)
-	fmt.Fprintln(tw, "Migration Summary")
+	fmt.Fprintln(tw, title)
 	fmt.Fprintln(tw, "─────────────────────────────────────")
 	fmt.Fprintf(tw, "  Total Statsig metrics:\t%d\n", r.StatsigMetricsTotal)
-	fmt.Fprintf(tw, "  Converted:\t%d\n", r.Converted)
+	fmt.Fprintf(tw, "%s\t%d\n", convertedLabel, r.Converted)
 	if r.ConvertedWithWarn > 0 {
 		fmt.Fprintf(tw, "    with warnings:\t%d\n", r.ConvertedWithWarn)
 	}
 	fmt.Fprintf(tw, "  Already existing (skipped):\t%d\n", r.SkippedExisting)
 	fmt.Fprintf(tw, "  Incompatible (skipped):\t%d\n", r.SkippedIncompatible)
+	fmt.Fprintf(tw, "  Lossy (skipped; use --convert-lossy):\t%d\n", r.SkippedLossy)
 	fmt.Fprintf(tw, "  Failed:\t%d\n", r.Failed)
 	fmt.Fprintln(tw, "─────────────────────────────────────")
 	tw.Flush()
+
+	// When metrics failed, name them inline so the reader doesn't have to open
+	// the report file to learn what broke.
+	if r.Failed > 0 {
+		fmt.Fprintln(w, "\nFailed metrics:")
+		for _, m := range r.Metrics {
+			if m.Status == StatusFailed {
+				fmt.Fprintf(w, "  - %s (%s): %s\n", m.StatsigName, m.StatsigType, m.Reason)
+			}
+		}
+	}
 }

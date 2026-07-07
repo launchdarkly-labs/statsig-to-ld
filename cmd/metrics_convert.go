@@ -1,15 +1,18 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"text/tabwriter"
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/converter"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
@@ -26,23 +29,31 @@ var convertCmd = &cobra.Command{
 metric definitions, and create them via the LD REST API.
 
 Use --metric to convert a single metric by name, or --all to convert
-every metric in the Statsig project.
+every metric in the Statsig project. Not sure of the names? Run --list
+first to print them.
 
 API Key Security:
   Keys are resolved in order: flag → env var → interactive prompt.
   The interactive prompt is the most secure option for manual use — keys
   are entered with echo disabled and never touch disk, shell history, or
   process listings. For CI/CD, use flags or env vars injected from a
-  secrets manager.
+  secrets manager. --ld-project also reads LD_PROJECT from the environment.
 
 Examples:
+  # See the available metric names/types (only the Statsig key is needed)
+  statsig-to-ld metrics convert --list
+
+  # Export every metric's raw Statsig JSON for debugging (Statsig key only)
+  statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json
+
   # Just run — the tool prompts for keys interactively (most secure)
   statsig-to-ld metrics convert --all --dry-run
 
   # Or set env vars for the session (use 'read -rs' to avoid shell history)
   read -rs STATSIG_CONSOLE_KEY && export STATSIG_CONSOLE_KEY
   read -rs LD_API_KEY && export LD_API_KEY
-  statsig-to-ld metrics convert --all --ld-project my-project
+  export LD_PROJECT=my-project
+  statsig-to-ld metrics convert --all
 
   # Convert a single metric
   statsig-to-ld metrics convert --metric purchase_revenue --ld-project my-project
@@ -80,6 +91,9 @@ var (
 	flagIncludeTypes    string
 	flagConcurrency     int
 	flagVerbose         bool
+	flagConvertLossy    bool
+	flagList            bool
+	flagDumpRaw         string
 )
 
 func init() {
@@ -87,7 +101,9 @@ func init() {
 
 	convertCmd.Flags().StringVar(&flagMetric, "metric", "", "Statsig metric name to convert")
 	convertCmd.Flags().BoolVar(&flagAll, "all", false, "Convert all Statsig metrics")
+	convertCmd.Flags().BoolVar(&flagList, "list", false, "List the available Statsig metrics (name, type, id) and exit — no conversion, only the Statsig key needed")
 	convertCmd.Flags().BoolVar(&flagDryRun, "dry-run", false, "Preview conversion without creating LD metrics")
+	convertCmd.Flags().StringVar(&flagDumpRaw, "dump-raw", "", "Write every Statsig metric's raw JSON (verbatim, all fields) to this file, then continue — for debugging conversion, especially warehouse-native metrics. Needs only the Statsig key.")
 
 	convertCmd.Flags().StringVar(&flagStatsigKey, "statsig-key", "", "Statsig Console API key (console-xxx)")
 	convertCmd.Flags().StringVar(&flagStatsigURL, "statsig-url", "", "Statsig API base URL including scheme (e.g. https://statsigapi.net/console/v1)")
@@ -105,64 +121,44 @@ func init() {
 
 	convertCmd.Flags().StringVar(&flagIncludeTags, "include-tags", "", "Only convert metrics with these Statsig tags (comma-separated)")
 	convertCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert metrics of these Statsig types (comma-separated)")
-	convertCmd.Flags().IntVar(&flagConcurrency, "concurrency", 10, "Max concurrent LD API requests for bulk conversion")
+	convertCmd.Flags().IntVar(&flagConcurrency, "concurrency", 4, "Max concurrent LD API requests for bulk conversion (kept low to stay under LaunchDarkly's rate limiter; raise if your project's limits allow)")
 	convertCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed per-metric progress (status, name, key, errors)")
+	convertCmd.Flags().BoolVar(&flagConvertLossy, "convert-lossy", false, "Convert metrics whose conversion is lossy (a Statsig feature is dropped or approximated). By default these are skipped as \"incompatible - lossy\".")
 }
 
 func runConvert(cmd *cobra.Command, args []string) error {
 	// Propagate build version to httputil User-Agent
 	httputil.SetVersion(version)
 
-	// Resolve API keys: flag → env var → interactive prompt (with echo disabled).
-	// The interactive prompt is the most secure path for manual use — the key
-	// never touches disk, shell history, environment, or process listings.
-	// Flags and env vars are supported for CI/CD where stdin is unavailable.
+	// Resolve API keys and project from flag → env. The interactive key prompt
+	// happens further down — AFTER the cheap offline validation below — so a
+	// missing or mistyped flag fails fast instead of after you've already typed
+	// two secret keys at a prompt. Flags/env are for CI/CD; the prompt (echo
+	// disabled) is the most secure path for manual use.
 	if flagStatsigKey == "" {
 		flagStatsigKey = os.Getenv("STATSIG_CONSOLE_KEY")
 	}
 	if flagLDKey == "" {
 		flagLDKey = os.Getenv("LD_API_KEY")
 	}
+	if flagLDProject == "" {
+		flagLDProject = os.Getenv("LD_PROJECT")
+	}
 
-	// Validate flags
-	if !flagAll && flagMetric == "" {
-		return fmt.Errorf("either --metric <name> or --all is required")
+	// --- Offline validation first: no network, no interactive prompts. ---
+	// willConvert: the run will actually convert metrics (vs. only listing or
+	// dumping raw JSON). willCreate: it will also write them to LaunchDarkly.
+	willConvert := flagAll || flagMetric != ""
+	willCreate := willConvert && !flagDryRun
+
+	if flagList && willConvert {
+		return fmt.Errorf("--list cannot be combined with --all or --metric — it just lists the available metrics")
 	}
 	if flagAll && flagMetric != "" {
 		return fmt.Errorf("--metric and --all are mutually exclusive")
 	}
-
-	// Prompt for Statsig key if not provided via flag or env
-	if flagStatsigKey == "" {
-		key, err := promptForKey("Statsig Console API key (console-xxx)")
-		if err != nil {
-			return fmt.Errorf("reading Statsig key: %w", err)
-		}
-		flagStatsigKey = key
-	}
-	if flagStatsigKey == "" {
-		return fmt.Errorf("Statsig Console API key is required (set STATSIG_CONSOLE_KEY env, use --statsig-key, or enter at prompt)")
-	}
-	if !strings.HasPrefix(flagStatsigKey, "console-") {
-		return fmt.Errorf("Statsig key should start with \"console-\" — this is a Console API key, not a server secret key")
-	}
-
-	// Prompt for LD key if not provided via flag or env (skip for dry-run)
-	if flagLDKey == "" && !flagDryRun {
-		key, err := promptForKey("LaunchDarkly API access token (api-xxx)")
-		if err != nil {
-			return fmt.Errorf("reading LaunchDarkly key: %w", err)
-		}
-		flagLDKey = key
-	}
-	if flagLDKey == "" && !flagDryRun {
-		return fmt.Errorf("LaunchDarkly API key is required (set LD_API_KEY env, use --ld-key, or enter at prompt)")
-	}
-	if flagLDKey != "" && !strings.HasPrefix(flagLDKey, "api-") {
-		return fmt.Errorf("LaunchDarkly key should start with \"api-\" — this is an API access token")
-	}
-	if flagLDProject == "" && !flagDryRun {
-		return fmt.Errorf("--ld-project is required — specify the LaunchDarkly project key to create metrics in")
+	if !willConvert && !flagList && flagDumpRaw == "" {
+		return fmt.Errorf("either --metric <name> or --all is required (or --list to see the available metric names, or --dump-raw <file> to export raw definitions)")
 	}
 	if flagFormat != "json" && flagFormat != "csv" {
 		return fmt.Errorf("--format must be \"json\" or \"csv\" (got %q)", flagFormat)
@@ -178,10 +174,67 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	if flagStatsigURL != "" && !strings.HasPrefix(flagStatsigURL, "https://") && !strings.HasPrefix(flagStatsigURL, "http://") {
 		return fmt.Errorf("--statsig-url must include the scheme (e.g. https://%s)", flagStatsigURL)
 	}
+	// --ld-project is only needed when we actually create metrics in LD.
+	if flagLDProject == "" && willCreate {
+		return fmt.Errorf("--ld-project is required — specify the LaunchDarkly project key to create metrics in (or set LD_PROJECT)")
+	}
+
+	// --- Statsig key: prompt only if not supplied by flag or env. ---
+	if flagStatsigKey == "" {
+		key, err := promptForKey("Statsig Console API key (console-xxx)")
+		if err != nil {
+			return fmt.Errorf("reading Statsig key: %w", err)
+		}
+		flagStatsigKey = key
+	}
+	if flagStatsigKey == "" {
+		return fmt.Errorf("Statsig Console API key is required (set STATSIG_CONSOLE_KEY env, use --statsig-key, or enter at prompt)")
+	}
+	if !strings.HasPrefix(flagStatsigKey, "console-") {
+		return fmt.Errorf("Statsig key should start with \"console-\" — this is a Console API key, not a server secret key")
+	}
+
+	// --- LD key: only needed when creating metrics (not for --dry-run, --list, or --dump-raw). ---
+	if willCreate {
+		if flagLDKey == "" {
+			key, err := promptForKey("LaunchDarkly API access token (api-xxx)")
+			if err != nil {
+				return fmt.Errorf("reading LaunchDarkly key: %w", err)
+			}
+			flagLDKey = key
+		}
+		if flagLDKey == "" {
+			return fmt.Errorf("LaunchDarkly API key is required (set LD_API_KEY env, use --ld-key, or enter at prompt)")
+		}
+	}
+	if flagLDKey != "" && !strings.HasPrefix(flagLDKey, "api-") {
+		return fmt.Errorf("LaunchDarkly key should start with \"api-\" — this is an API access token")
+	}
 
 	// Fix output extension to match format
 	if flagFormat == "csv" && strings.HasSuffix(flagOutput, ".json") {
 		flagOutput = strings.TrimSuffix(flagOutput, ".json") + ".csv"
+	}
+
+	ctx := cmd.Context()
+	sgClient := statsig.NewClient(flagStatsigKey, flagStatsigURL)
+
+	// --dump-raw: export the verbatim Statsig JSON (Statsig key only), then
+	// continue with whatever else was requested.
+	if flagDumpRaw != "" {
+		if err := dumpRawMetrics(ctx, sgClient, flagDumpRaw); err != nil {
+			return err
+		}
+	}
+
+	// --list: print the available metrics and exit (Statsig key only).
+	if flagList {
+		return listMetrics(ctx, sgClient, os.Stdout)
+	}
+
+	// If the run was only a raw dump (no --all/--metric), there's nothing to convert.
+	if !willConvert {
+		return nil
 	}
 
 	// Load source mapping file if provided
@@ -219,12 +272,13 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		UnitTypeMapping: unitTypeMapping,
 	}
 
-	// Initialize clients
-	ctx := cmd.Context()
-	sgClient := statsig.NewClient(flagStatsigKey, flagStatsigURL)
 	var ldClient *launchdarkly.Client
 	if !flagDryRun {
 		ldClient = launchdarkly.NewClient(flagLDKey, flagLDProject, flagLDURL)
+	}
+
+	if flagDryRun {
+		fmt.Fprintln(os.Stderr, "DRY RUN — preview only, no metrics will be created in LaunchDarkly.")
 	}
 
 	// Fetch metrics
@@ -235,14 +289,14 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		log.Printf("Fetching all Statsig metrics...")
 		metrics, err = sgClient.ListAllMetrics(ctx)
 		if err != nil {
-			return fmt.Errorf("fetching Statsig metrics: %w", err)
+			return annotateStatsigAuthErr(fmt.Errorf("fetching Statsig metrics: %w", err))
 		}
 		log.Printf("Fetched %d Statsig metrics", len(metrics))
 	} else {
 		log.Printf("Fetching Statsig metric %q...", flagMetric)
 		m, err := sgClient.GetMetricByName(ctx, flagMetric)
 		if err != nil {
-			return fmt.Errorf("fetching Statsig metric %q: %w", flagMetric, err)
+			return annotateStatsigAuthErr(fmt.Errorf("fetching Statsig metric %q: %w", flagMetric, err))
 		}
 		metrics = []statsig.Metric{*m}
 	}
@@ -263,10 +317,11 @@ func runConvert(cmd *cobra.Command, args []string) error {
 
 	// Convert and optionally create
 	rpt := report.New()
+	rpt.DryRun = flagDryRun
 	total := len(metrics)
 
 	if total > 0 && !flagVerbose {
-		fmt.Fprintf(os.Stderr, "Processing %d metrics [.=ok S=skip X=fail E=exists]: ", total)
+		fmt.Fprintf(os.Stderr, "Processing %d metrics [.=ok  S=incompatible  L=lossy  E=exists  X=fail]: ", total)
 	}
 
 	if flagDryRun || total <= 1 {
@@ -316,12 +371,85 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	rpt.PrintSummaryTable(os.Stdout)
 	fmt.Printf("Report written to %s\n", flagOutput)
 
+	// Point the reader at where the per-metric detail lives, but only when
+	// there's something worth opening the report for and they didn't already
+	// ask for verbose per-metric output.
+	if !flagVerbose && (rpt.Failed > 0 || rpt.ConvertedWithWarn > 0 || rpt.SkippedLossy > 0) {
+		fmt.Printf("Per-metric warnings and reasons are in %s — or re-run with --verbose to see them inline.\n", flagOutput)
+	}
+
 	return nil
+}
+
+// listMetrics prints the available Statsig metrics (name, type, id) to w and
+// returns. It's the discovery path for --metric: run this first to learn the
+// exact names. Only the Statsig key is needed — no LaunchDarkly credentials.
+func listMetrics(ctx context.Context, sgClient *statsig.Client, w io.Writer) error {
+	log.Printf("Fetching all Statsig metrics...")
+	metrics, err := sgClient.ListAllMetrics(ctx)
+	if err != nil {
+		return annotateStatsigAuthErr(fmt.Errorf("fetching Statsig metrics: %w", err))
+	}
+	if len(metrics) == 0 {
+		log.Printf("WARNING: Statsig returned 0 metrics — verify your --statsig-key and Statsig project configuration")
+		return nil
+	}
+
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tTYPE\tID")
+	for _, m := range metrics {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", m.Name, m.Type, m.ID)
+	}
+	tw.Flush()
+	fmt.Fprintf(w, "%d metrics\n", len(metrics))
+	return nil
+}
+
+// dumpRawMetrics writes every Statsig metric's raw JSON to path, verbatim from
+// the Console API (including fields the converter doesn't model). This is the
+// artifact we ask a customer to capture when debugging warehouse-native
+// conversion, since the tool's whole view of a metric comes from this response.
+func dumpRawMetrics(ctx context.Context, sgClient *statsig.Client, path string) error {
+	log.Printf("Fetching raw Statsig metric definitions for --dump-raw...")
+	raw, err := sgClient.ListAllMetricsRaw(ctx)
+	if err != nil {
+		return annotateStatsigAuthErr(fmt.Errorf("fetching raw Statsig metrics: %w", err))
+	}
+
+	// Pretty-print the array of raw metric objects for readability.
+	compact, err := json.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("encoding raw metrics: %w", err)
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, compact, "", "  "); err != nil {
+		pretty.Write(compact) // fall back to compact form if indenting fails
+	}
+	if err := os.WriteFile(path, pretty.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("writing raw dump to %s: %w", path, err)
+	}
+
+	log.Printf("Wrote %d raw Statsig metric definitions to %s", len(raw), path)
+	fmt.Fprintf(os.Stderr, "Raw Statsig metric JSON written to %s — review and redact before sharing (it may contain warehouse table/column names).\n", path)
+	return nil
+}
+
+// annotateStatsigAuthErr adds a plain-language hint when a Statsig request fails
+// with an auth status, so a first-time user connects "HTTP 401" to "my key".
+func annotateStatsigAuthErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if msg := err.Error(); strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "HTTP 403") {
+		return fmt.Errorf("%w\n  hint: this looks like an authentication failure — check that your Statsig Console API key (console-…) is valid and active", err)
+	}
+	return err
 }
 
 // processMetric handles a single metric: convert → create → record in report.
 // In verbose mode, prints detailed per-metric lines. In non-verbose mode,
-// prints a single character per metric: . (ok), S (skip), X (fail), E (exists).
+// prints a single character per metric: . (ok), S (incompatible), L (lossy),
+// E (already exists), X (fail).
 func processMetric(
 	ctx context.Context,
 	sg statsig.Metric,
@@ -350,6 +478,18 @@ func processMetric(
 			log.Printf("%s FAIL   %-45s  %s", progress, sg.Name, convErr.Error())
 		} else {
 			fmt.Fprint(os.Stderr, "X")
+		}
+		return
+	}
+
+	// Lossy conversions (a Statsig feature dropped or approximated) are skipped
+	// by default; --convert-lossy opts into the imperfect conversion.
+	if result.IsLossy() && !flagConvertLossy {
+		rpt.AddSkippedLossy(sg.Name, sg.Type, sg.ID, result.LossyReasons)
+		if flagVerbose {
+			log.Printf("%s LOSSY  %-45s  skipped (lossy): %s", progress, sg.Name, strings.Join(result.LossyReasons, "; "))
+		} else {
+			fmt.Fprint(os.Stderr, "L")
 		}
 		return
 	}

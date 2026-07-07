@@ -14,6 +14,10 @@ var rootCmd = &cobra.Command{
 	Use:     "statsig-to-ld",
 	Short:   "Migrate Statsig projects to LaunchDarkly",
 	Version: version,
+	// A runtime failure (bad key, network, API error) is not a usage mistake —
+	// don't bury the error under the full usage/flags dump. Cobra still prints
+	// usage for actual argument-parsing errors.
+	SilenceUsage: true,
 	Long: `A CLI tool for migrating from Statsig to LaunchDarkly.
 
 Subcommands:

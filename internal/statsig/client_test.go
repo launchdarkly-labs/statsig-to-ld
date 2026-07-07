@@ -186,6 +186,39 @@ func TestListAllMetrics_Pagination(t *testing.T) {
 	}
 }
 
+func TestListAllMetricsRaw_PreservesUnmodeledFields(t *testing.T) {
+	// The raw dump must keep fields the typed Metric struct does NOT model —
+	// that's the whole point: capturing shapes we don't yet parse (e.g.
+	// warehouse-native) so they can be inspected. Return a metric with an
+	// invented field and assert it survives verbatim.
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics/list" {
+			t.Errorf("got path %q, want /metrics/list", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{"id": "m1::sum", "name": "m1", "type": "user_warehouse",
+				 "warehouseNative": {"aggregation": "sum", "mysteryField": {"nested": 42}}}
+			],
+			"pagination": {"itemsPerPage": 100, "pageNumber": 1, "totalItems": 1, "nextPage": ""}
+		}`))
+	})
+
+	raw, err := client.ListAllMetricsRaw(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllMetricsRaw: %v", err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("got %d raw metrics, want 1", len(raw))
+	}
+	got := string(raw[0])
+	for _, want := range []string{"warehouseNative", "mysteryField", "nested", "42"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("raw metric JSON dropped %q (must be preserved verbatim); got: %s", want, got)
+		}
+	}
+}
+
 func TestListGates_HTTPError(t *testing.T) {
 	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)

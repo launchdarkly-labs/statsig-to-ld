@@ -58,6 +58,25 @@ func TestFinalize_MixedStatuses(t *testing.T) {
 	}
 }
 
+func TestFinalize_SkippedLossy(t *testing.T) {
+	r := New()
+	r.AddSkippedLossy("dp", "event_user", "dp::event_user", []string{"daily participation rate not supported"})
+	r.Finalize(1)
+
+	if r.SkippedLossy != 1 {
+		t.Errorf("SkippedLossy = %d, want 1", r.SkippedLossy)
+	}
+	if len(r.Metrics) != 1 || r.Metrics[0].Status != StatusSkippedLossy {
+		t.Fatalf("expected one %s metric, got %+v", StatusSkippedLossy, r.Metrics)
+	}
+	if len(r.Metrics[0].Warnings) != 1 {
+		t.Errorf("expected the lossy reason recorded as a warning, got %v", r.Metrics[0].Warnings)
+	}
+	if r.Converted != 0 {
+		t.Errorf("Converted = %d, want 0 (a lossy-skipped metric is not converted)", r.Converted)
+	}
+}
+
 func TestFinalize_AllConverted(t *testing.T) {
 	r := New()
 	r.AddConverted("m1", "sum", "m1::sum", "m1-sum", "proj", nil)
@@ -153,6 +172,42 @@ func TestPrintSummaryTable(t *testing.T) {
 	}
 	if !strings.Contains(output, "with warnings") {
 		t.Error("summary table should show 'with warnings' when there are warnings")
+	}
+}
+
+func TestPrintSummaryTable_DryRun(t *testing.T) {
+	r := New()
+	r.DryRun = true
+	r.AddConverted("m1", "sum", "m1::sum", "m1-sum", "proj", nil)
+	r.Finalize(1)
+
+	var buf bytes.Buffer
+	r.PrintSummaryTable(&buf)
+	output := buf.String()
+
+	if !strings.Contains(output, "Would convert") {
+		t.Errorf("dry-run summary should say 'Would convert', not 'Converted'; got:\n%s", output)
+	}
+	if !strings.Contains(strings.ToLower(output), "dry run") {
+		t.Errorf("dry-run summary should be labeled as a dry run; got:\n%s", output)
+	}
+}
+
+func TestPrintSummaryTable_ListsFailures(t *testing.T) {
+	r := New()
+	r.AddConverted("ok1", "sum", "ok1::sum", "ok1-sum", "proj", nil)
+	r.AddFailed("boom", "sum", "boom::sum", "LD API returned HTTP 500")
+	r.Finalize(2)
+
+	var buf bytes.Buffer
+	r.PrintSummaryTable(&buf)
+	output := buf.String()
+
+	if !strings.Contains(output, "boom") {
+		t.Errorf("summary should name the failed metric 'boom'; got:\n%s", output)
+	}
+	if !strings.Contains(output, "LD API returned HTTP 500") {
+		t.Errorf("summary should show the failure reason; got:\n%s", output)
 	}
 }
 

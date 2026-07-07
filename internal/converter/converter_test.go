@@ -661,17 +661,16 @@ func TestConvert_NoMetricEvents(t *testing.T) {
 
 // --- Ratio metrics ---
 //
-// Real Statsig (cloud) ratio metrics carry the numerator and denominator inline
-// as metricEvents[0] and metricEvents[1] — verified against the live Statsig
-// Console API. They do NOT populate metricComponentMetrics (that field is for
-// composite metrics), and Statsig rejects a ratio defined that way (HTTP 400
-// "Metric event is empty"). Each event's Type is its aggregation ("count",
-// "count_distinct", "value", "metadata").
+// Statsig (cloud) ratio metrics carry the numerator and denominator inline as
+// metricEvents[0] and metricEvents[1]. They do NOT populate
+// metricComponentMetrics (that field is for composite metrics), and Statsig
+// rejects a ratio defined that way (HTTP 400 "Metric event is empty"). Each
+// event's Type is its aggregation ("count", "count_distinct", "value",
+// "metadata").
 
-// ratioMetric builds a Statsig cloud ratio in the order Statsig actually stores
-// them: metricEvents[0] = denominator, metricEvents[1] = numerator (verified
-// against the Statsig console). Params stay (numerator, denominator) for
-// readable call sites.
+// ratioMetric builds a Statsig cloud ratio in the order Statsig stores them:
+// metricEvents[0] = denominator, metricEvents[1] = numerator. Params stay
+// (numerator, denominator) for readable call sites.
 func ratioMetric(numEvent, numType, denEvent, denType string) *statsig.Metric {
 	return &statsig.Metric{
 		ID:             "checkout_per_visit::ratio",
@@ -689,12 +688,11 @@ func ratioMetric(numEvent, numType, denEvent, denType string) *statsig.Metric {
 }
 
 func TestConvert_Ratio_NumeratorIsSecondEvent(t *testing.T) {
-	// Statsig stores a cloud ratio positionally with no explicit numerator/
-	// denominator field. Verified against the Statsig console: metricEvents[0] is
-	// the DENOMINATOR and metricEvents[1] is the NUMERATOR. This ratio is
-	// "checkout_completed per page_view" — numerator = checkout_completed
-	// (index 1), denominator = page_view (index 0). Built inline (not via the
-	// helper) so it independently pins the numerator/denominator direction.
+	// A cloud ratio is positional, with no explicit numerator/denominator field:
+	// metricEvents[0] is the DENOMINATOR and metricEvents[1] is the NUMERATOR.
+	// This ratio is "checkout_completed per page_view" — numerator =
+	// checkout_completed (index 1), denominator = page_view (index 0). Built
+	// inline (not via the helper) so it independently pins the direction.
 	sg := &statsig.Metric{
 		ID:             "checkouts_per_visit::ratio",
 		Name:           "checkouts_per_visit",
@@ -919,6 +917,75 @@ func TestConvert_Ratio_WithDataSourceNoWarning(t *testing.T) {
 		if strings.Contains(strings.ToLower(w), "data source") {
 			t.Errorf("should not warn about data source when one is provided, got: %q", w)
 		}
+	}
+}
+
+// --- Lossy classification (drives the default skip; --convert-lossy overrides) ---
+
+func TestConvert_Lossy_DailyParticipation(t *testing.T) {
+	sg := baseMetric("event_user")
+	sg.RollupTimeWindow = "daily_participation_rate"
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("daily participation rate should mark the conversion lossy")
+	}
+	assertHasWarning(t, result.LossyReasons, "daily participation")
+}
+
+func TestConvert_Lossy_Capping(t *testing.T) {
+	sg := baseMetric("sum")
+	sg.MetricEvents[0] = statsig.MetricEvent{Name: "purchase", Type: "value"}
+	sg.WarehouseNative = &statsig.WarehouseNative{Cap: float64Ptr(500)}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("per-unit capping should mark the conversion lossy")
+	}
+}
+
+func TestConvert_Lossy_EventFilters(t *testing.T) {
+	sg := baseMetric("event_count_custom")
+	sg.MetricEvents[0].Criteria = []statsig.Criterion{
+		{Type: "metadata", Column: "country", Condition: "=", Values: []string{"US"}},
+	}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("dropped event filter criteria should mark the conversion lossy")
+	}
+}
+
+func TestConvert_NotLossy_AdvisoryUnitType(t *testing.T) {
+	// A non-standard unit type is an advisory warning, not a lossy conversion —
+	// the metric still converts faithfully.
+	sg := baseMetric("event_count_custom")
+	sg.UnitTypes = []string{"userID", "companyID"}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatal("expected an advisory warning about companyID")
+	}
+	if result.IsLossy() {
+		t.Errorf("advisory unit-type warning must not be lossy; LossyReasons = %v", result.LossyReasons)
+	}
+}
+
+func TestConvert_NotLossy_Clean(t *testing.T) {
+	result, err := Convert(baseMetric("event_count_custom"), Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsLossy() {
+		t.Errorf("clean conversion must not be lossy; LossyReasons = %v", result.LossyReasons)
 	}
 }
 
