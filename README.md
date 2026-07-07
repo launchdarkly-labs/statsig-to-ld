@@ -112,7 +112,7 @@ This produces a `statsig-to-ld` binary in the repo root. Run it from there, pass
 ./statsig-to-ld analyze --ld-project my-project
 ```
 
-> **macOS:** build from source (above) rather than downloading a binary. A locally built binary runs directly; a downloaded, unsigned binary is blocked by Gatekeeper (*"Apple could not verify… is free of malware"*). These builds are not code-signed/notarized, so building from source is the smoothest path.
+> **Release binaries vs. building from source.** Building from source with `go build` (above) is the recommended path. The tagged release binaries are published mainly for Linux, and for shipping major collections of updates and bug fixes.
 
 ### SDK-rewrite skill
 

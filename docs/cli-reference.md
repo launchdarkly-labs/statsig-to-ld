@@ -353,7 +353,7 @@ These are explicit non-goals for v1.0; they're tracked for follow-up releases:
 
 Releases are driven by Git tags. Pushing a `v*` tag triggers CI to cross-compile binaries for macOS, Linux, and Windows.
 
-> **Users should build from source** (see the [README](../README.md#cli-build-from-source)), not download these binaries: they are not code-signed or notarized, so a downloaded build is blocked by macOS Gatekeeper (*"Apple could not verify… is free of malware"*). Building from source avoids that entirely.
+> **The recommended path is to build from source with `go build`** (see the [README](../README.md#cli-build-from-source)). The tagged release binaries are published mainly for Linux, and for shipping major collections of updates and bug fixes.
 
 ```bash
 git tag v0.2.0

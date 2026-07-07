@@ -34,7 +34,7 @@ The CLI source is in this repository. Requires **Go 1.25 or higher** (macOS or L
 go build -o statsig-to-ld .
 ```
 
-The binary is `./statsig-to-ld`. All commands below assume you are in the repository root. There are no pre-built binaries — build from source; a downloaded, unsigned binary would be blocked by macOS Gatekeeper.
+The binary is `./statsig-to-ld`. All commands below assume you are in the repository root. Building from source with `go build` is the recommended path; the tagged release binaries are mainly for Linux or for major collections of updates and bug fixes.
 
 ## API Key Setup
 
