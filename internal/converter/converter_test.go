@@ -154,7 +154,8 @@ func TestConvert_EventUserWindow(t *testing.T) {
 // --- Incompatible types ---
 
 func TestConvert_IncompatibleTypes(t *testing.T) {
-	incompatible := []string{"ratio", "funnel", "composite", "composite_sum", "percentile", "user"}
+	// "ratio" was removed: see TestConvert_Ratio_* for the real branch.
+	incompatible := []string{"funnel", "composite", "composite_sum", "percentile", "user"}
 	for _, typ := range incompatible {
 		sg := baseMetric(typ)
 		_, err := Convert(sg, Options{})
@@ -655,6 +656,269 @@ func TestConvert_NoMetricEvents(t *testing.T) {
 	}
 	if IsIncompatible(err) {
 		t.Error("missing events should not be IncompatibleError")
+	}
+}
+
+// --- Ratio metrics ---
+//
+// Real Statsig (cloud) ratio metrics carry the numerator and denominator inline
+// as metricEvents[0] and metricEvents[1] — verified against the live Statsig
+// Console API. They do NOT populate metricComponentMetrics (that field is for
+// composite metrics), and Statsig rejects a ratio defined that way (HTTP 400
+// "Metric event is empty"). Each event's Type is its aggregation ("count",
+// "count_distinct", "value", "metadata").
+
+// ratioMetric builds a Statsig cloud ratio in the order Statsig actually stores
+// them: metricEvents[0] = denominator, metricEvents[1] = numerator (verified
+// against the Statsig console). Params stay (numerator, denominator) for
+// readable call sites.
+func ratioMetric(numEvent, numType, denEvent, denType string) *statsig.Metric {
+	return &statsig.Metric{
+		ID:             "checkout_per_visit::ratio",
+		Name:           "checkout_per_visit",
+		Type:           "ratio",
+		Description:    "Checkouts per visit",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		MetricEvents: []statsig.MetricEvent{
+			{Name: denEvent, Type: denType}, // index 0 = denominator
+			{Name: numEvent, Type: numType}, // index 1 = numerator
+		},
+		Tags: []string{"experiment"},
+	}
+}
+
+func TestConvert_Ratio_NumeratorIsSecondEvent(t *testing.T) {
+	// Statsig stores a cloud ratio positionally with no explicit numerator/
+	// denominator field. Verified against the Statsig console: metricEvents[0] is
+	// the DENOMINATOR and metricEvents[1] is the NUMERATOR. This ratio is
+	// "checkout_completed per page_view" — numerator = checkout_completed
+	// (index 1), denominator = page_view (index 0). Built inline (not via the
+	// helper) so it independently pins the numerator/denominator direction.
+	sg := &statsig.Metric{
+		ID:             "checkouts_per_visit::ratio",
+		Name:           "checkouts_per_visit",
+		Type:           "ratio",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		MetricEvents: []statsig.MetricEvent{
+			{Name: "page_view", Type: "count"},          // index 0 = denominator
+			{Name: "checkout_completed", Type: "count"}, // index 1 = numerator
+		},
+	}
+
+	result, err := Convert(sg, Options{LDDataSource: "snowflake"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.EventKey != "checkout_completed" {
+		t.Errorf("numerator (EventKey) = %q, want checkout_completed (metricEvents[1])", result.LDMetric.EventKey)
+	}
+	if result.LDMetric.Denominator == nil || result.LDMetric.Denominator.EventName != "page_view" {
+		t.Errorf("denominator EventName = %+v, want page_view (metricEvents[0])", result.LDMetric.Denominator)
+	}
+}
+
+func TestConvert_Ratio_ConversionRate(t *testing.T) {
+	// purchases / page_views — both count aggregations (a conversion rate).
+	sg := ratioMetric("checkout_completed", "count", "page_view", "count")
+
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.Key != "checkout-per-visit-ratio" {
+		t.Errorf("Key = %q, want %q", result.LDMetric.Key, "checkout-per-visit-ratio")
+	}
+	if result.LDMetric.EventKey != "checkout_completed" {
+		t.Errorf("EventKey = %q, want %q", result.LDMetric.EventKey, "checkout_completed")
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Errorf("numerator IsNumeric = %v, want pointer to false", result.LDMetric.IsNumeric)
+	}
+	if result.LDMetric.UnitAggregationType != "sum" {
+		t.Errorf("numerator UAT = %q, want %q", result.LDMetric.UnitAggregationType, "sum")
+	}
+	if result.LDMetric.SuccessCriteria != "HigherThanBaseline" {
+		t.Errorf("SuccessCriteria = %q, want HigherThanBaseline", result.LDMetric.SuccessCriteria)
+	}
+	if got := result.LDMetric.RandomizationUnits; len(got) != 1 || got[0] != "user" {
+		t.Errorf("RandomizationUnits = %v, want [user]", got)
+	}
+	if result.LDMetric.Denominator == nil {
+		t.Fatal("Denominator is nil; ratio metric should populate it")
+	}
+	if result.LDMetric.Denominator.EventName != "page_view" {
+		t.Errorf("Denominator.EventName = %q, want %q", result.LDMetric.Denominator.EventName, "page_view")
+	}
+	if result.LDMetric.Denominator.IsNumeric {
+		t.Error("Denominator.IsNumeric = true for count event, want false")
+	}
+	if result.LDMetric.Denominator.UnitAggregationType != "sum" {
+		t.Errorf("Denominator.UAT = %q, want %q", result.LDMetric.Denominator.UnitAggregationType, "sum")
+	}
+}
+
+func TestConvert_Ratio_NumericNumerator(t *testing.T) {
+	// revenue (value) / page_views (count): numerator numeric, denominator not.
+	sg := ratioMetric("purchase", "value", "page_view", "count")
+
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.IsNumeric == nil || !*result.LDMetric.IsNumeric {
+		t.Error("numerator IsNumeric should be true for a value aggregation")
+	}
+	if result.LDMetric.UnitAggregationType != "sum" {
+		t.Errorf("numerator UAT = %q, want sum", result.LDMetric.UnitAggregationType)
+	}
+	if result.LDMetric.Unit != "units" {
+		t.Errorf("Unit = %q, want default %q for numeric numerator", result.LDMetric.Unit, "units")
+	}
+	if result.LDMetric.Denominator.IsNumeric {
+		t.Error("denominator IsNumeric should be false for a count aggregation")
+	}
+	if result.LDMetric.Denominator.UnitAggregationType != "sum" {
+		t.Errorf("denominator UAT = %q, want sum", result.LDMetric.Denominator.UnitAggregationType)
+	}
+}
+
+func TestConvert_Ratio_WrongEventCount(t *testing.T) {
+	sg := ratioMetric("checkout_completed", "count", "page_view", "count")
+	sg.MetricEvents = sg.MetricEvents[:1] // only a numerator
+
+	_, err := Convert(sg, Options{})
+	if err == nil {
+		t.Fatal("expected error for ratio with 1 metric event")
+	}
+	if IsIncompatible(err) {
+		t.Error("wrong event count should be a hard error, not IncompatibleError")
+	}
+	if !strings.Contains(err.Error(), "got 1") {
+		t.Errorf("error should mention the actual count: %v", err)
+	}
+}
+
+func TestConvert_Ratio_EmptyEventName(t *testing.T) {
+	sg := ratioMetric("", "count", "page_view", "count") // numerator event has no name
+
+	_, err := Convert(sg, Options{})
+	if err == nil {
+		t.Fatal("expected error when the numerator event has an empty name")
+	}
+	if !strings.Contains(err.Error(), "numerator") {
+		t.Errorf("error should identify the numerator: %v", err)
+	}
+}
+
+func TestConvert_Ratio_CountDistinctNumerator(t *testing.T) {
+	// LD ratio terms support count(distinct <field>) natively — it maps to
+	// unitAggregationType=count_distinct + unitAggregationField, non-numeric,
+	// and (unlike the simple-metric path) without a data-loss warning.
+	sg := ratioMetric("add_to_cart", "count_distinct", "page_view", "count")
+	sg.MetricEvents[1].MetadataKey = "item_category" // numerator = metricEvents[1]
+
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.UnitAggregationType != "count_distinct" {
+		t.Errorf("numerator UAT = %q, want count_distinct", result.LDMetric.UnitAggregationType)
+	}
+	if result.LDMetric.UnitAggregationField != "item_category" {
+		t.Errorf("numerator UnitAggregationField = %q, want item_category", result.LDMetric.UnitAggregationField)
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Error("count_distinct numerator must be non-numeric")
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(strings.ToLower(w), "count all occurrences") {
+			t.Errorf("ratio count_distinct must not warn about counting all occurrences, got: %q", w)
+		}
+	}
+}
+
+func TestConvert_Ratio_CountDistinctDenominator(t *testing.T) {
+	sg := ratioMetric("purchase", "count", "session_start", "count_distinct")
+	sg.MetricEvents[0].MetadataKey = "session_id" // denominator = metricEvents[0]
+
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.Denominator.UnitAggregationType != "count_distinct" {
+		t.Errorf("denominator UAT = %q, want count_distinct", result.LDMetric.Denominator.UnitAggregationType)
+	}
+	if result.LDMetric.Denominator.UnitAggregationField != "session_id" {
+		t.Errorf("denominator UnitAggregationField = %q, want session_id", result.LDMetric.Denominator.UnitAggregationField)
+	}
+	if result.LDMetric.Denominator.IsNumeric {
+		t.Error("count_distinct denominator must be non-numeric")
+	}
+}
+
+func TestConvert_Ratio_CountDistinctNoColumnIsBinary(t *testing.T) {
+	// A cloud ratio's count_distinct event carries no column — it counts distinct
+	// units (users). The LaunchDarkly equivalent is a binary metric: non-numeric,
+	// average aggregation (== count distinct of the analysis unit). Faithful, so
+	// no warning.
+	sg := ratioMetric("purchase", "count_distinct", "page_view", "count")
+	// numerator MetadataKey intentionally empty, like a real cloud ratio
+
+	result, err := Convert(sg, Options{LDDataSource: "snowflake-staging"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.UnitAggregationType != "average" {
+		t.Errorf("numerator UAT = %q, want average (binary metric)", result.LDMetric.UnitAggregationType)
+	}
+	if result.LDMetric.UnitAggregationField != "" {
+		t.Errorf("UnitAggregationField should be empty for a binary term, got %q", result.LDMetric.UnitAggregationField)
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Error("binary term must be non-numeric")
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(strings.ToLower(w), "distinct") {
+			t.Errorf("count-distinct-of-users maps faithfully to a binary metric; should not warn, got: %q", w)
+		}
+	}
+}
+
+func TestConvert_Ratio_NoDataSourceWarns(t *testing.T) {
+	// LD requires a warehouse data source on ratio metrics (the API rejects a
+	// ratio without one: HTTP 400 "Ratio metrics require a warehouse data
+	// source"). Converting a ratio with no resolvable source should warn at
+	// convert time — visible in dry-run — not silently produce a metric LD
+	// rejects at create time.
+	sg := ratioMetric("checkout_completed", "count", "page_view", "count")
+
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertHasWarning(t, result.Warnings, "data source")
+	if result.LDMetric.DataSource != nil {
+		t.Errorf("DataSource should be nil when none resolved, got %+v", result.LDMetric.DataSource)
+	}
+}
+
+func TestConvert_Ratio_WithDataSourceNoWarning(t *testing.T) {
+	// When --ld-data-source supplies a source, bind it and do not warn.
+	sg := ratioMetric("checkout_completed", "count", "page_view", "count")
+
+	result, err := Convert(sg, Options{LDDataSource: "snowflake-staging"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.DataSource == nil || result.LDMetric.DataSource.Key != "snowflake-staging" {
+		t.Errorf("DataSource = %+v, want key snowflake-staging", result.LDMetric.DataSource)
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(strings.ToLower(w), "data source") {
+			t.Errorf("should not warn about data source when one is provided, got: %q", w)
+		}
 	}
 }
 

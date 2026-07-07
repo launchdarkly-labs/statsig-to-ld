@@ -212,7 +212,6 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	includeTags := parseCommaSeparated(flagIncludeTags)
 	includeTypes := parseCommaSeparated(flagIncludeTypes)
 
-	// Build converter options
 	convOpts := converter.Options{
 		LDDataSource:    flagLDDataSource,
 		SourceMapping:   sourceMapping,
