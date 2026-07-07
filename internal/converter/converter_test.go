@@ -661,17 +661,16 @@ func TestConvert_NoMetricEvents(t *testing.T) {
 
 // --- Ratio metrics ---
 //
-// Real Statsig (cloud) ratio metrics carry the numerator and denominator inline
-// as metricEvents[0] and metricEvents[1] — verified against the live Statsig
-// Console API. They do NOT populate metricComponentMetrics (that field is for
-// composite metrics), and Statsig rejects a ratio defined that way (HTTP 400
-// "Metric event is empty"). Each event's Type is its aggregation ("count",
-// "count_distinct", "value", "metadata").
+// Statsig (cloud) ratio metrics carry the numerator and denominator inline as
+// metricEvents[0] and metricEvents[1]. They do NOT populate
+// metricComponentMetrics (that field is for composite metrics), and Statsig
+// rejects a ratio defined that way (HTTP 400 "Metric event is empty"). Each
+// event's Type is its aggregation ("count", "count_distinct", "value",
+// "metadata").
 
-// ratioMetric builds a Statsig cloud ratio in the order Statsig actually stores
-// them: metricEvents[0] = denominator, metricEvents[1] = numerator (verified
-// against the Statsig console). Params stay (numerator, denominator) for
-// readable call sites.
+// ratioMetric builds a Statsig cloud ratio in the order Statsig stores them:
+// metricEvents[0] = denominator, metricEvents[1] = numerator. Params stay
+// (numerator, denominator) for readable call sites.
 func ratioMetric(numEvent, numType, denEvent, denType string) *statsig.Metric {
 	return &statsig.Metric{
 		ID:             "checkout_per_visit::ratio",
@@ -689,12 +688,11 @@ func ratioMetric(numEvent, numType, denEvent, denType string) *statsig.Metric {
 }
 
 func TestConvert_Ratio_NumeratorIsSecondEvent(t *testing.T) {
-	// Statsig stores a cloud ratio positionally with no explicit numerator/
-	// denominator field. Verified against the Statsig console: metricEvents[0] is
-	// the DENOMINATOR and metricEvents[1] is the NUMERATOR. This ratio is
-	// "checkout_completed per page_view" — numerator = checkout_completed
-	// (index 1), denominator = page_view (index 0). Built inline (not via the
-	// helper) so it independently pins the numerator/denominator direction.
+	// A cloud ratio is positional, with no explicit numerator/denominator field:
+	// metricEvents[0] is the DENOMINATOR and metricEvents[1] is the NUMERATOR.
+	// This ratio is "checkout_completed per page_view" — numerator =
+	// checkout_completed (index 1), denominator = page_view (index 0). Built
+	// inline (not via the helper) so it independently pins the direction.
 	sg := &statsig.Metric{
 		ID:             "checkouts_per_visit::ratio",
 		Name:           "checkouts_per_visit",

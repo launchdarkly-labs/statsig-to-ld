@@ -469,23 +469,22 @@ func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []string, error) {
 	}
 }
 
-// convertRatio converts a Statsig (cloud) ratio metric. The numerator and
-// denominator are carried inline as metricEvents[0] and metricEvents[1] — this
-// is how the Statsig Console API actually represents a ratio (verified against
-// the live API). Statsig does NOT use metricComponentMetrics for ratios (that
-// field is for composite metrics) and rejects a ratio defined that way. The
-// numerator's settings sit at the top level of the LD MetricPost; the
-// denominator populates the Denominator subfield. Identity and shared fields
-// (key, name, tags, randomizationUnits, etc.) come from the ratio metric.
+// convertRatio converts a Statsig (cloud) ratio metric. The Statsig Console API
+// represents a ratio by carrying the numerator and denominator inline as
+// metricEvents[0] and metricEvents[1]; metricComponentMetrics is for composite
+// metrics, not ratios, and a ratio defined that way is rejected. The numerator's
+// settings sit at the top level of the LD MetricPost; the denominator populates
+// the Denominator subfield. Identity and shared fields (key, name, tags,
+// randomizationUnits, etc.) come from the ratio metric.
 func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	if len(sg.MetricEvents) != 2 {
 		return nil, fmt.Errorf("ratio metric %q expected 2 metric events (numerator + denominator), got %d", sg.Name, len(sg.MetricEvents))
 	}
 	result := &Result{}
 
-	// Statsig stores a cloud ratio's two events positionally, with no explicit
-	// numerator/denominator field. Verified against the Statsig console:
-	// metricEvents[0] is the DENOMINATOR and metricEvents[1] is the NUMERATOR.
+	// A cloud ratio's two events are positional, with no explicit
+	// numerator/denominator field: metricEvents[0] is the DENOMINATOR and
+	// metricEvents[1] is the NUMERATOR.
 	denEv := sg.MetricEvents[0]
 	numEv := sg.MetricEvents[1]
 	if numEv.Name == "" {
