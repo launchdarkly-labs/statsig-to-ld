@@ -117,10 +117,13 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		result.addLossy("Statsig daily_participation (per-unit share of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
 	}
 
-	// Event key: cloud metrics use metricEvents[0].Name; warehouse-native metrics
-	// have none, so fall back to the source's valueColumn.
-	// TODO(verify): confirm the eventKey ⇔ warehouse source-column mapping against
-	// a live /metrics/list response.
+	// Event key resolution, in order:
+	//   1. metricEvents[0].Name — cloud metrics with explicit events.
+	//   2. warehouseNative metricSources[0].valueColumn — warehouse-native metrics.
+	//   3. lineage.events[0] — built-in event_count metrics, which have no
+	//      metricEvents and carry the counted event in lineage.
+	// TODO(verify): the warehouse-native (valueColumn) mapping is still provisional
+	// pending a live /metrics/list response.
 	var eventKey string
 	if len(sg.MetricEvents) > 0 {
 		eventKey = sg.MetricEvents[0].Name
@@ -132,12 +135,14 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		}
 		result.Warnings = append(result.Warnings,
 			"warehouse-native event/column mapping is provisional (derived from metricSources[0].valueColumn) — verify against a live /metrics/list response")
+	} else if len(sg.Lineage.Events) > 0 {
+		eventKey = sg.Lineage.Events[0]
 	}
 	if eventKey == "" {
 		if sg.IsWarehouseNative() {
 			return nil, fmt.Errorf("warehouse-native metric %q: cannot determine LD eventKey (no metricEvents and no metricSources[0].valueColumn) — needs live-response verification of the source column mapping", sg.Name)
 		}
-		return nil, fmt.Errorf("Statsig metric %q has no metricEvents — cannot determine LD eventKey", sg.Name)
+		return nil, fmt.Errorf("Statsig metric %q has no metricEvents or lineage events — cannot determine LD eventKey", sg.Name)
 	}
 
 	// Warn if multiple metric events — only the first is used (lossy: the
