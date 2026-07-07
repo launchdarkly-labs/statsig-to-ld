@@ -115,7 +115,7 @@ func init() {
 
 	convertCmd.Flags().StringVar(&flagIncludeTags, "include-tags", "", "Only convert metrics with these Statsig tags (comma-separated)")
 	convertCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert metrics of these Statsig types (comma-separated)")
-	convertCmd.Flags().IntVar(&flagConcurrency, "concurrency", 10, "Max concurrent LD API requests for bulk conversion")
+	convertCmd.Flags().IntVar(&flagConcurrency, "concurrency", 4, "Max concurrent LD API requests for bulk conversion (kept low to stay under LaunchDarkly's rate limiter; raise if your project's limits allow)")
 	convertCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed per-metric progress (status, name, key, errors)")
 	convertCmd.Flags().BoolVar(&flagConvertLossy, "convert-lossy", false, "Convert metrics whose conversion is lossy (a Statsig feature is dropped or approximated). By default these are skipped as \"incompatible - lossy\".")
 }

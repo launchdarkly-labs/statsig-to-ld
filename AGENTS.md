@@ -386,7 +386,7 @@ All subcommands accept `--ld-url` and `--statsig-url` overrides. URLs must inclu
 `--ld-url` or `--statsig-url` is missing `https://`. Use `https://example.com`, not `example.com`.
 
 ### Many FAIL results with "HTTP 429"
-Rate limiting. Lower `--concurrency` (default 10) to 5 or 3.
+LaunchDarkly rate-limiting. Throttled requests are retried automatically, but a very large project can still exhaust the retries. The default `--concurrency` is 4 (deliberately conservative); if you still see 429s, lower it further (e.g. `--concurrency 2`). Re-running is safe — already-created metrics are skipped (`E` in the progress line), so only the throttled ones are retried.
 
 ### "metric not found among N Statsig metrics"
 `--metric` requires an exact name match. Run `metrics convert --list` to print the available metric names and types (Statsig key only), or `--all --dry-run` to preview full conversions in the report.
