@@ -268,20 +268,24 @@ Without this mapping, non-`userID` unit types are lowercased and a warning is em
 | `mean` | custom (numeric, average) | Supported |
 | `event_user` | custom | Supported |
 | `event_user_window` | custom | Supported |
-| `ratio` | — | Not yet supported in LD |
-| `funnel` | — | Requires LD metric group |
+| `ratio` | custom + denominator | Supported — requires a warehouse data source (`--ld-data-source` / `--source-mapping`) |
+| `funnel` | — | Not converted — would need an LD metric group |
 | `composite` | — | No LD equivalent |
 | `percentile` | — | LD uses percentile as analysisType, not metric type |
 
+Windowed metrics (`event_user_window`, or a custom rollup window) and winsorization convert too — winsorization needs a numeric metric, and a custom window needs a warehouse data source (otherwise it's dropped; see below).
+
 ### Metric warnings to surface to the user
+
+Many of these mark a conversion **lossy**: by default the metric is skipped (`skipped_lossy` in the report) with the warning as the reason, and `--convert-lossy` converts it anyway. Advisory warnings (the unit-type nudge, a truncated key) do **not** cause a skip.
 
 | Warning | Severity | What to do |
 |---|---|---|
-| `DATA LOSS: ... filter criteria` | High | LD metric matches ALL events, not just the filtered subset. Review dropped filters and set up manually in LD. |
-| `N metric events — only the first is used` | Medium | Multi-event metrics only use the first event. |
-| `winsorization ... not yet supported` | Low | Outlier clipping not applied. |
-| `per-unit capping` | Low | Daily cap not applied. |
-| `custom rollup window` | Low | LD uses full experiment duration. |
+| `DATA LOSS: ... filter criteria` | High | Lossy — skipped by default. The LD metric would match ALL events, not just the filtered subset; set the filters up manually in LD, or `--convert-lossy` to accept the loss. |
+| `N metric events — only the first is used` | Medium | Lossy — only the first event is used; extra events are dropped. |
+| `winsorization ... occurrence metric` | Low | Lossy — LD can't winsorize an occurrence metric (numeric metrics winsorize fine). |
+| `per-unit capping` | Low | Lossy — per-unit cap not applied. |
+| `custom rollup window` | Low | Lossy only when no data source is bound; pass `--ld-data-source` (snowflake) to apply the window. |
 | `unitType ... may not match an LD context kind` | Medium | Use `--unit-type-mapping` to map explicitly. |
 | `no LD data source specified` | Medium | Warehouse-native metric is being created without a data source binding. Fix: run `statsig-to-ld warehouse` first (it creates the data sources and writes `source-mapping.json`), then re-run `metrics convert --source-mapping source-mapping.json`. If the data sources already exist (set up by hand or via Terraform), pass `--ld-data-source` or `--source-mapping` directly. |
 
@@ -356,7 +360,7 @@ Useful `jq` queries:
 
 ```bash
 # metrics convert: summary counts
-cat migration-report.json | jq '{total: .statsig_metrics_total, converted: .converted, with_warnings: .converted_with_warnings, skipped_incompatible: .skipped_incompatible, failed: .failed}'
+cat migration-report.json | jq '{total: .statsig_metrics_total, dry_run, converted, with_warnings: .converted_with_warnings, skipped_existing, skipped_incompatible, skipped_lossy, failed}'
 
 # metrics convert: DATA LOSS warnings (most critical)
 cat migration-report.json | jq '.metrics[] | select(.warnings[]? | contains("DATA LOSS")) | {name: .statsig_name, warnings}'
