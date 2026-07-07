@@ -199,6 +199,9 @@ Converts Statsig metric definitions into LaunchDarkly metrics. Supports Statsig 
 # List available metric names/types, then exit (only the Statsig key needed)
 ./statsig-to-ld metrics convert --list
 
+# Export every metric's raw Statsig JSON for debugging (Statsig key only)
+./statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json
+
 # Dry-run preview (only Statsig key needed)
 ./statsig-to-ld metrics convert --all --dry-run
 
@@ -246,6 +249,8 @@ EOF
 ```
 
 The keys are each metric's `metricSourceName` (from the Statsig metrics API / console; a `warehouse --dry-run` also writes every source name to its export file); the values are the keys of the existing LD data sources. A warehouse-native metric resolved by neither flag is created without a data source binding (a `no LD data source specified` warning), and ratio metrics are rejected by LD without one.
+
+Warehouse-native conversion is newer and less battle-tested than the cloud path. If a warehouse-native metric isn't recognized or converts wrong, capture its raw Statsig definition with `--dump-raw <file>` (Statsig key only) and share it — redacted — with the LaunchDarkly team; the tool sees a metric only through that JSON, so it's exactly what conversion works from.
 
 ### Custom unit types (company-level experiments)
 

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -41,6 +42,9 @@ API Key Security:
 Examples:
   # See the available metric names/types (only the Statsig key is needed)
   statsig-to-ld metrics convert --list
+
+  # Export every metric's raw Statsig JSON for debugging (Statsig key only)
+  statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json
 
   # Just run — the tool prompts for keys interactively (most secure)
   statsig-to-ld metrics convert --all --dry-run
@@ -89,6 +93,7 @@ var (
 	flagVerbose         bool
 	flagConvertLossy    bool
 	flagList            bool
+	flagDumpRaw         string
 )
 
 func init() {
@@ -98,6 +103,7 @@ func init() {
 	convertCmd.Flags().BoolVar(&flagAll, "all", false, "Convert all Statsig metrics")
 	convertCmd.Flags().BoolVar(&flagList, "list", false, "List the available Statsig metrics (name, type, id) and exit — no conversion, only the Statsig key needed")
 	convertCmd.Flags().BoolVar(&flagDryRun, "dry-run", false, "Preview conversion without creating LD metrics")
+	convertCmd.Flags().StringVar(&flagDumpRaw, "dump-raw", "", "Write every Statsig metric's raw JSON (verbatim, all fields) to this file, then continue — for debugging conversion, especially warehouse-native metrics. Needs only the Statsig key.")
 
 	convertCmd.Flags().StringVar(&flagStatsigKey, "statsig-key", "", "Statsig Console API key (console-xxx)")
 	convertCmd.Flags().StringVar(&flagStatsigURL, "statsig-url", "", "Statsig API base URL including scheme (e.g. https://statsigapi.net/console/v1)")
@@ -140,17 +146,19 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	}
 
 	// --- Offline validation first: no network, no interactive prompts. ---
-	if flagList {
-		if flagAll || flagMetric != "" {
-			return fmt.Errorf("--list cannot be combined with --all or --metric — it just lists the available metrics")
-		}
-	} else {
-		if !flagAll && flagMetric == "" {
-			return fmt.Errorf("either --metric <name> or --all is required (or --list to see the available metric names)")
-		}
-		if flagAll && flagMetric != "" {
-			return fmt.Errorf("--metric and --all are mutually exclusive")
-		}
+	// willConvert: the run will actually convert metrics (vs. only listing or
+	// dumping raw JSON). willCreate: it will also write them to LaunchDarkly.
+	willConvert := flagAll || flagMetric != ""
+	willCreate := willConvert && !flagDryRun
+
+	if flagList && willConvert {
+		return fmt.Errorf("--list cannot be combined with --all or --metric — it just lists the available metrics")
+	}
+	if flagAll && flagMetric != "" {
+		return fmt.Errorf("--metric and --all are mutually exclusive")
+	}
+	if !willConvert && !flagList && flagDumpRaw == "" {
+		return fmt.Errorf("either --metric <name> or --all is required (or --list to see the available metric names, or --dump-raw <file> to export raw definitions)")
 	}
 	if flagFormat != "json" && flagFormat != "csv" {
 		return fmt.Errorf("--format must be \"json\" or \"csv\" (got %q)", flagFormat)
@@ -166,8 +174,8 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	if flagStatsigURL != "" && !strings.HasPrefix(flagStatsigURL, "https://") && !strings.HasPrefix(flagStatsigURL, "http://") {
 		return fmt.Errorf("--statsig-url must include the scheme (e.g. https://%s)", flagStatsigURL)
 	}
-	// --ld-project is only needed when we actually create metrics.
-	if flagLDProject == "" && !flagDryRun && !flagList {
+	// --ld-project is only needed when we actually create metrics in LD.
+	if flagLDProject == "" && willCreate {
 		return fmt.Errorf("--ld-project is required — specify the LaunchDarkly project key to create metrics in (or set LD_PROJECT)")
 	}
 
@@ -186,8 +194,8 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Statsig key should start with \"console-\" — this is a Console API key, not a server secret key")
 	}
 
-	// --- LD key: only needed when creating metrics (skip for --dry-run and --list). ---
-	if !flagDryRun && !flagList {
+	// --- LD key: only needed when creating metrics (not for --dry-run, --list, or --dump-raw). ---
+	if willCreate {
 		if flagLDKey == "" {
 			key, err := promptForKey("LaunchDarkly API access token (api-xxx)")
 			if err != nil {
@@ -211,9 +219,22 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	sgClient := statsig.NewClient(flagStatsigKey, flagStatsigURL)
 
+	// --dump-raw: export the verbatim Statsig JSON (Statsig key only), then
+	// continue with whatever else was requested.
+	if flagDumpRaw != "" {
+		if err := dumpRawMetrics(ctx, sgClient, flagDumpRaw); err != nil {
+			return err
+		}
+	}
+
 	// --list: print the available metrics and exit (Statsig key only).
 	if flagList {
 		return listMetrics(ctx, sgClient, os.Stdout)
+	}
+
+	// If the run was only a raw dump (no --all/--metric), there's nothing to convert.
+	if !willConvert {
+		return nil
 	}
 
 	// Load source mapping file if provided
@@ -381,6 +402,35 @@ func listMetrics(ctx context.Context, sgClient *statsig.Client, w io.Writer) err
 	}
 	tw.Flush()
 	fmt.Fprintf(w, "%d metrics\n", len(metrics))
+	return nil
+}
+
+// dumpRawMetrics writes every Statsig metric's raw JSON to path, verbatim from
+// the Console API (including fields the converter doesn't model). This is the
+// artifact we ask a customer to capture when debugging warehouse-native
+// conversion, since the tool's whole view of a metric comes from this response.
+func dumpRawMetrics(ctx context.Context, sgClient *statsig.Client, path string) error {
+	log.Printf("Fetching raw Statsig metric definitions for --dump-raw...")
+	raw, err := sgClient.ListAllMetricsRaw(ctx)
+	if err != nil {
+		return annotateStatsigAuthErr(fmt.Errorf("fetching raw Statsig metrics: %w", err))
+	}
+
+	// Pretty-print the array of raw metric objects for readability.
+	compact, err := json.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("encoding raw metrics: %w", err)
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, compact, "", "  "); err != nil {
+		pretty.Write(compact) // fall back to compact form if indenting fails
+	}
+	if err := os.WriteFile(path, pretty.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("writing raw dump to %s: %w", path, err)
+	}
+
+	log.Printf("Wrote %d raw Statsig metric definitions to %s", len(raw), path)
+	fmt.Fprintf(os.Stderr, "Raw Statsig metric JSON written to %s — review and redact before sharing (it may contain warehouse table/column names).\n", path)
 	return nil
 }
 

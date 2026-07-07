@@ -118,6 +118,10 @@ Converts Statsig metric definitions into LaunchDarkly metrics. Supports both Sta
 # List available metric names/types, then exit (only the Statsig key needed)
 statsig-to-ld metrics convert --list
 
+# Export every metric's raw Statsig JSON to a file, then continue (Statsig key
+# only). Useful for debugging conversion — see "Debugging a conversion" below.
+statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json
+
 # Dry-run preview
 statsig-to-ld metrics convert --all --dry-run
 
@@ -176,6 +180,20 @@ Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` �
 | `percentile` | — | Not supported as LD type |
 
 See `statsig-to-ld metrics convert --help` for the full flag list.
+
+#### Debugging a conversion (`--dump-raw`)
+
+When a metric converts incorrectly — or, for warehouse-native metrics, isn't recognized — the fastest way to diagnose it is to capture the raw Statsig definition. `--dump-raw <file>` writes every metric's JSON exactly as the Statsig Console API returns it (all fields, including ones the converter doesn't yet model), then continues with whatever else the command was doing:
+
+```bash
+# Just export the raw JSON and stop (only the Statsig key is needed)
+statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json
+
+# Export the raw JSON and preview the conversion in one safe pass (no writes to LD)
+statsig-to-ld metrics convert --all --dry-run --dump-raw statsig-metrics-raw.json
+```
+
+The tool sees a metric only through this response, so the dump is exactly what it works from. It can contain warehouse table and column names — **review and redact before sharing**, and note that the JSON *keys/structure* (Statsig's schema) are what matter for debugging, not the *values* (which you can replace with placeholders).
 
 ## Lossy targeting features
 

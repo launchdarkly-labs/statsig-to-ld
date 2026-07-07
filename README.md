@@ -56,6 +56,8 @@ Ask one follow-up:
 
 **Then run path D** to migrate the warehouse-native metric definitions: `statsig-to-ld metrics convert --source-mapping source-mapping.json` (or `--ld-data-source <key>`) binds each metric to its LD data source. The middle and last paths write `source-mapping.json` for you; the first path (data sources already exist) is where you supply the mapping — or a single `--ld-data-source` key — yourself. The agent shim at [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) has the wizard-by-wizard detail for the warehouse subcommand.
 
+> Warehouse-native conversion is the newest, least-tested path. If a metric isn't recognized or converts wrong, run `statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json` (Statsig key only) to export the raw metric definitions, then share that file — redacted — with the LaunchDarkly team. See [Debugging a conversion](docs/cli-reference.md#debugging-a-conversion---dump-raw).
+
 ### Step 3 — Check credentials before running anything
 
 **Applies to paths B, C, D, and E only.** Path A handles its own credentials inside the skill (via `ldcli` to `.env`).
