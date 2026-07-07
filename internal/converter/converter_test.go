@@ -1145,3 +1145,60 @@ func TestConvert_WarehouseNativeDailyParticipation_Lossy(t *testing.T) {
 		t.Errorf("UnitAggregationType = %q, want \"average\"", result.LDMetric.UnitAggregationType)
 	}
 }
+
+// --- Ratio winsorization + windowing ---
+
+func ratioWithWindowAndWinsor() *statsig.Metric {
+	return &statsig.Metric{
+		ID:             "rev-ratio::ratio",
+		Name:           "rev-ratio",
+		Type:           "ratio",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		MetricEvents: []statsig.MetricEvent{
+			{Name: "add_to_cart", Type: "count"}, // [0] = denominator (per inversion fix)
+			{Name: "purchase", Type: "value"},    // [1] = numerator (numeric)
+		},
+		RollupTimeWindow:  "custom",
+		CustomRollUpStart: float64Ptr(0),
+		CustomRollUpEnd:   float64Ptr(7),
+		WarehouseNative:   &statsig.WarehouseNative{WinsorizationLow: float64Ptr(0.01), WinsorizationHigh: float64Ptr(0.99)},
+	}
+}
+
+func TestConvertRatio_WinsorizationAndWindow(t *testing.T) {
+	sg := ratioWithWindowAndWinsor()
+	result, err := Convert(sg, Options{LDDataSource: "ds-key"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ld := result.LDMetric
+	// Winsorization mapped to numerator (0–1 → 0–100).
+	if ld.WinsorLowerPercentile == nil || *ld.WinsorLowerPercentile != 1 {
+		t.Errorf("WinsorLowerPercentile = %v, want 1", ld.WinsorLowerPercentile)
+	}
+	if ld.WinsorUpperPercentile == nil || *ld.WinsorUpperPercentile != 99 {
+		t.Errorf("WinsorUpperPercentile = %v, want 99", ld.WinsorUpperPercentile)
+	}
+	// Window offsets set because a data source is bound (days → ms).
+	if ld.WindowStartOffset == nil || *ld.WindowStartOffset != 0 {
+		t.Errorf("WindowStartOffset = %v, want 0", ld.WindowStartOffset)
+	}
+	if ld.WindowEndOffset == nil || *ld.WindowEndOffset != int64(7*millisPerDay) {
+		t.Errorf("WindowEndOffset = %v, want %d", ld.WindowEndOffset, int64(7*millisPerDay))
+	}
+}
+
+func TestConvertRatio_WindowWithoutDataSourceWarns(t *testing.T) {
+	sg := ratioWithWindowAndWinsor()
+	// No LDDataSource and no source mapping → no data source → window not applied.
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.WindowStartOffset != nil || result.LDMetric.WindowEndOffset != nil {
+		t.Errorf("window offsets should be unset without a data source, got start=%v end=%v",
+			result.LDMetric.WindowStartOffset, result.LDMetric.WindowEndOffset)
+	}
+	assertHasWarning(t, result.Warnings, "custom rollup window")
+}
