@@ -165,7 +165,7 @@ Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` �
 | `mean` | custom (isNumeric, average) | Supported |
 | `event_user` | custom | Supported |
 | `event_user_window` | custom | Supported |
-| `ratio` | — | Not yet supported in LD |
+| `ratio` | custom + denominator | Supported — requires a warehouse data source (`--ld-data-source` / `--source-mapping`) |
 | `funnel` | — | Requires LD metric group |
 | `composite` | — | Not supported in LD |
 | `percentile` | — | Not supported as LD type |
@@ -204,6 +204,38 @@ There's also a softer category — **approximated operators** — that import wi
 The `warehouse` subcommand sets up the LaunchDarkly side of a Statsig warehouse-native experimentation project — data export integration, experimentation integration, and LD metric data sources. **It does not migrate metric definitions.** After `warehouse` completes, run [`statsig-to-ld metrics convert`](#metrics-convert) to migrate the warehouse-native metric definitions, using the `source-mapping.json` that `warehouse` writes.
 
 This boundary is deliberate: the warehouse subcommand handles the parts that are unique to warehouse-native (interactive wizard for warehouse credentials, SQL setup scripts, data source schema discovery via LD's preview API), and `metrics convert` handles the parts that are common across all Statsig metrics (DATA LOSS detection on event filters, unit-type mapping, idempotent re-runs, structured warnings).
+
+### Already have LD data sources? Skip `warehouse`
+
+The **only** reason to run `warehouse` is to *create* LaunchDarkly metric data sources. If they already exist — set up in the LD UI, managed via Terraform, or provisioned for you as part of your account (this is the **Figma** case) — **don't run `warehouse` at all.** Go straight to `metrics convert` and tell it which data source each warehouse-native metric should bind to, in one of two ways:
+
+**One data source for everything** — pass `--ld-data-source <ld-data-source-key>`; every warehouse-native metric binds to that single source:
+
+```bash
+statsig-to-ld metrics convert --all --ld-project my-project \
+  --ld-data-source snowflake-prod
+```
+
+**Per-source mapping** — hand-write the same `source-mapping.json` that `warehouse` would have produced, then pass `--source-mapping`. It's a flat JSON object of **Statsig metric source name → LD data source key**:
+
+```json
+{
+  "purchases_table": "snowflake-purchases-ds",
+  "sessions_table": "snowflake-sessions-ds"
+}
+```
+
+```bash
+statsig-to-ld metrics convert --all --ld-project my-project \
+  --source-mapping source-mapping.json
+```
+
+Finding the two names:
+
+- **Statsig metric source name** (the JSON keys) — each warehouse-native metric's `metricSourceName`, as returned by the Statsig metrics API / shown in the Statsig console. To enumerate every source at once, run `statsig-to-ld warehouse --dry-run`: it fetches the metric sources and writes each one's `name` to its export file without changing anything in LD.
+- **LD data source key** (the JSON values) — the key of the existing metric data source in LaunchDarkly.
+
+A warehouse-native metric whose source resolves through neither flag is still created, but **without** a data source binding (you'll see a `no LD data source specified` warning), and ratio metrics are rejected by LD at creation without one. Event-based (Statsig Cloud) metrics never need a data source, so a project with no warehouse-native metrics needs neither flag.
 
 ### How it works
 

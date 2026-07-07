@@ -50,10 +50,11 @@ Ask the user which paths they need (multi-select). Do this even if you are opera
 
 Ask one follow-up:
 
+- **"My LaunchDarkly metric data sources already exist — I don't need to create anything."** (Common when the warehouse integration was provisioned for you, set up in the LD UI, or managed via Terraform — this is the **Figma** case.) → **Skip `warehouse` entirely; don't run it at all.** Go straight to path D and tell `metrics convert` which data source to bind to: `--ld-data-source <key>` for a single source, or hand-write a `source-mapping.json` and pass `--source-mapping`. Full detail and the JSON shape are in [Already have LD data sources? Skip `warehouse`](docs/cli-reference.md#already-have-ld-data-sources-skip-warehouse).
 - **"I already have the LaunchDarkly warehouse integration set up; I only need to migrate metric data sources."** → [`statsig-to-ld warehouse --only data-sources`](docs/cli-reference.md#running-only-one-phase). Skips the integrations wizard, creates LD data sources, writes `source-mapping.json`.
 - **"I haven't set up the LaunchDarkly warehouse integration yet — do all of it."** → [`statsig-to-ld warehouse`](docs/cli-reference.md#warehouse-native-migration) with no `--only` flag. Runs the full pipeline: integrations wizard + data sources + `source-mapping.json`.
 
-Either path produces a `source-mapping.json` file. **Then run path D** to migrate the warehouse-native metric definitions: `statsig-to-ld metrics convert --source-mapping source-mapping.json` binds each metric to the LD data source `warehouse` just created. The agent shim at [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) has the wizard-by-wizard detail for the warehouse subcommand.
+**Then run path D** to migrate the warehouse-native metric definitions: `statsig-to-ld metrics convert --source-mapping source-mapping.json` (or `--ld-data-source <key>`) binds each metric to its LD data source. The middle and last paths write `source-mapping.json` for you; the first path (data sources already exist) is where you supply the mapping — or a single `--ld-data-source` key — yourself. The agent shim at [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md) has the wizard-by-wizard detail for the warehouse subcommand.
 
 ### Step 3 — Check credentials before running anything
 

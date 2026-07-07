@@ -108,9 +108,10 @@ If the user is also rewriting application code from the Statsig SDK to the Launc
 
 | Statsig usage | What to run | Why |
 |---|---|---|
-| Warehouse-native (any usage) | `warehouse` (step 4) → `metrics convert --source-mapping source-mapping.json` (step 5). | `warehouse` creates the integrations + data sources but **not** the metrics. `metrics convert` then creates every metric definition and binds the warehouse-native ones to the data sources via the mapping. |
+| Warehouse-native, **LD data sources already exist** (set up in the LD UI, via Terraform, or provisioned for the account — the **Figma** case) | **Skip `warehouse`.** `metrics convert` (step 5) with `--ld-data-source <key>` (one source for all) or `--source-mapping source-mapping.json` (per-source), supplied by you. | Nothing to create in LD, so `warehouse` has no job. You just tell `metrics convert` which existing data source key to bind each warehouse-native metric to. See the [`metrics convert` Warehouse Native section](#warehouse-native) for the JSON shape. |
+| Warehouse-native, data sources **do not** exist yet | `warehouse` (step 4) → `metrics convert --source-mapping source-mapping.json` (step 5). | `warehouse` creates the integrations + data sources but **not** the metrics, and writes the `source-mapping.json`. `metrics convert` then creates every metric definition and binds the warehouse-native ones to the data sources via the mapping. |
 | Event-based metrics only (Statsig Cloud, no warehouse-native) | `metrics convert` (step 5). Skip `warehouse` (step 4). | `warehouse` would have nothing to do — there are no data sources to create. |
-| Mixed (both) | Same as warehouse-native: `warehouse` (step 4) → `metrics convert --source-mapping source-mapping.json` (step 5). | `metrics convert` walks all metrics; event-based ones don't need a data source binding, warehouse-native ones do — the mapping file resolves both in one pass. |
+| Mixed (both) | Same as warehouse-native: `warehouse` (step 4, unless data sources already exist) → `metrics convert --source-mapping source-mapping.json` (step 5). | `metrics convert` walks all metrics; event-based ones don't need a data source binding, warehouse-native ones do — the mapping file resolves both in one pass. |
 
 Re-running any subcommand is safe — existing LD resources are detected by sanitized key and skipped.
 
@@ -220,18 +221,26 @@ By default, metrics whose conversion would be **lossy** (a Statsig feature dropp
 
 ### Warehouse Native
 
+Warehouse-native metrics must bind to an LD metric **data source**. If you ran `warehouse` (step 4), pass the `source-mapping.json` it wrote. **If the data sources already exist** (LD UI, Terraform, or provisioned for the account — e.g. Figma), skip `warehouse` and supply the binding here yourself, either as a single default or a per-source mapping you hand-write.
+
 ```bash
-# Single source for all metrics
+# Single source for all metrics — every warehouse-native metric binds to this key
 ./statsig-to-ld metrics convert --all --ld-project my-project \
   --ld-data-source snowflake-ds
 
-# Per-source mapping
-cat > sources.json << 'EOF'
-{"purchases_table": "snowflake-purchases-ds", "sessions_table": "snowflake-sessions-ds"}
+# Per-source mapping — hand-written, same format warehouse would have produced:
+# Statsig metric source name -> existing LD data source key
+cat > source-mapping.json << 'EOF'
+{
+  "purchases_table": "snowflake-purchases-ds",
+  "sessions_table": "snowflake-sessions-ds"
+}
 EOF
 ./statsig-to-ld metrics convert --all --ld-project my-project \
-  --source-mapping sources.json
+  --source-mapping source-mapping.json
 ```
+
+The keys are each metric's `metricSourceName` (from the Statsig metrics API / console; a `warehouse --dry-run` also writes every source name to its export file); the values are the keys of the existing LD data sources. A warehouse-native metric resolved by neither flag is created without a data source binding (a `no LD data source specified` warning), and ratio metrics are rejected by LD without one.
 
 ### Custom unit types (company-level experiments)
 
