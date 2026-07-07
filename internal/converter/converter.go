@@ -178,35 +178,8 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 
 	// Warehouse Native advanced features
-	var winsorLower, winsorUpper *float32
-	if sg.WarehouseNative != nil {
-		wn := sg.WarehouseNative
-		if wn.WinsorizationHigh != nil || wn.WinsorizationLow != nil {
-			// LD supports winsorization on numeric and count metrics, expressed
-			// as 0–100 percentiles (Statsig gives 0–1 fractions). It is rejected
-			// on occurrence metrics (non-numeric average), so skip + warn there
-			// (lossy: winsorization is dropped).
-			if !isNumeric && unitAgg == "average" {
-				result.addLossy("winsorization (low=%s, high=%s) not applied — LaunchDarkly does not support winsorization on occurrence metrics",
-					fmtOptFloat(wn.WinsorizationLow), fmtOptFloat(wn.WinsorizationHigh))
-			} else {
-				if wn.WinsorizationLow != nil {
-					v := float32(*wn.WinsorizationLow * 100)
-					winsorLower = &v
-				}
-				if wn.WinsorizationHigh != nil {
-					v := float32(*wn.WinsorizationHigh * 100)
-					winsorUpper = &v
-				}
-			}
-		}
-		if wn.Cap != nil {
-			result.addLossy("per-unit capping (cap=%v) is not supported in LaunchDarkly", *wn.Cap)
-		}
-		if wn.UseLogTransform != nil && *wn.UseLogTransform {
-			result.addLossy("log transform is not supported in LaunchDarkly — metric values will not be log-transformed")
-		}
-	}
+	winsorLower, winsorUpper := winsorPercentiles(result, sg.WarehouseNative, isNumeric, unitAgg)
+	warnUnsupportedWarehouseFeatures(result, sg.WarehouseNative)
 
 	// Custom rollup windows are mapped to LD window offsets after the metric is
 	// built (they depend on whether a data source is bound). See below.
@@ -345,17 +318,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	// by a warehouse (snowflake-experimentation) data source, so set them only
 	// when a data source is bound; otherwise warn.
 	// ---------------------------------------------------------------
-	if sg.RollupTimeWindow == "custom" && sg.CustomRollUpStart != nil && sg.CustomRollUpEnd != nil {
-		if result.LDMetric.DataSource != nil {
-			start := int64(*sg.CustomRollUpStart * millisPerDay)
-			end := int64(*sg.CustomRollUpEnd * millisPerDay)
-			result.LDMetric.WindowStartOffset = &start
-			result.LDMetric.WindowEndOffset = &end
-		} else {
-			result.addLossy("custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
-				*sg.CustomRollUpStart, *sg.CustomRollUpEnd)
-		}
-	}
+	applyCustomWindow(result, sg)
 
 	return result, nil
 }
@@ -403,6 +366,62 @@ func fmtOptFloat(f *float64) string {
 		return "<nil>"
 	}
 	return fmt.Sprintf("%.4f", *f)
+}
+
+// winsorPercentiles converts Statsig winsorization fractions (0–1) to LD
+// percentiles (0–100). LD rejects winsorization on occurrence metrics
+// (non-numeric average), where it records a lossy warning and returns no bounds.
+func winsorPercentiles(result *Result, wn *statsig.WarehouseNative, isNumeric bool, unitAgg string) (lower, upper *float32) {
+	if wn == nil || (wn.WinsorizationHigh == nil && wn.WinsorizationLow == nil) {
+		return nil, nil
+	}
+	if !isNumeric && unitAgg == "average" {
+		result.addLossy("winsorization (low=%s, high=%s) not applied — LaunchDarkly does not support winsorization on occurrence metrics",
+			fmtOptFloat(wn.WinsorizationLow), fmtOptFloat(wn.WinsorizationHigh))
+		return nil, nil
+	}
+	if wn.WinsorizationLow != nil {
+		v := float32(*wn.WinsorizationLow * 100)
+		lower = &v
+	}
+	if wn.WinsorizationHigh != nil {
+		v := float32(*wn.WinsorizationHigh * 100)
+		upper = &v
+	}
+	return lower, upper
+}
+
+// warnUnsupportedWarehouseFeatures records lossy warnings for Statsig warehouse-
+// native features LaunchDarkly cannot represent (capping, log transform).
+func warnUnsupportedWarehouseFeatures(result *Result, wn *statsig.WarehouseNative) {
+	if wn == nil {
+		return
+	}
+	if wn.Cap != nil {
+		result.addLossy("per-unit capping (cap=%v) is not supported in LaunchDarkly", *wn.Cap)
+	}
+	if wn.UseLogTransform != nil && *wn.UseLogTransform {
+		result.addLossy("log transform is not supported in LaunchDarkly — metric values will not be log-transformed")
+	}
+}
+
+// applyCustomWindow maps a Statsig custom rollup window (days) to LD window
+// offsets (ms). LD only accepts window offsets on warehouse-backed metrics, so
+// it applies them only when a data source is bound, recording a lossy warning
+// otherwise.
+func applyCustomWindow(result *Result, sg *statsig.Metric) {
+	if sg.RollupTimeWindow != "custom" || sg.CustomRollUpStart == nil || sg.CustomRollUpEnd == nil {
+		return
+	}
+	if result.LDMetric.DataSource != nil {
+		start := int64(*sg.CustomRollUpStart * millisPerDay)
+		end := int64(*sg.CustomRollUpEnd * millisPerDay)
+		result.LDMetric.WindowStartOffset = &start
+		result.LDMetric.WindowEndOffset = &end
+	} else {
+		result.addLossy("custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
+			*sg.CustomRollUpStart, *sg.CustomRollUpEnd)
+	}
 }
 
 // termSpec is the LD per-term shape derived from a Statsig metric type.
@@ -656,6 +675,12 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		}
 	}
 
+	// Winsorization maps to the numerator term (LD's top-level percentile
+	// fields). Statsig has a single metric-level setting; the denominator term's
+	// winsorization is not separately expressible here.
+	winsorLower, winsorUpper := winsorPercentiles(result, sg.WarehouseNative, numSpec.isNumeric, numSpec.unitAgg)
+	warnUnsupportedWarehouseFeatures(result, sg.WarehouseNative)
+
 	result.LDMetric = launchdarkly.MetricPost{
 		Key:                  ldKey,
 		Kind:                 "custom",
@@ -677,6 +702,8 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 			UnitAggregationType:  denSpec.unitAgg,
 			UnitAggregationField: denSpec.unitAggField,
 		},
+		WinsorLowerPercentile: winsorLower,
+		WinsorUpperPercentile: winsorUpper,
 	}
 
 	// Per-term data source. LD ratios reject creation without one (HTTP 400).
@@ -698,6 +725,10 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	if denDS != "" && result.LDMetric.Denominator != nil {
 		result.LDMetric.Denominator.DataSource = &launchdarkly.DataSource{Key: denDS}
 	}
+
+	// Custom rollup window applies to the whole ratio metric; resolve after the
+	// data source is bound (LD gates window offsets on a warehouse data source).
+	applyCustomWindow(result, sg)
 
 	return result, nil
 }
