@@ -102,6 +102,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	isNumeric := spec.isNumeric
 	unitAgg := spec.unitAgg
+	unitAggField := spec.unitAggField
 	analysisType := spec.analysisType
 	eventDefault := spec.eventDefault
 
@@ -129,10 +130,23 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	// it by default (overridable with --convert-lossy).
 	// ---------------------------------------------------------------
 
-	// Count distinct
+	// Count distinct. Statsig's count(distinct ...) has faithful LaunchDarkly
+	// equivalents — the same mapping the ratio path uses (see ratioTermSpec) — so
+	// it is not lossy:
+	//   - no column   → distinct units (users), i.e. an LD binary metric
+	//                   (non-numeric, average aggregation)
+	//   - named column → LD count_distinct on that column, via unitAggregationField
+	//                   (LD supports count_distinct on warehouse-native metrics; a
+	//                   hosted metric is rejected at create, which is correct)
 	if len(sg.MetricEvents) > 0 && sg.MetricEvents[0].Type == "count_distinct" {
-		result.addLossy("Statsig counts distinct %q values — LaunchDarkly will count all occurrences instead",
-			sg.MetricEvents[0].MetadataKey)
+		isNumeric = false
+		eventDefault = nil
+		if col := sg.MetricEvents[0].MetadataKey; col != "" {
+			unitAgg = "count_distinct"
+			unitAggField = col
+		} else {
+			unitAgg = "average"
+		}
 	}
 
 	// Metadata-based aggregation
@@ -280,18 +294,19 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	// Build the LD metric
 	// ---------------------------------------------------------------
 	result.LDMetric = launchdarkly.MetricPost{
-		Key:                 ldKey,
-		Kind:                "custom",
-		Name:                sg.Name,
-		Description:         desc,
-		EventKey:            eventKey,
-		IsNumeric:           &isNumeric,
-		SuccessCriteria:     successCriteria,
-		UnitAggregationType: unitAgg,
-		AnalysisType:        analysisType,
-		RandomizationUnits:  randUnits,
-		Unit:                unit,
-		Tags:                tags,
+		Key:                  ldKey,
+		Kind:                 "custom",
+		Name:                 sg.Name,
+		Description:          desc,
+		EventKey:             eventKey,
+		IsNumeric:            &isNumeric,
+		SuccessCriteria:      successCriteria,
+		UnitAggregationType:  unitAgg,
+		UnitAggregationField: unitAggField,
+		AnalysisType:         analysisType,
+		RandomizationUnits:   randUnits,
+		Unit:                 unit,
+		Tags:                 tags,
 
 		WinsorLowerPercentile: winsorLower,
 		WinsorUpperPercentile: winsorUpper,

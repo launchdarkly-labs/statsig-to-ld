@@ -409,7 +409,12 @@ func TestConvert_DefaultUnitFallback(t *testing.T) {
 
 // --- Feature warnings ---
 
-func TestConvert_WarningCountDistinct(t *testing.T) {
+func TestConvert_CountDistinct_NamedColumn(t *testing.T) {
+	// count(distinct <column>) maps to an LD count_distinct metric with the column
+	// as unitAggregationField — the same faithful mapping the ratio path already
+	// uses — so it is NOT lossy. (LD accepts count_distinct only on
+	// warehouse-native metrics; a hosted metric is rejected at create, which is
+	// correct — the feature genuinely isn't available there.)
 	sg := baseMetric("event_count_custom")
 	sg.MetricEvents[0].Type = "count_distinct"
 	sg.MetricEvents[0].MetadataKey = "item_category"
@@ -417,7 +422,47 @@ func TestConvert_WarningCountDistinct(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertHasWarning(t, result.Warnings, "distinct")
+	if result.IsLossy() {
+		t.Errorf("count(distinct column) has a faithful LD mapping; should not be lossy, got LossyReasons=%v", result.LossyReasons)
+	}
+	if result.LDMetric.UnitAggregationType != "count_distinct" {
+		t.Errorf("UnitAggregationType = %q, want count_distinct", result.LDMetric.UnitAggregationType)
+	}
+	if result.LDMetric.UnitAggregationField != "item_category" {
+		t.Errorf("UnitAggregationField = %q, want item_category", result.LDMetric.UnitAggregationField)
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Error("count_distinct metric must be non-numeric")
+	}
+	for _, w := range result.Warnings {
+		if strings.Contains(strings.ToLower(w), "count all occurrences") {
+			t.Errorf("count_distinct must not warn about counting all occurrences, got: %q", w)
+		}
+	}
+}
+
+func TestConvert_CountDistinct_NoColumn_IsBinary(t *testing.T) {
+	// A count_distinct event with no column counts distinct units (users). The
+	// faithful LD equivalent is a binary metric (non-numeric, average) — the same
+	// mapping the ratio path uses — so it is NOT lossy.
+	sg := baseMetric("event_count_custom")
+	sg.MetricEvents[0].Type = "count_distinct" // MetadataKey left empty
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsLossy() {
+		t.Errorf("distinct-units count maps faithfully to a binary metric; should not be lossy, got LossyReasons=%v", result.LossyReasons)
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Error("binary metric must be non-numeric")
+	}
+	if result.LDMetric.UnitAggregationType != "average" {
+		t.Errorf("UnitAggregationType = %q, want average (binary)", result.LDMetric.UnitAggregationType)
+	}
+	if result.LDMetric.UnitAggregationField != "" {
+		t.Errorf("UnitAggregationField = %q, want empty for a binary metric", result.LDMetric.UnitAggregationField)
+	}
 }
 
 func TestConvert_WarningMetadata(t *testing.T) {
