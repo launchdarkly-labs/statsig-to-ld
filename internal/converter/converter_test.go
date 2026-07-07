@@ -1114,3 +1114,34 @@ func TestConvert_WarehouseNativeNoAggregation_ExplicitError(t *testing.T) {
 		t.Errorf("error should mention the missing aggregation, got: %v", err)
 	}
 }
+
+func TestConvert_WarehouseNativeDailyParticipation_Lossy(t *testing.T) {
+	// A warehouse-native daily_participation metric now converts (binary
+	// approximation) but is marked lossy — skipped by default, --convert-lossy
+	// converts it. It must NOT be a hard error/incompatible anymore.
+	sg := &statsig.Metric{
+		ID:             "engagement::user_warehouse",
+		Name:           "engagement",
+		Type:           "user_warehouse",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		WarehouseNative: &statsig.WarehouseNative{
+			Aggregation:   "daily_participation",
+			MetricSources: []statsig.MetricSource{{MetricSourceName: "events_src", ValueColumn: "active"}},
+		},
+	}
+	result, err := Convert(sg, Options{LDDataSource: "ds-key"})
+	if err != nil {
+		t.Fatalf("daily_participation should convert (lossy), not error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("daily_participation conversion should be marked lossy")
+	}
+	assertHasWarning(t, result.LossyReasons, "daily_participation")
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Errorf("expected non-numeric (binary), got IsNumeric=%v", result.LDMetric.IsNumeric)
+	}
+	if result.LDMetric.UnitAggregationType != "average" {
+		t.Errorf("UnitAggregationType = %q, want \"average\"", result.LDMetric.UnitAggregationType)
+	}
+}

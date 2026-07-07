@@ -113,6 +113,10 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	eventDefault := spec.eventDefault
 	unitAggField := spec.unitAggField
 
+	if effectiveType == "daily_participation" {
+		result.addLossy("Statsig daily_participation (per-unit share of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
+	}
+
 	// Event key: cloud metrics use metricEvents[0].Name; warehouse-native metrics
 	// have none, so fall back to the source's valueColumn.
 	// TODO(verify): confirm the eventKey ⇔ warehouse source-column mapping against
@@ -427,12 +431,10 @@ func termSpecFor(typ string) (termSpec, error) {
 		return termSpec{isNumeric: false, unitAgg: "count_distinct", analysisType: "mean"}, nil
 	case "daily_participation":
 		// Statsig daily participation is a per-unit rate (active days / window
-		// days). LD has no faithful equivalent — binary would drop the rate — so
-		// skip rather than emit a wrong metric.
-		return termSpec{}, &IncompatibleError{
-			StatsigType: typ,
-			Reason:      `Statsig "daily_participation" (per-unit share of active days) has no faithful LaunchDarkly equivalent — an LD binary metric would only capture "any activity" and lose the per-day rate`,
-		}
+		// days). LD has no exact equivalent; approximate as a binary metric and
+		// let the caller mark it lossy (skipped unless --convert-lossy), matching
+		// how the daily-participation rollup is handled.
+		return termSpec{isNumeric: false, unitAgg: "average", analysisType: "mean"}, nil
 	case "sum":
 		return termSpec{
 			isNumeric:    true,
@@ -501,8 +503,7 @@ func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []string, error) {
 		spec, err := termSpecFor("mean")
 		return spec, warnings, err
 	case "daily_participation":
-		// No faithful LD equivalent — surface the IncompatibleError so the ratio
-		// fails loudly instead of emitting a wrong term.
+		// Approximated as binary; convertRatio marks the whole ratio lossy.
 		spec, err := termSpecFor("daily_participation")
 		return spec, warnings, err
 	default:
@@ -579,6 +580,10 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	for _, w := range denWarn {
 		result.Warnings = append(result.Warnings, "denominator: "+w)
+	}
+
+	if numEv.Type == "daily_participation" || denEv.Type == "daily_participation" {
+		result.addLossy("Statsig daily_participation ratio term approximated as binary in LaunchDarkly — the per-day rate is lost")
 	}
 
 	// Event filter criteria are not carried over (parity with the simple path).
