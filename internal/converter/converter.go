@@ -44,7 +44,25 @@ type Options struct {
 type Result struct {
 	LDMetric launchdarkly.MetricPost
 	Warnings []string
+	// LossyReasons is the subset of warnings that mark the conversion as lossy —
+	// a Statsig feature that changes the metric's meaning was dropped or
+	// approximated. Populated via addLossy; these messages also appear in
+	// Warnings. Drives the default skip that --convert-lossy overrides.
+	LossyReasons []string
 }
+
+// addLossy records a message that both warns the user and marks the conversion
+// as lossy (a Statsig feature was dropped or approximated). The message is added
+// to both Warnings and LossyReasons.
+func (r *Result) addLossy(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	r.Warnings = append(r.Warnings, msg)
+	r.LossyReasons = append(r.LossyReasons, msg)
+}
+
+// IsLossy reports whether the conversion dropped or approximated a Statsig
+// feature. Lossy metrics are skipped by default; --convert-lossy converts them.
+func (r *Result) IsLossy() bool { return len(r.LossyReasons) > 0 }
 
 // IncompatibleError indicates the Statsig metric type has no LD equivalent.
 // This is a normal outcome, not a failure — the metric should be logged as
@@ -98,29 +116,29 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("Statsig metric %q has no metricEvents — cannot determine LD eventKey", sg.Name)
 	}
 
-	// Warn if multiple metric events — only the first is used
+	// Warn if multiple metric events — only the first is used (lossy: the
+	// additional events are dropped).
 	if len(sg.MetricEvents) > 1 {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("Statsig metric has %d metric events — only the first (%q) is used; %d additional events are ignored",
-				len(sg.MetricEvents), eventKey, len(sg.MetricEvents)-1))
+		result.addLossy("Statsig metric has %d metric events — only the first (%q) is used; %d additional events are ignored",
+			len(sg.MetricEvents), eventKey, len(sg.MetricEvents)-1)
 	}
 
 	// ---------------------------------------------------------------
-	// Feature warnings for Statsig-specific capabilities
+	// Feature warnings for Statsig-specific capabilities. Anything that drops or
+	// approximates a Statsig feature is recorded via addLossy so the CLI can skip
+	// it by default (overridable with --convert-lossy).
 	// ---------------------------------------------------------------
 
 	// Count distinct
 	if len(sg.MetricEvents) > 0 && sg.MetricEvents[0].Type == "count_distinct" {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("Statsig counts distinct %q values — LaunchDarkly will count all occurrences instead",
-				sg.MetricEvents[0].MetadataKey))
+		result.addLossy("Statsig counts distinct %q values — LaunchDarkly will count all occurrences instead",
+			sg.MetricEvents[0].MetadataKey)
 	}
 
 	// Metadata-based aggregation
 	if len(sg.MetricEvents) > 0 && sg.MetricEvents[0].Type == "metadata" {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("Statsig aggregates metadata field %q — LaunchDarkly will aggregate the track() metricValue; ensure events send the same value in metricValue",
-				sg.MetricEvents[0].MetadataKey))
+		result.addLossy("Statsig aggregates metadata field %q — LaunchDarkly will aggregate the track() metricValue; ensure events send the same value in metricValue",
+			sg.MetricEvents[0].MetadataKey)
 	}
 
 	// Event criteria/filters — data-affecting: the migrated metric will be broader
@@ -131,9 +149,8 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		for _, c := range criteria {
 			details = append(details, fmt.Sprintf("%s %s %s %v", c.Column, c.Type, c.Condition, c.Values))
 		}
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("DATA LOSS: %d event filter criteria will NOT be applied — the LD metric will match all %q events, not just the filtered subset. Dropped filters: [%s]. Manual filter setup required in LD.",
-				len(criteria), eventKey, strings.Join(details, "; ")))
+		result.addLossy("DATA LOSS: %d event filter criteria will NOT be applied — the LD metric will match all %q events, not just the filtered subset. Dropped filters: [%s]. Manual filter setup required in LD.",
+			len(criteria), eventKey, strings.Join(details, "; "))
 	}
 
 	// Warehouse Native advanced features
@@ -143,11 +160,11 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		if wn.WinsorizationHigh != nil || wn.WinsorizationLow != nil {
 			// LD supports winsorization on numeric and count metrics, expressed
 			// as 0–100 percentiles (Statsig gives 0–1 fractions). It is rejected
-			// on occurrence metrics (non-numeric average), so skip + warn there.
+			// on occurrence metrics (non-numeric average), so skip + warn there
+			// (lossy: winsorization is dropped).
 			if !isNumeric && unitAgg == "average" {
-				result.Warnings = append(result.Warnings,
-					fmt.Sprintf("winsorization (low=%s, high=%s) not applied — LaunchDarkly does not support winsorization on occurrence metrics",
-						fmtOptFloat(wn.WinsorizationLow), fmtOptFloat(wn.WinsorizationHigh)))
+				result.addLossy("winsorization (low=%s, high=%s) not applied — LaunchDarkly does not support winsorization on occurrence metrics",
+					fmtOptFloat(wn.WinsorizationLow), fmtOptFloat(wn.WinsorizationHigh))
 			} else {
 				if wn.WinsorizationLow != nil {
 					v := float32(*wn.WinsorizationLow * 100)
@@ -160,12 +177,10 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 			}
 		}
 		if wn.Cap != nil {
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("per-unit capping (cap=%v) is not supported in LaunchDarkly", *wn.Cap))
+			result.addLossy("per-unit capping (cap=%v) is not supported in LaunchDarkly", *wn.Cap)
 		}
 		if wn.UseLogTransform != nil && *wn.UseLogTransform {
-			result.Warnings = append(result.Warnings,
-				"log transform is not supported in LaunchDarkly — metric values will not be log-transformed")
+			result.addLossy("log transform is not supported in LaunchDarkly — metric values will not be log-transformed")
 		}
 	}
 
@@ -174,8 +189,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 
 	// Daily participation rate
 	if sg.RollupTimeWindow == "daily_participation_rate" {
-		result.Warnings = append(result.Warnings,
-			"daily participation rate rollup is not supported in LaunchDarkly — metric will use standard binary conversion")
+		result.addLossy("daily participation rate rollup is not supported in LaunchDarkly — metric will use standard binary conversion")
 	}
 
 	// ---------------------------------------------------------------
@@ -314,9 +328,8 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 			result.LDMetric.WindowStartOffset = &start
 			result.LDMetric.WindowEndOffset = &end
 		} else {
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
-					*sg.CustomRollUpStart, *sg.CustomRollUpEnd))
+			result.addLossy("custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
+				*sg.CustomRollUpStart, *sg.CustomRollUpEnd)
 		}
 	}
 

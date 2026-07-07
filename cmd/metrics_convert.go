@@ -80,6 +80,7 @@ var (
 	flagIncludeTypes    string
 	flagConcurrency     int
 	flagVerbose         bool
+	flagConvertLossy    bool
 )
 
 func init() {
@@ -107,6 +108,7 @@ func init() {
 	convertCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert metrics of these Statsig types (comma-separated)")
 	convertCmd.Flags().IntVar(&flagConcurrency, "concurrency", 10, "Max concurrent LD API requests for bulk conversion")
 	convertCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed per-metric progress (status, name, key, errors)")
+	convertCmd.Flags().BoolVar(&flagConvertLossy, "convert-lossy", false, "Convert metrics whose conversion is lossy (a Statsig feature is dropped or approximated). By default these are skipped as \"incompatible - lossy\".")
 }
 
 func runConvert(cmd *cobra.Command, args []string) error {
@@ -266,7 +268,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	total := len(metrics)
 
 	if total > 0 && !flagVerbose {
-		fmt.Fprintf(os.Stderr, "Processing %d metrics [.=ok S=skip X=fail E=exists]: ", total)
+		fmt.Fprintf(os.Stderr, "Processing %d metrics [.=ok S=skip L=lossy X=fail E=exists]: ", total)
 	}
 
 	if flagDryRun || total <= 1 {
@@ -350,6 +352,18 @@ func processMetric(
 			log.Printf("%s FAIL   %-45s  %s", progress, sg.Name, convErr.Error())
 		} else {
 			fmt.Fprint(os.Stderr, "X")
+		}
+		return
+	}
+
+	// Lossy conversions (a Statsig feature dropped or approximated) are skipped
+	// by default; --convert-lossy opts into the imperfect conversion.
+	if result.IsLossy() && !flagConvertLossy {
+		rpt.AddSkippedLossy(sg.Name, sg.Type, sg.ID, result.LossyReasons)
+		if flagVerbose {
+			log.Printf("%s LOSSY  %-45s  skipped (lossy): %s", progress, sg.Name, strings.Join(result.LossyReasons, "; "))
+		} else {
+			fmt.Fprint(os.Stderr, "L")
 		}
 		return
 	}

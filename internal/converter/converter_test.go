@@ -922,6 +922,75 @@ func TestConvert_Ratio_WithDataSourceNoWarning(t *testing.T) {
 	}
 }
 
+// --- Lossy classification (drives the default skip; --convert-lossy overrides) ---
+
+func TestConvert_Lossy_DailyParticipation(t *testing.T) {
+	sg := baseMetric("event_user")
+	sg.RollupTimeWindow = "daily_participation_rate"
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("daily participation rate should mark the conversion lossy")
+	}
+	assertHasWarning(t, result.LossyReasons, "daily participation")
+}
+
+func TestConvert_Lossy_Capping(t *testing.T) {
+	sg := baseMetric("sum")
+	sg.MetricEvents[0] = statsig.MetricEvent{Name: "purchase", Type: "value"}
+	sg.WarehouseNative = &statsig.WarehouseNative{Cap: float64Ptr(500)}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("per-unit capping should mark the conversion lossy")
+	}
+}
+
+func TestConvert_Lossy_EventFilters(t *testing.T) {
+	sg := baseMetric("event_count_custom")
+	sg.MetricEvents[0].Criteria = []statsig.Criterion{
+		{Type: "metadata", Column: "country", Condition: "=", Values: []string{"US"}},
+	}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("dropped event filter criteria should mark the conversion lossy")
+	}
+}
+
+func TestConvert_NotLossy_AdvisoryUnitType(t *testing.T) {
+	// A non-standard unit type is an advisory warning, not a lossy conversion —
+	// the metric still converts faithfully.
+	sg := baseMetric("event_count_custom")
+	sg.UnitTypes = []string{"userID", "companyID"}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatal("expected an advisory warning about companyID")
+	}
+	if result.IsLossy() {
+		t.Errorf("advisory unit-type warning must not be lossy; LossyReasons = %v", result.LossyReasons)
+	}
+}
+
+func TestConvert_NotLossy_Clean(t *testing.T) {
+	result, err := Convert(baseMetric("event_count_custom"), Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsLossy() {
+		t.Errorf("clean conversion must not be lossy; LossyReasons = %v", result.LossyReasons)
+	}
+}
+
 // --- Helpers ---
 
 func assertHasWarning(t *testing.T, warnings []string, substr string) {

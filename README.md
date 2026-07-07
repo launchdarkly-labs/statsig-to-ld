@@ -85,14 +85,16 @@ Only after both env vars are confirmed set should you run any `statsig-to-ld <su
 
 ## Prerequisites
 
-- Go 1.24+ (to build from source) or a pre-built binary from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page
+- **Go 1.25 or higher** on macOS or Linux — this tool is built from source (see [Installation](#installation))
 - A Statsig **Console API Key** (`console-xxx`) — create at Statsig Console > Project Settings > Keys & Environments
 - A LaunchDarkly **API access token** (`api-xxx`) — create at **Account settings → Authorization → Access tokens** with a role that can write flags, metrics, and (optionally) environments in the target project. The Writer role works.
 - **For the SDK-rewrite skill only:** Claude Code (or another Claude interface), `node` 18+ to run the skill's helper scripts, and [`ldcli`](https://github.com/launchdarkly/ldcli) (the skill auto-installs it if missing).
 
 ## Installation
 
-### CLI (from source)
+### CLI (build from source)
+
+Install **Go 1.25 or higher** ([go.dev/dl](https://go.dev/dl/)) on macOS or Linux, then build the binary from the repo root:
 
 ```bash
 go build -o statsig-to-ld .
@@ -102,9 +104,15 @@ go build -ldflags "-X github.com/launchdarkly-labs/statsig-to-ld/cmd.version=1.0
   -o statsig-to-ld .
 ```
 
-### CLI (pre-built binary)
+This produces a `statsig-to-ld` binary in the repo root. Run it from there, passing the subcommand you want:
 
-Download from the [Releases](https://github.com/launchdarkly-labs/statsig-to-ld/releases) page.
+```bash
+./statsig-to-ld --help
+./statsig-to-ld metrics convert --help
+./statsig-to-ld analyze --ld-project my-project
+```
+
+> **macOS:** build from source (above) rather than downloading a binary. A locally built binary runs directly; a downloaded, unsigned binary is blocked by Gatekeeper (*"Apple could not verify… is free of malware"*). These builds are not code-signed/notarized, so building from source is the smoothest path.
 
 ### SDK-rewrite skill
 

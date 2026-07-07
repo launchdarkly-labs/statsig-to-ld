@@ -28,13 +28,13 @@ It does **not** modify application code (for that, use the [SDK-rewrite skill](s
 
 ## Tool Location and Setup
 
-The CLI source is in this repository. Build it before first use:
+The CLI source is in this repository. Requires **Go 1.25 or higher** (macOS or Linux). Build it before first use:
 
 ```bash
 go build -o statsig-to-ld .
 ```
 
-The binary is `./statsig-to-ld`. All commands below assume you are in the repository root.
+The binary is `./statsig-to-ld`. All commands below assume you are in the repository root. There are no pre-built binaries — build from source; a downloaded, unsigned binary would be blocked by macOS Gatekeeper.
 
 ## API Key Setup
 
@@ -210,6 +210,12 @@ Converts Statsig metric definitions into LaunchDarkly metrics. Supports Statsig 
 ./statsig-to-ld metrics convert --all --include-types mean,event_user \
   --ld-project my-project
 ./statsig-to-ld metrics convert --all --ld-project my-project
+```
+
+By default, metrics whose conversion would be **lossy** (a Statsig feature dropped or approximated — event filters, per-unit capping, log transform, daily participation rate, count-distinct, metadata aggregation, or extra metric events) are **skipped** and recorded as `skipped_lossy` in the report. Add `--convert-lossy` to convert them anyway and accept the imperfect result:
+
+```bash
+./statsig-to-ld metrics convert --all --ld-project my-project --convert-lossy
 ```
 
 ### Warehouse Native

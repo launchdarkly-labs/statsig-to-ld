@@ -122,6 +122,10 @@ statsig-to-ld metrics convert --all --ld-project my-project
 # Single metric
 statsig-to-ld metrics convert --metric purchase_revenue --ld-project my-project
 
+# Include lossy conversions too (skipped by default — see
+# "Statsig features not carried over" below)
+statsig-to-ld metrics convert --all --ld-project my-project --convert-lossy
+
 # Warehouse Native with a single data source
 statsig-to-ld metrics convert --all --ld-project my-project \
   --ld-data-source snowflake-ds
@@ -308,18 +312,26 @@ statsig-to-ld warehouse \
 
 ## Statsig features not carried over (metrics convert)
 
-| Feature | Warning | Impact |
-|---|---|---|
-| Event filter criteria | `DATA LOSS` | LD metric matches all events, not just the filtered subset. Manual filter setup required. |
-| Winsorization | Outlier clipping not applied | Experiment results may be more sensitive to outliers |
-| Per-unit capping | Daily cap not applied | No per-user-per-day value cap |
-| Log transform | Values not log-transformed | Distribution shape may differ |
-| Custom rollup windows | Measurement windows not applied | LD uses full experiment duration |
-| Daily participation rate | Uses standard binary conversion | Different aggregation method |
-| Count distinct | Counts all occurrences instead | Higher counts than Statsig |
-| Metadata aggregation | Aggregates `track()` metricValue | Ensure events send correct value |
+Some Statsig features can't be reproduced faithfully in LaunchDarkly. A metric whose conversion would **drop or approximate** one of these is treated as **lossy**, and by default it is **skipped** — recorded as `skipped_lossy` in the report — rather than silently converted into something subtly different. Pass `--convert-lossy` to convert them anyway and accept the imperfect result; the specific reasons then appear as warnings on each converted metric. (This mirrors `targeting import`'s `--accept-data-loss`.)
 
-Metrics with these features are still converted; the warning appears per-entry in the report.
+**Always lossy — skipped by default:**
+
+| Feature | Effect if converted |
+|---|---|
+| Event filter criteria | LD metric matches all events, not just the filtered subset (`DATA LOSS`) |
+| Per-unit capping | No per-user-per-day value cap |
+| Log transform | Values not log-transformed; distribution shape may differ |
+| Daily participation rate | Falls back to standard binary conversion (different aggregation) |
+| Count distinct (event-based metric) | LD counts all occurrences instead |
+| Metadata aggregation | LD aggregates the `track()` metricValue instead |
+| Multiple metric events | Only the first event is used; the rest are ignored |
+
+**Conditionally lossy — converted faithfully in the common case; lossy (and skipped) only when noted:**
+
+| Feature | Converts when… | Lossy (skipped) when… |
+|---|---|---|
+| Winsorization | numeric or count metric (mapped to LD `winsorLowerPercentile`/`winsorUpperPercentile`) | occurrence metric (non-numeric average), where LD can't apply it |
+| Custom rollup window | a warehouse data source is bound (mapped to LD window offsets via `--ld-data-source`) | no data source is bound (LD windows require a snowflake source) |
 
 ## EU / FedRAMP instances
 
@@ -339,7 +351,9 @@ These are explicit non-goals for v1.0; they're tracked for follow-up releases:
 
 ## Releasing a new version (contributors)
 
-Releases are driven by Git tags. Pushing a `v*` tag triggers CI to cross-compile binaries for macOS, Linux, and Windows and publish them to the [Releases page](https://github.com/launchdarkly-labs/statsig-to-ld/releases).
+Releases are driven by Git tags. Pushing a `v*` tag triggers CI to cross-compile binaries for macOS, Linux, and Windows.
+
+> **Users should build from source** (see the [README](../README.md#cli-build-from-source)), not download these binaries: they are not code-signed or notarized, so a downloaded build is blocked by macOS Gatekeeper (*"Apple could not verify… is free of malware"*). Building from source avoids that entirely.
 
 ```bash
 git tag v0.2.0

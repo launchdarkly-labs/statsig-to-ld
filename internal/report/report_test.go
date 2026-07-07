@@ -58,6 +58,25 @@ func TestFinalize_MixedStatuses(t *testing.T) {
 	}
 }
 
+func TestFinalize_SkippedLossy(t *testing.T) {
+	r := New()
+	r.AddSkippedLossy("dp", "event_user", "dp::event_user", []string{"daily participation rate not supported"})
+	r.Finalize(1)
+
+	if r.SkippedLossy != 1 {
+		t.Errorf("SkippedLossy = %d, want 1", r.SkippedLossy)
+	}
+	if len(r.Metrics) != 1 || r.Metrics[0].Status != StatusSkippedLossy {
+		t.Fatalf("expected one %s metric, got %+v", StatusSkippedLossy, r.Metrics)
+	}
+	if len(r.Metrics[0].Warnings) != 1 {
+		t.Errorf("expected the lossy reason recorded as a warning, got %v", r.Metrics[0].Warnings)
+	}
+	if r.Converted != 0 {
+		t.Errorf("Converted = %d, want 0 (a lossy-skipped metric is not converted)", r.Converted)
+	}
+}
+
 func TestFinalize_AllConverted(t *testing.T) {
 	r := New()
 	r.AddConverted("m1", "sum", "m1::sum", "m1-sum", "proj", nil)
