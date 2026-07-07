@@ -89,14 +89,21 @@ func IsIncompatible(err error) bool {
 func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	result := &Result{}
 
-	// ---------------------------------------------------------------
-	// Type mapping
-	// ---------------------------------------------------------------
-	if sg.Type == "ratio" {
+	// A warehouse-native metric must carry an aggregation; without one there is
+	// nothing to dispatch on. Fail explicitly (parsing gap or incomplete metric)
+	// rather than falling through to the generic "unknown type" error.
+	if sg.IsWarehouseNative() && !sg.HasWarehouseAggregation() {
+		return nil, fmt.Errorf("warehouse-native metric %q has no aggregation — likely a parsing gap or an incomplete Statsig metric", sg.Name)
+	}
+
+	// Dispatch on the effective aggregation: warehouse-native metrics carry it in
+	// warehouseNative.aggregation, cloud metrics in the top-level type.
+	effectiveType := sg.EffectiveType()
+	if effectiveType == "ratio" {
 		return convertRatio(sg, opts)
 	}
 
-	spec, err := termSpecFor(sg.Type)
+	spec, err := termSpecFor(effectiveType)
 	if err != nil {
 		return nil, err
 	}
@@ -104,15 +111,32 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	unitAgg := spec.unitAgg
 	analysisType := spec.analysisType
 	eventDefault := spec.eventDefault
+	unitAggField := spec.unitAggField
 
-	// ---------------------------------------------------------------
-	// Event key
-	// ---------------------------------------------------------------
+	if effectiveType == "daily_participation" {
+		result.addLossy("Statsig daily_participation (per-unit share of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
+	}
+
+	// Event key: cloud metrics use metricEvents[0].Name; warehouse-native metrics
+	// have none, so fall back to the source's valueColumn.
+	// TODO(verify): confirm the eventKey ⇔ warehouse source-column mapping against
+	// a live /metrics/list response.
 	var eventKey string
 	if len(sg.MetricEvents) > 0 {
 		eventKey = sg.MetricEvents[0].Name
+	} else if sg.IsWarehouseNative() && sg.WarehouseNative != nil && len(sg.WarehouseNative.MetricSources) > 0 {
+		src := sg.WarehouseNative.MetricSources[0]
+		eventKey = src.ValueColumn
+		if unitAggField == "" {
+			unitAggField = src.ValueColumn
+		}
+		result.Warnings = append(result.Warnings,
+			"warehouse-native event/column mapping is provisional (derived from metricSources[0].valueColumn) — verify against a live /metrics/list response")
 	}
 	if eventKey == "" {
+		if sg.IsWarehouseNative() {
+			return nil, fmt.Errorf("warehouse-native metric %q: cannot determine LD eventKey (no metricEvents and no metricSources[0].valueColumn) — needs live-response verification of the source column mapping", sg.Name)
+		}
 		return nil, fmt.Errorf("Statsig metric %q has no metricEvents — cannot determine LD eventKey", sg.Name)
 	}
 
@@ -280,18 +304,19 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	// Build the LD metric
 	// ---------------------------------------------------------------
 	result.LDMetric = launchdarkly.MetricPost{
-		Key:                 ldKey,
-		Kind:                "custom",
-		Name:                sg.Name,
-		Description:         desc,
-		EventKey:            eventKey,
-		IsNumeric:           &isNumeric,
-		SuccessCriteria:     successCriteria,
-		UnitAggregationType: unitAgg,
-		AnalysisType:        analysisType,
-		RandomizationUnits:  randUnits,
-		Unit:                unit,
-		Tags:                tags,
+		Key:                  ldKey,
+		Kind:                 "custom",
+		Name:                 sg.Name,
+		Description:          desc,
+		EventKey:             eventKey,
+		IsNumeric:            &isNumeric,
+		SuccessCriteria:      successCriteria,
+		UnitAggregationType:  unitAgg,
+		UnitAggregationField: unitAggField,
+		AnalysisType:         analysisType,
+		RandomizationUnits:   randUnits,
+		Unit:                 unit,
+		Tags:                 tags,
 
 		WinsorLowerPercentile: winsorLower,
 		WinsorUpperPercentile: winsorUpper,
@@ -299,16 +324,15 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 
 	result.LDMetric.EventDefault = eventDefault
 
-	// ---------------------------------------------------------------
-	// Warehouse Native data source resolution
-	// ---------------------------------------------------------------
-	if sg.MetricSourceName != "" {
-		dsKey := resolveDataSource(sg.MetricSourceName, opts)
+	// Data source: warehouse-native source, else top-level source name, else the
+	// global default.
+	if srcName := sg.NumeratorSourceName(); srcName != "" {
+		dsKey := resolveDataSource(srcName, opts)
 		if dsKey != "" {
 			result.LDMetric.DataSource = &launchdarkly.DataSource{Key: dsKey}
 		} else {
 			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("no LD data source specified for Statsig source %q — metric created without data source binding", sg.MetricSourceName))
+				fmt.Sprintf("no LD data source specified for Statsig source %q — metric created without data source binding", srcName))
 		}
 	} else if opts.LDDataSource != "" {
 		// No explicit source name on the metric, but a global default was provided
@@ -398,8 +422,19 @@ type termSpec struct {
 // components must themselves be simple metrics.
 func termSpecFor(typ string) (termSpec, error) {
 	switch typ {
-	case "event_count_custom", "event_count":
+	case "event_count_custom", "event_count", "count":
+		// "count" is the warehouse-native spelling of event_count_custom.
 		return termSpec{isNumeric: false, unitAgg: "sum", analysisType: "mean"}, nil
+	case "count_distinct":
+		// Warehouse-native count-distinct; the caller fills unitAggregationField
+		// from the source valueColumn.
+		return termSpec{isNumeric: false, unitAgg: "count_distinct", analysisType: "mean"}, nil
+	case "daily_participation":
+		// Statsig daily participation is a per-unit rate (active days / window
+		// days). LD has no exact equivalent; approximate as a binary metric and
+		// let the caller mark it lossy (skipped unless --convert-lossy), matching
+		// how the daily-participation rollup is handled.
+		return termSpec{isNumeric: false, unitAgg: "average", analysisType: "mean"}, nil
 	case "sum":
 		return termSpec{
 			isNumeric:    true,
@@ -464,6 +499,13 @@ func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []string, error) {
 	case "value", "sum":
 		spec, err := termSpecFor("sum")
 		return spec, warnings, err
+	case "mean":
+		spec, err := termSpecFor("mean")
+		return spec, warnings, err
+	case "daily_participation":
+		// Approximated as binary; convertRatio marks the whole ratio lossy.
+		spec, err := termSpecFor("daily_participation")
+		return spec, warnings, err
 	default:
 		return termSpec{}, nil, fmt.Errorf("unsupported ratio term aggregation %q on event %q", ev.Type, ev.Name)
 	}
@@ -477,21 +519,52 @@ func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []string, error) {
 // the Denominator subfield. Identity and shared fields (key, name, tags,
 // randomizationUnits, etc.) come from the ratio metric.
 func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
-	if len(sg.MetricEvents) != 2 {
-		return nil, fmt.Errorf("ratio metric %q expected 2 metric events (numerator + denominator), got %d", sg.Name, len(sg.MetricEvents))
-	}
 	result := &Result{}
 
-	// A cloud ratio's two events are positional, with no explicit
-	// numerator/denominator field: metricEvents[0] is the DENOMINATOR and
-	// metricEvents[1] is the NUMERATOR.
-	denEv := sg.MetricEvents[0]
-	numEv := sg.MetricEvents[1]
-	if numEv.Name == "" {
-		return nil, fmt.Errorf("ratio metric %q: its Statsig numerator event has no name, so there is no event key to map to the LaunchDarkly metric", sg.Name)
-	}
-	if denEv.Name == "" {
-		return nil, fmt.Errorf("ratio metric %q: its Statsig denominator event has no name, so there is no event name to map to the LaunchDarkly denominator", sg.Name)
+	// Extract both terms and their sources. Cloud ratios carry them inline as
+	// metricEvents[0]/[1] sharing one source; warehouse-native ratios carry
+	// per-term sources in warehouseNative (numerator in metricSources[0],
+	// denominator in denominatorMetricSourceName).
+	var numEv, denEv statsig.MetricEvent
+	var numSrcName, denSrcName string
+
+	if sg.IsWarehouseNative() {
+		wn := sg.WarehouseNative
+		if wn == nil {
+			return nil, fmt.Errorf("warehouse-native ratio %q has no warehouseNative config", sg.Name)
+		}
+		var numCol string
+		if len(wn.MetricSources) > 0 {
+			numCol = wn.MetricSources[0].ValueColumn
+		}
+		// Top-level Aggregation is "ratio"; each term aggregates separately.
+		numEv = statsig.MetricEvent{Name: numCol, Type: wn.NumeratorAggregation}
+		denEv = statsig.MetricEvent{Name: wn.DenominatorMetricSourceName, Type: wn.DenominatorAggregation}
+		numSrcName = sg.NumeratorSourceName()
+		denSrcName = wn.DenominatorMetricSourceName
+		// TODO(verify): per-term event-column mapping is provisional (we have
+		// source names + aggregations, not confirmed value columns). Verify
+		// against a live /metrics/list response.
+		result.Warnings = append(result.Warnings,
+			"warehouse-native ratio term/column mapping is provisional (source names + aggregations only) — verify LD eventName/eventKey and per-term columns against a live /metrics/list response")
+	} else {
+		if len(sg.MetricEvents) != 2 {
+			return nil, fmt.Errorf("ratio metric %q expected 2 metric events (numerator + denominator), got %d", sg.Name, len(sg.MetricEvents))
+		}
+		// Statsig stores a cloud ratio's two events positionally: metricEvents[0]
+		// is the DENOMINATOR and metricEvents[1] is the NUMERATOR (verified against
+		// the Statsig console).
+		denEv = sg.MetricEvents[0]
+		numEv = sg.MetricEvents[1]
+		if numEv.Name == "" {
+			return nil, fmt.Errorf("ratio metric %q: its Statsig numerator event has no name, so there is no event key to map to the LaunchDarkly metric", sg.Name)
+		}
+		if denEv.Name == "" {
+			return nil, fmt.Errorf("ratio metric %q: its Statsig denominator event has no name, so there is no event name to map to the LaunchDarkly denominator", sg.Name)
+		}
+		// Cloud ratios share one source across both terms.
+		numSrcName = sg.MetricSourceName
+		denSrcName = sg.MetricSourceName
 	}
 
 	numSpec, numWarn, err := ratioTermSpec(numEv)
@@ -507,6 +580,10 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	for _, w := range denWarn {
 		result.Warnings = append(result.Warnings, "denominator: "+w)
+	}
+
+	if numEv.Type == "daily_participation" || denEv.Type == "daily_participation" {
+		result.addLossy("Statsig daily_participation ratio term approximated as binary in LaunchDarkly — the per-day rate is lost")
 	}
 
 	// Event filter criteria are not carried over (parity with the simple path).
@@ -602,17 +679,24 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		},
 	}
 
-	// Data source resolution. LaunchDarkly ratio metrics are warehouse-native:
-	// the API rejects a ratio without a data source ("Ratio metrics require a
-	// warehouse data source", HTTP 400). Resolve from the Statsig source name
-	// (mapped) or the --ld-data-source default; if neither yields one, warn at
-	// convert time — surfaced even in dry-run — so the user supplies one rather
-	// than hitting the 400 at create time.
-	if dsKey := resolveDataSource(sg.MetricSourceName, opts); dsKey != "" {
-		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: dsKey}
+	// Per-term data source. LD ratios reject creation without one (HTTP 400).
+	// Numerator → top-level DataSource; denominator → its own DataSource, falling
+	// back to the numerator's (cloud ratios share one source). resolveDataSource
+	// applies --source-mapping then the --ld-data-source default.
+	numDS := resolveDataSource(numSrcName, opts)
+	if numDS != "" {
+		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: numDS}
 	} else {
 		result.Warnings = append(result.Warnings,
-			"LaunchDarkly ratio metrics require a warehouse data source — none resolved; pass --ld-data-source <key> (or --source-mapping) or LD will reject creation (HTTP 400)")
+			"LaunchDarkly ratio metrics require a warehouse data source for the numerator — none resolved; pass --ld-data-source <key> (or --source-mapping) or LD will reject creation (HTTP 400)")
+	}
+
+	denDS := resolveDataSource(denSrcName, opts)
+	if denDS == "" {
+		denDS = numDS
+	}
+	if denDS != "" && result.LDMetric.Denominator != nil {
+		result.LDMetric.Denominator.DataSource = &launchdarkly.DataSource{Key: denDS}
 	}
 
 	return result, nil
