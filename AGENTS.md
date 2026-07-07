@@ -196,13 +196,16 @@ The accepted `--accept-data-loss` values are: `segments`, `prerequisites`, `cust
 Converts Statsig metric definitions into LaunchDarkly metrics. Supports Statsig Cloud and Warehouse Native, with idempotent re-runs and parallel processing.
 
 ```bash
+# List available metric names/types, then exit (only the Statsig key needed)
+./statsig-to-ld metrics convert --list
+
 # Dry-run preview (only Statsig key needed)
 ./statsig-to-ld metrics convert --all --dry-run
 
 # Bulk convert
 ./statsig-to-ld metrics convert --all --ld-project my-project
 
-# Single metric
+# Single metric (get the exact name from --list first)
 ./statsig-to-ld metrics convert --metric purchase_revenue --ld-project my-project
 
 # Incremental migration (safest types first)
@@ -212,6 +215,8 @@ Converts Statsig metric definitions into LaunchDarkly metrics. Supports Statsig 
   --ld-project my-project
 ./statsig-to-ld metrics convert --all --ld-project my-project
 ```
+
+`--ld-project` also reads the `LD_PROJECT` environment variable, so you can `export LD_PROJECT=my-project` once instead of passing the flag on every run.
 
 By default, metrics whose conversion would be **lossy** (a Statsig feature dropped or approximated — event filters, per-unit capping, log transform, daily participation rate, count-distinct, metadata aggregation, or extra metric events) are **skipped** and recorded as `skipped_lossy` in the report. Add `--convert-lossy` to convert them anyway and accept the imperfect result:
 
@@ -380,7 +385,7 @@ All subcommands accept `--ld-url` and `--statsig-url` overrides. URLs must inclu
 Rate limiting. Lower `--concurrency` (default 10) to 5 or 3.
 
 ### "metric not found among N Statsig metrics"
-`--metric` requires an exact name match. Run `--all --dry-run` first to see available names in the report.
+`--metric` requires an exact name match. Run `metrics convert --list` to print the available metric names and types (Statsig key only), or `--all --dry-run` to preview full conversions in the report.
 
 ### All metrics or flags show "skipped_existing"
 Already created in a previous run — expected and safe. The tool is idempotent.
@@ -398,7 +403,7 @@ Either the LD token lacks `createEnvironment` permission (run `targeting import 
 
 Before running the tool, confirm:
 
-1. **API keys set?** User should set `STATSIG_CONSOLE_KEY` and `LD_API_KEY` env vars.
+1. **API keys set?** User should set `STATSIG_CONSOLE_KEY` and `LD_API_KEY` env vars (and optionally `LD_PROJECT`, so `--ld-project` isn't needed on every run).
 2. **LD project key?** The `--ld-project` value. Required for everything except a Statsig-only `analyze` or `metrics convert --dry-run`.
 3. **Migration scope?** All gates + dynamic configs + metrics, or a subset (via `--import-type`, `--include-tag`, `--include-types`, `--metric`)?
 4. **Lossy targeting?** Run `analyze` first; if there are lossy sources the user wants to import, decide which `--accept-data-loss` features they'll accept.

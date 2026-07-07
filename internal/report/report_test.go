@@ -175,6 +175,42 @@ func TestPrintSummaryTable(t *testing.T) {
 	}
 }
 
+func TestPrintSummaryTable_DryRun(t *testing.T) {
+	r := New()
+	r.DryRun = true
+	r.AddConverted("m1", "sum", "m1::sum", "m1-sum", "proj", nil)
+	r.Finalize(1)
+
+	var buf bytes.Buffer
+	r.PrintSummaryTable(&buf)
+	output := buf.String()
+
+	if !strings.Contains(output, "Would convert") {
+		t.Errorf("dry-run summary should say 'Would convert', not 'Converted'; got:\n%s", output)
+	}
+	if !strings.Contains(strings.ToLower(output), "dry run") {
+		t.Errorf("dry-run summary should be labeled as a dry run; got:\n%s", output)
+	}
+}
+
+func TestPrintSummaryTable_ListsFailures(t *testing.T) {
+	r := New()
+	r.AddConverted("ok1", "sum", "ok1::sum", "ok1-sum", "proj", nil)
+	r.AddFailed("boom", "sum", "boom::sum", "LD API returned HTTP 500")
+	r.Finalize(2)
+
+	var buf bytes.Buffer
+	r.PrintSummaryTable(&buf)
+	output := buf.String()
+
+	if !strings.Contains(output, "boom") {
+		t.Errorf("summary should name the failed metric 'boom'; got:\n%s", output)
+	}
+	if !strings.Contains(output, "LD API returned HTTP 500") {
+		t.Errorf("summary should show the failure reason; got:\n%s", output)
+	}
+}
+
 func TestNilWarningsVsEmpty(t *testing.T) {
 	r := New()
 	r.AddConverted("m1", "sum", "m1::sum", "m1-sum", "proj", nil)

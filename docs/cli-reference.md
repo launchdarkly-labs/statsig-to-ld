@@ -47,6 +47,8 @@ read -rs STATSIG_CONSOLE_KEY && export STATSIG_CONSOLE_KEY
 read -rs LD_API_KEY && export LD_API_KEY
 ```
 
+The LaunchDarkly project key (not a secret) can be set once via `LD_PROJECT` instead of passing `--ld-project` on every command: `export LD_PROJECT=my-project`.
+
 ## Subcommands
 
 ### analyze
@@ -113,6 +115,9 @@ See `statsig-to-ld targeting import --help` for the full flag list.
 Converts Statsig metric definitions into LaunchDarkly metrics. Supports both Statsig Cloud and Warehouse Native metrics, with idempotent re-runs, parallel processing, and structured migration reports.
 
 ```bash
+# List available metric names/types, then exit (only the Statsig key needed)
+statsig-to-ld metrics convert --list
+
 # Dry-run preview
 statsig-to-ld metrics convert --all --dry-run
 
