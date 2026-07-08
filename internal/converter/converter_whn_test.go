@@ -76,16 +76,25 @@ func TestConvert_WHN_ArrayFormStillWorks(t *testing.T) {
 	}
 }
 
-func TestConvert_WHN_CountDistinctFlatForm(t *testing.T) {
+func TestConvert_WHN_CountDistinctOnColumn_IsLossyBinary(t *testing.T) {
+	// LD supports count_distinct ONLY on ratio metrics (live-confirmed HTTP 400).
+	// A non-ratio count_distinct on a column becomes a binary metric (average),
+	// marked lossy because the per-value distinct count can't be expressed.
 	raw := `{
 	  "type":"user_warehouse","name":"Distinct SKUs","id":"Distinct SKUs::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"count_distinct","metricSourceName":"Orders","valueColumn":"sku_id"}}`
 	res := mustConvert(t, raw, Options{LDDataSource: "snowflake-ds"})
-	if res.LDMetric.UnitAggregationType != "count_distinct" {
-		t.Errorf("UnitAggregationType = %q, want count_distinct", res.LDMetric.UnitAggregationType)
+	if res.LDMetric.UnitAggregationType != "average" {
+		t.Errorf("UnitAggregationType = %q, want average (binary; LD rejects count_distinct on non-ratio metrics)", res.LDMetric.UnitAggregationType)
 	}
-	if res.LDMetric.UnitAggregationField != "sku_id" {
-		t.Errorf("UnitAggregationField = %q, want sku_id (the value column)", res.LDMetric.UnitAggregationField)
+	if res.LDMetric.UnitAggregationField != "" {
+		t.Errorf("UnitAggregationField = %q, want empty (binary metric)", res.LDMetric.UnitAggregationField)
+	}
+	if res.LDMetric.IsNumeric == nil || *res.LDMetric.IsNumeric {
+		t.Error("binary metric must be non-numeric")
+	}
+	if !res.IsLossy() {
+		t.Errorf("count_distinct on a column should be lossy (distinct-value count lost); LossyReasons=%v", res.LossyReasons)
 	}
 }
 

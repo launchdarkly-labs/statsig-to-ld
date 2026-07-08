@@ -148,6 +148,21 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("Statsig metric %q has no metricEvents — cannot determine LD eventKey", sg.Name)
 	}
 
+	// LaunchDarkly supports unitAggregationType=count_distinct ONLY on ratio
+	// metrics (live-confirmed: HTTP 400 "count_distinct is only supported for
+	// ratio metrics"). A non-ratio count_distinct maps to a binary metric —
+	// faithful when it counts distinct units (no column), lossy when it counts
+	// distinct values of a column (that per-value count can't be expressed).
+	if unitAgg == "count_distinct" {
+		hadColumn := unitAggField != ""
+		isNumeric = false
+		unitAgg = "average"
+		unitAggField = ""
+		if hadColumn {
+			result.addLossy("LaunchDarkly supports count_distinct only on ratio metrics; this non-ratio metric is approximated as a binary metric, losing the distinct-value count")
+		}
+	}
+
 	// Warn if multiple metric events — only the first is used (lossy: the
 	// additional events are dropped).
 	if len(sg.MetricEvents) > 1 {
