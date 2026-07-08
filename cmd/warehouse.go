@@ -488,7 +488,11 @@ func (e *migrationEngine) checkExperimentationExists(whType string) bool {
 		for _, cfg := range e.ld.ListIntegrationConfigs(e.ctx, integrationKey) {
 			cv := jsonutil.GetMap(cfg, "configValues")
 			env := jsonutil.GetMap(cv, "selectedEnv")
-			if jsonutil.GetStr(env, "environmentKey") == e.environmentKey {
+			// Match project AND environment: ListIntegrationConfigs is
+			// account-wide, so environmentKey alone would false-match another
+			// project's same-named env. Mirrors getActiveIntegration.
+			if jsonutil.GetStr(env, "projectKey") == e.projectKey &&
+				jsonutil.GetStr(env, "environmentKey") == e.environmentKey {
 				output.Ok(fmt.Sprintf("Experimentation integration exists for env '%s' (%s), skipping", e.environmentKey, integrationKey))
 				return true
 			}
