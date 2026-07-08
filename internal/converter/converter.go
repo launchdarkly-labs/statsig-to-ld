@@ -127,7 +127,9 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	} else if sg.IsWarehouseNative() {
 		if col := sg.NumeratorValueColumn(); col != "" {
 			eventKey = col
-			if unitAggField == "" {
+			// count_distinct needs the column as unitAggregationField; sum / mean /
+			// count convey the value through eventKey only and must not set it.
+			if unitAgg == "count_distinct" && unitAggField == "" {
 				unitAggField = col
 			}
 		} else if src := sg.NumeratorSourceName(); src != "" {

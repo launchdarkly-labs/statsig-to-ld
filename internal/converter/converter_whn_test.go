@@ -45,6 +45,9 @@ func TestConvert_WHN_SumFlatForm(t *testing.T) {
 	if res.LDMetric.UnitAggregationType != "sum" {
 		t.Errorf("UnitAggregationType = %q, want sum", res.LDMetric.UnitAggregationType)
 	}
+	if res.LDMetric.UnitAggregationField != "" {
+		t.Errorf("UnitAggregationField = %q, want empty — it's a count_distinct-only field, not for sum", res.LDMetric.UnitAggregationField)
+	}
 	if res.LDMetric.DataSource == nil || res.LDMetric.DataSource.Key != "snowflake-ds" {
 		t.Errorf("DataSource = %+v, want snowflake-ds", res.LDMetric.DataSource)
 	}
