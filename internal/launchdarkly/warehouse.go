@@ -281,25 +281,42 @@ func (c *Client) CheckAPIKeyAccess(ctx context.Context) (bool, string) {
 	}
 }
 
-// CheckAPIKeyRole returns the role and name of the API key.
+// CheckAPIKeyRole returns the role and name of the API key in use. It resolves
+// the caller's own token via /caller-identity (which has no role field), then
+// looks up that token's role in the account-wide token list by id.
 func (c *Client) CheckAPIKeyRole(ctx context.Context) (string, string) {
+	var callerName, callerTokenID string
+	if status, body, _ := c.requestJSON(ctx, "GET", "/api/v2/caller-identity", nil); status == 200 && body != nil {
+		callerName = j.GetStr(body, "tokenName")
+		callerTokenID = j.GetStr(body, "tokenId")
+	}
+
 	status, body, _ := c.requestJSON(ctx, "GET", "/api/v2/tokens", nil)
 	if status == 200 && body != nil {
-		items := j.ExtractItemsList(body)
-		for _, token := range items {
-			role := j.GetStr(token, "role")
-			name := j.GetStr(token, "name")
-			if role != "" {
+		for _, token := range j.ExtractItemsList(body) {
+			id := j.GetStr(token, "_id")
+			if id == "" {
+				id = j.GetStr(token, "id")
+			}
+			// When the caller's token id is known, only consider that token.
+			if callerTokenID != "" && id != callerTokenID {
+				continue
+			}
+			name := callerName
+			if name == "" {
+				name = j.GetStr(token, "name")
+			}
+			if role := j.GetStr(token, "role"); role != "" {
 				return role, name
 			}
 			if j.GetSlice(token, "inlineRole") != nil || j.GetSlice(token, "customRoleIds") != nil {
 				return "custom", name
 			}
+			if callerTokenID != "" {
+				// Found the caller's token but no explicit role field.
+				return "", name
+			}
 		}
 	}
-	status, body, _ = c.requestJSON(ctx, "GET", "/api/v2/caller-identity", nil)
-	if status == 200 && body != nil {
-		return j.GetStr(body, "role"), j.GetStr(body, "name")
-	}
-	return "", ""
+	return "", callerName
 }
