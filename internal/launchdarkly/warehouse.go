@@ -286,13 +286,13 @@ func (c *Client) CheckAPIKeyAccess(ctx context.Context) (bool, string) {
 // looks up that token's role in the account-wide token list by id.
 func (c *Client) CheckAPIKeyRole(ctx context.Context) (string, string) {
 	var callerName, callerTokenID string
-	if status, body, _ := c.requestJSON(ctx, "GET", "/api/v2/caller-identity", nil); status == 200 && body != nil {
+	if status, body, err := c.requestJSON(ctx, "GET", "/api/v2/caller-identity", nil); err == nil && status == 200 && body != nil {
 		callerName = j.GetStr(body, "tokenName")
 		callerTokenID = j.GetStr(body, "tokenId")
 	}
 
-	status, body, _ := c.requestJSON(ctx, "GET", "/api/v2/tokens", nil)
-	if status == 200 && body != nil {
+	status, body, err := c.requestJSON(ctx, "GET", "/api/v2/tokens", nil)
+	if err == nil && status == 200 && body != nil {
 		for _, token := range j.ExtractItemsList(body) {
 			id := j.GetStr(token, "_id")
 			if id == "" {
