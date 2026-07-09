@@ -59,30 +59,54 @@ type Criterion struct {
 
 // WarehouseNative holds Statsig warehouse-native metric config. For these
 // metrics the top-level Metric.Type is "user_warehouse"/"hybrid_warehouse" and
-// the real shape lives in Aggregation. Field names follow the Statsig
-// api-reference (GET /console/v1/metrics/{id}), unconfirmed against a live
-// /metrics/list response.
+// the real shape lives in Aggregation. Field names/shapes are confirmed against
+// Statsig's own public repos: real metric dumps in statsig-io/semantic_layer and
+// the marshaling contract in statsig-io/terraform-provider-statsig
+// (WarehouseNativeAPIModel). Two source forms occur in the wild — a flat
+// single-source form (MetricSourceName/ValueColumn/Criteria directly here) and a
+// MetricSources array — so the converter reads both (see NumeratorValueColumn /
+// NumeratorCriteria).
 type WarehouseNative struct {
 	// Aggregation is the real shape: count | sum | mean | count_distinct |
 	// percentile | daily_participation | ratio | funnel.
 	Aggregation string `json:"aggregation"`
 
 	MetricSources []MetricSource `json:"metricSources"`
-	// MetricSourceName is the deprecated single-source form; use MetricSources.
-	MetricSourceName string `json:"metricSourceName"`
 
-	// NumeratorAggregation is the numerator term's aggregation (top-level
-	// Aggregation is "ratio"). Unconfirmed in the Console API response.
-	NumeratorAggregation string `json:"numeratorAggregation"`
+	// Flat single-source form: source name, value column, and filter criteria
+	// live directly on warehouseNative (Statsig's Terraform model and the
+	// semantic_layer dumps use this form).
+	MetricSourceName string      `json:"metricSourceName"`
+	ValueColumn      string      `json:"valueColumn"`
+	Criteria         []Criterion `json:"criteria"`
 
-	DenominatorMetricSourceName string `json:"denominatorMetricSourceName"`
-	DenominatorAggregation      string `json:"denominatorAggregation"`
+	// Windowing lives inside warehouseNative for WHN metrics (top-level on the
+	// metric for cloud metrics).
+	RollupTimeWindow  string   `json:"rollupTimeWindow"`
+	CustomRollUpStart *float64 `json:"customRollUpStart"`
+	CustomRollUpEnd   *float64 `json:"customRollUpEnd"`
+
+	// Ratio terms (top-level Aggregation is "ratio"): the numerator uses the
+	// fields above; the denominator has its own aggregation, column, and filters.
+	NumeratorAggregation        string      `json:"numeratorAggregation"`
+	DenominatorMetricSourceName string      `json:"denominatorMetricSourceName"`
+	DenominatorAggregation      string      `json:"denominatorAggregation"`
+	DenominatorValueColumn      string      `json:"denominatorValueColumn"`
+	DenominatorCriteria         []Criterion `json:"denominatorCriteria"`
 
 	WinsorizationHigh *float64 `json:"winsorizationHigh"`
 	WinsorizationLow  *float64 `json:"winsorizationLow"`
 	Cap               *float64 `json:"cap"`
 	Percentile        *float64 `json:"percentile"`
 	UseLogTransform   *bool    `json:"useLogTransform"`
+	ValueThreshold    *float64 `json:"valueThreshold"`
+
+	// Advanced analysis features with no direct LaunchDarkly equivalent; the
+	// converter flags them but they don't change the core metric definition.
+	CupedAttributionWindow *float64 `json:"cupedAttributionWindow"`
+	MetricDimensionColumns []string `json:"metricDimensionColumns"`
+	WaitForCohortWindow    *bool    `json:"waitForCohortWindow"`
+	MetricBakeDays         *float64 `json:"metricBakeDays"`
 }
 
 // MetricSource is a numerator-side warehouse source. The criteria sub-shape is
@@ -128,6 +152,32 @@ func (m *Metric) NumeratorSourceName() string {
 		}
 	}
 	return m.MetricSourceName
+}
+
+// NumeratorValueColumn returns the numerator's warehouse value column, reading
+// either the MetricSources array or the flat warehouseNative.valueColumn form.
+func (m *Metric) NumeratorValueColumn() string {
+	if m.WarehouseNative == nil {
+		return ""
+	}
+	wn := m.WarehouseNative
+	if len(wn.MetricSources) > 0 && wn.MetricSources[0].ValueColumn != "" {
+		return wn.MetricSources[0].ValueColumn
+	}
+	return wn.ValueColumn
+}
+
+// NumeratorCriteria returns the numerator's filter criteria, reading either the
+// MetricSources array or the flat warehouseNative.criteria form.
+func (m *Metric) NumeratorCriteria() []Criterion {
+	if m.WarehouseNative == nil {
+		return nil
+	}
+	wn := m.WarehouseNative
+	if len(wn.MetricSources) > 0 && len(wn.MetricSources[0].Criteria) > 0 {
+		return wn.MetricSources[0].Criteria
+	}
+	return wn.Criteria
 }
 
 // ComponentMetric is a reference to another metric used in composite metrics.

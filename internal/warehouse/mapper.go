@@ -87,13 +87,15 @@ func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey s
 		body["description"] = desc
 	}
 
-	if sourceType == "table" && tableName != "" {
-		body["tableName"] = tableName
-	} else if sqlQuery != "" {
+	// Emit a SQL query, not a bare tableName: LD's metric-data-source editor only
+	// models query-backed sources, so a tableName-only source can't be
+	// edited/saved in the console. SELECT * FROM <table> is equivalent.
+	switch {
+	case sqlQuery != "":
 		body["sqlQuery"] = sqlQuery
-	} else if tableName != "" {
-		body["tableName"] = tableName
-	} else {
+	case tableName != "":
+		body["sqlQuery"] = "SELECT * FROM " + tableName
+	default:
 		body["tableName"] = name
 	}
 
