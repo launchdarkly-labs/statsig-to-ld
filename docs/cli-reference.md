@@ -230,7 +230,7 @@ This boundary is deliberate: the warehouse subcommand handles the parts that are
 
 ### Already have LD data sources? Skip `warehouse`
 
-The **only** reason to run `warehouse` is to *create* LaunchDarkly metric data sources. If they already exist — set up in the LD UI, managed via Terraform, or provisioned for you as part of your account (this is the **Figma** case) — **don't run `warehouse` at all.** Go straight to `metrics convert` and tell it which data source each warehouse-native metric should bind to, in one of two ways:
+The **only** reason to run `warehouse` is to *create* LaunchDarkly metric data sources. If they already exist — set up in the LD UI, managed via Terraform, or provisioned for you as part of your account — **don't run `warehouse` at all.** Go straight to `metrics convert` and tell it which data source each warehouse-native metric should bind to, in one of two ways:
 
 **One data source for everything** — pass `--ld-data-source <ld-data-source-key>`; every warehouse-native metric binds to that single source:
 
