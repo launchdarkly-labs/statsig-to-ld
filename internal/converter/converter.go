@@ -117,27 +117,50 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		result.addLossy("Statsig daily_participation (per-unit share of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
 	}
 
-	// Event key: cloud metrics use metricEvents[0].Name; warehouse-native metrics
-	// have none, so fall back to the source's valueColumn.
-	// TODO(verify): confirm the eventKey ⇔ warehouse source-column mapping against
-	// a live /metrics/list response.
+	// Event key resolution:
+	//   1. metricEvents[0].Name — cloud metrics with explicit events.
+	//   2. warehouse-native value column — the flat warehouseNative.valueColumn or
+	//      metricSources[0].valueColumn (both forms occur; see NumeratorValueColumn).
 	var eventKey string
 	if len(sg.MetricEvents) > 0 {
 		eventKey = sg.MetricEvents[0].Name
-	} else if sg.IsWarehouseNative() && sg.WarehouseNative != nil && len(sg.WarehouseNative.MetricSources) > 0 {
-		src := sg.WarehouseNative.MetricSources[0]
-		eventKey = src.ValueColumn
-		if unitAggField == "" {
-			unitAggField = src.ValueColumn
+	} else if sg.IsWarehouseNative() {
+		if col := sg.NumeratorValueColumn(); col != "" {
+			eventKey = col
+			// count_distinct needs the column as unitAggregationField; sum / mean /
+			// count convey the value through eventKey only and must not set it.
+			if unitAgg == "count_distinct" && unitAggField == "" {
+				unitAggField = col
+			}
+		} else if src := sg.NumeratorSourceName(); src != "" {
+			// count / daily_participation / user aggregations count rows or units
+			// and carry no value column. LD still needs an event key, so use the
+			// source name as a provisional stand-in pending live LD verification.
+			eventKey = src
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("warehouse-native %q metric has no value column (it counts rows/units); LD eventKey set to the source name %q provisionally — verify against a created LD metric", effectiveType, src))
 		}
-		result.Warnings = append(result.Warnings,
-			"warehouse-native event/column mapping is provisional (derived from metricSources[0].valueColumn) — verify against a live /metrics/list response")
 	}
 	if eventKey == "" {
 		if sg.IsWarehouseNative() {
-			return nil, fmt.Errorf("warehouse-native metric %q: cannot determine LD eventKey (no metricEvents and no metricSources[0].valueColumn) — needs live-response verification of the source column mapping", sg.Name)
+			return nil, fmt.Errorf("warehouse-native metric %q: cannot determine LD eventKey — no valueColumn or metric source on warehouseNative", sg.Name)
 		}
 		return nil, fmt.Errorf("Statsig metric %q has no metricEvents — cannot determine LD eventKey", sg.Name)
+	}
+
+	// LaunchDarkly supports unitAggregationType=count_distinct ONLY on ratio
+	// metrics (live-confirmed: HTTP 400 "count_distinct is only supported for
+	// ratio metrics"). A non-ratio count_distinct maps to a binary metric —
+	// faithful when it counts distinct units (no column), lossy when it counts
+	// distinct values of a column (that per-value count can't be expressed).
+	if unitAgg == "count_distinct" {
+		hadColumn := unitAggField != ""
+		isNumeric = false
+		unitAgg = "average"
+		unitAggField = ""
+		if hadColumn {
+			result.addLossy("LaunchDarkly supports count_distinct only on ratio metrics; this non-ratio metric is approximated as a binary metric, losing the distinct-value count")
+		}
 	}
 
 	// Warn if multiple metric events — only the first is used (lossy: the
@@ -177,6 +200,19 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 			len(criteria), eventKey, strings.Join(details, "; "))
 	}
 
+	// Warehouse-native filters live on warehouseNative.criteria (or per source),
+	// not metricEvents; drop them with the same DATA LOSS warning.
+	if sg.IsWarehouseNative() {
+		if crit := sg.NumeratorCriteria(); len(crit) > 0 {
+			var details []string
+			for _, c := range crit {
+				details = append(details, fmt.Sprintf("%s %s %s %v", c.Column, c.Type, c.Condition, c.Values))
+			}
+			result.addLossy("DATA LOSS: %d warehouse-native filter criteria will NOT be applied — the LD metric will match all rows, not just the filtered subset. Dropped filters: [%s]. Manual filter setup required in LD.",
+				len(crit), strings.Join(details, "; "))
+		}
+	}
+
 	// Warehouse Native advanced features
 	winsorLower, winsorUpper := winsorPercentiles(result, sg.WarehouseNative, isNumeric, unitAgg)
 	warnUnsupportedWarehouseFeatures(result, sg.WarehouseNative)
@@ -198,33 +234,10 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 
 	// ---------------------------------------------------------------
-	// Randomization units: Statsig "userID" → LD "user"
-	//
-	// Mapping lookup is case-insensitive on the key (Statsig side) so users
-	// don't have to know whether Statsig returns "stableID" or "stableid".
-	// Values are preserved as-is — LD context kinds are case-sensitive.
+	// Randomization units: Statsig "userID" → LD "user" (see randomizationUnits)
 	// ---------------------------------------------------------------
-	lowerMapping := lowerKeyMapping(opts.UnitTypeMapping)
-	var randUnits []string
-	for _, u := range sg.UnitTypes {
-		// Exact match wins, then case-insensitive
-		if mapped, ok := opts.UnitTypeMapping[u]; ok {
-			randUnits = append(randUnits, mapped)
-			continue
-		}
-		if mapped, ok := lowerMapping[strings.ToLower(u)]; ok {
-			randUnits = append(randUnits, mapped)
-			continue
-		}
-		switch strings.ToLower(u) {
-		case "userid":
-			randUnits = append(randUnits, "user")
-		default:
-			randUnits = append(randUnits, strings.ToLower(u))
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("Statsig unitType %q may not match an LD context kind — verify in LD or use --unit-type-mapping", u))
-		}
-	}
+	randUnits, ruWarnings := randomizationUnits(sg, opts)
+	result.Warnings = append(result.Warnings, ruWarnings...)
 
 	// ---------------------------------------------------------------
 	// LD metric key: derived from Statsig ID (name::type) for idempotency
@@ -338,6 +351,39 @@ func lowerKeyMapping(m map[string]string) map[string]string {
 	return out
 }
 
+// randomizationUnits maps Statsig unit types to LD randomization units (context
+// kinds): "userID" → "user"; others pass through lowercased with an advisory
+// warning unless remapped via --unit-type-mapping. Warehouse-native metrics
+// often carry no unitTypes (the unit comes from the source's idTypeMapping), so
+// an empty result defaults to "user".
+func randomizationUnits(sg *statsig.Metric, opts Options) (units, warnings []string) {
+	lowerMapping := lowerKeyMapping(opts.UnitTypeMapping)
+	for _, u := range sg.UnitTypes {
+		if mapped, ok := opts.UnitTypeMapping[u]; ok {
+			units = append(units, mapped)
+			continue
+		}
+		if mapped, ok := lowerMapping[strings.ToLower(u)]; ok {
+			units = append(units, mapped)
+			continue
+		}
+		switch strings.ToLower(u) {
+		case "userid":
+			units = append(units, "user")
+		default:
+			units = append(units, strings.ToLower(u))
+			warnings = append(warnings,
+				fmt.Sprintf("Statsig unitType %q may not match an LD context kind — verify in LD or use --unit-type-mapping", u))
+		}
+	}
+	if len(units) == 0 {
+		units = []string{"user"}
+		warnings = append(warnings,
+			"no Statsig unitTypes on the metric (common for warehouse-native, where the unit comes from the source's idTypeMapping) — defaulted the LD randomization unit to \"user\"; use --unit-type-mapping if that's wrong")
+	}
+	return units, warnings
+}
+
 // resolveDataSource determines the LD data source key for a Statsig metric
 // source name using the two-tier resolution: source mapping → global default.
 func resolveDataSource(sourceName string, opts Options) string {
@@ -391,8 +437,12 @@ func winsorPercentiles(result *Result, wn *statsig.WarehouseNative, isNumeric bo
 	return lower, upper
 }
 
-// warnUnsupportedWarehouseFeatures records lossy warnings for Statsig warehouse-
-// native features LaunchDarkly cannot represent (capping, log transform).
+// warnUnsupportedWarehouseFeatures flags Statsig warehouse-native features that
+// LaunchDarkly can't represent. Value-affecting features (capping, log transform,
+// value threshold) are lossy — they change the numbers, so the metric is skipped
+// by default. Analysis-only features (CUPED, dimension columns, cohort wait,
+// bake days) are advisory: they aren't replicated, but the core metric
+// definition (aggregation/column/filter) still converts faithfully.
 func warnUnsupportedWarehouseFeatures(result *Result, wn *statsig.WarehouseNative) {
 	if wn == nil {
 		return
@@ -403,24 +453,60 @@ func warnUnsupportedWarehouseFeatures(result *Result, wn *statsig.WarehouseNativ
 	if wn.UseLogTransform != nil && *wn.UseLogTransform {
 		result.addLossy("log transform is not supported in LaunchDarkly — metric values will not be log-transformed")
 	}
+	if wn.ValueThreshold != nil {
+		result.addLossy("value threshold (%v) is not supported in LaunchDarkly — the metric will not apply it", *wn.ValueThreshold)
+	}
+
+	var dropped []string
+	if wn.CupedAttributionWindow != nil {
+		dropped = append(dropped, "CUPED attribution window")
+	}
+	if len(wn.MetricDimensionColumns) > 0 {
+		dropped = append(dropped, "metric dimension columns")
+	}
+	if wn.WaitForCohortWindow != nil && *wn.WaitForCohortWindow {
+		dropped = append(dropped, "wait-for-cohort window")
+	}
+	if wn.MetricBakeDays != nil {
+		dropped = append(dropped, "metric bake days")
+	}
+	if len(dropped) > 0 {
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("Statsig warehouse-native analysis features not carried over to LaunchDarkly (metric definition is unaffected): %s", strings.Join(dropped, ", ")))
+	}
 }
 
 // applyCustomWindow maps a Statsig custom rollup window (days) to LD window
-// offsets (ms). LD only accepts window offsets on warehouse-backed metrics, so
-// it applies them only when a data source is bound, recording a lossy warning
+// offsets (ms). Cloud metrics carry the window at the metric top level;
+// warehouse-native metrics carry it inside warehouseNative — read whichever
+// applies. LD only accepts window offsets on warehouse-backed metrics, so it
+// applies them only when a data source is bound, recording a lossy warning
 // otherwise.
 func applyCustomWindow(result *Result, sg *statsig.Metric) {
-	if sg.RollupTimeWindow != "custom" || sg.CustomRollUpStart == nil || sg.CustomRollUpEnd == nil {
+	rollup, start, end := sg.RollupTimeWindow, sg.CustomRollUpStart, sg.CustomRollUpEnd
+	if sg.IsWarehouseNative() && sg.WarehouseNative != nil {
+		wn := sg.WarehouseNative
+		if wn.RollupTimeWindow != "" {
+			rollup = wn.RollupTimeWindow
+		}
+		if wn.CustomRollUpStart != nil {
+			start = wn.CustomRollUpStart
+		}
+		if wn.CustomRollUpEnd != nil {
+			end = wn.CustomRollUpEnd
+		}
+	}
+	if rollup != "custom" || start == nil || end == nil {
 		return
 	}
 	if result.LDMetric.DataSource != nil {
-		start := int64(*sg.CustomRollUpStart * millisPerDay)
-		end := int64(*sg.CustomRollUpEnd * millisPerDay)
-		result.LDMetric.WindowStartOffset = &start
-		result.LDMetric.WindowEndOffset = &end
+		s := int64(*start * millisPerDay)
+		e := int64(*end * millisPerDay)
+		result.LDMetric.WindowStartOffset = &s
+		result.LDMetric.WindowEndOffset = &e
 	} else {
 		result.addLossy("custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
-			*sg.CustomRollUpStart, *sg.CustomRollUpEnd)
+			*start, *end)
 	}
 }
 
@@ -552,20 +638,13 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		if wn == nil {
 			return nil, fmt.Errorf("warehouse-native ratio %q has no warehouseNative config", sg.Name)
 		}
-		var numCol string
-		if len(wn.MetricSources) > 0 {
-			numCol = wn.MetricSources[0].ValueColumn
-		}
-		// Top-level Aggregation is "ratio"; each term aggregates separately.
-		numEv = statsig.MetricEvent{Name: numCol, Type: wn.NumeratorAggregation}
-		denEv = statsig.MetricEvent{Name: wn.DenominatorMetricSourceName, Type: wn.DenominatorAggregation}
+		// Top-level Aggregation is "ratio"; each term has its own column,
+		// aggregation, and filters. The numerator uses the shared warehouseNative
+		// value column/criteria; the denominator has denominator* fields.
+		numEv = statsig.MetricEvent{Name: sg.NumeratorValueColumn(), Type: wn.NumeratorAggregation, Criteria: sg.NumeratorCriteria()}
+		denEv = statsig.MetricEvent{Name: wn.DenominatorValueColumn, Type: wn.DenominatorAggregation, Criteria: wn.DenominatorCriteria}
 		numSrcName = sg.NumeratorSourceName()
 		denSrcName = wn.DenominatorMetricSourceName
-		// TODO(verify): per-term event-column mapping is provisional (we have
-		// source names + aggregations, not confirmed value columns). Verify
-		// against a live /metrics/list response.
-		result.Warnings = append(result.Warnings,
-			"warehouse-native ratio term/column mapping is provisional (source names + aggregations only) — verify LD eventName/eventKey and per-term columns against a live /metrics/list response")
 	} else {
 		if len(sg.MetricEvents) != 2 {
 			return nil, fmt.Errorf("ratio metric %q expected 2 metric events (numerator + denominator), got %d", sg.Name, len(sg.MetricEvents))
@@ -630,26 +709,8 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		successCriteria = "LowerThanBaseline"
 	}
 
-	lowerMapping := lowerKeyMapping(opts.UnitTypeMapping)
-	var randUnits []string
-	for _, u := range sg.UnitTypes {
-		if mapped, ok := opts.UnitTypeMapping[u]; ok {
-			randUnits = append(randUnits, mapped)
-			continue
-		}
-		if mapped, ok := lowerMapping[strings.ToLower(u)]; ok {
-			randUnits = append(randUnits, mapped)
-			continue
-		}
-		switch strings.ToLower(u) {
-		case "userid":
-			randUnits = append(randUnits, "user")
-		default:
-			randUnits = append(randUnits, strings.ToLower(u))
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("Statsig unitType %q may not match an LD context kind — verify in LD or use --unit-type-mapping", u))
-		}
-	}
+	randUnits, ruWarnings := randomizationUnits(sg, opts)
+	result.Warnings = append(result.Warnings, ruWarnings...)
 
 	desc := sg.Description
 	if desc == "" {
