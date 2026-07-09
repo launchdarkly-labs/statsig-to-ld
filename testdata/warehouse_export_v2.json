@@ -4,7 +4,7 @@
     "accountName": "ACME_ANALYTICS",
     "snowflakeHostAddress": "XY12345-ACME_ANALYTICS.snowflakecomputing.com",
     "serviceUserName": "STATSIG_SERVICE_USER",
-    "stagingDatabaseName": "LD_EXPORT",
+    "stagingDatabaseName": "EXPORT_WH",
     "stagingSchemaName": "EXPORT_DEMO__PRODUCTION",
     "computeWarehouse": "COMPUTE_WH"
   },
@@ -12,7 +12,7 @@
     {
       "name": "product_activity_events",
       "sourceType": "table",
-      "tableName": "LD_EXPORT.EXPORT_DEMO__PRODUCTION.STAGING_METRIC_EVENTS",
+      "tableName": "EXPORT_WH.EXPORT_DEMO__PRODUCTION.STAGING_METRIC_EVENTS",
       "description": "Product activity events from user interactions",
       "tags": ["production", "activity"],
       "timestampColumn": "received_time",
@@ -36,7 +36,7 @@
     {
       "name": "transaction_events",
       "sourceType": "query",
-      "sql": "SELECT context_key, kind AS event_name, received_time AS timestamp, event_value FROM LD_EXPORT.EXPORT_DEMO__PRODUCTION.STAGING_METRIC_EVENTS WHERE received_time >= DATEADD(day, -90, CURRENT_DATE())",
+      "sql": "SELECT context_key, kind AS event_name, received_time AS timestamp, event_value FROM EXPORT_WH.EXPORT_DEMO__PRODUCTION.STAGING_METRIC_EVENTS WHERE received_time >= DATEADD(day, -90, CURRENT_DATE())",
       "description": "Transaction and billing events",
       "tags": ["production", "billing"],
       "timestampColumn": "received_time",
