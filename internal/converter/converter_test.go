@@ -151,6 +151,53 @@ func TestConvert_EventUserWindow(t *testing.T) {
 	}
 }
 
+func TestConvert_EventCount_UsesLineageEvent(t *testing.T) {
+	// Built-in event_count metrics carry no metricEvents; the counted event is in
+	// lineage.events. The converter should use it and produce a normal count
+	// metric, not fail with "no metricEvents".
+	sg := &statsig.Metric{
+		ID:             "purchase::event_count",
+		Name:           "purchase",
+		Type:           "event_count",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		MetricEvents:   nil, // event_count has none
+		Lineage:        statsig.Lineage{Events: []string{"purchase"}},
+	}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("event_count should convert via lineage.events, got error: %v", err)
+	}
+	if result.LDMetric.EventKey != "purchase" {
+		t.Errorf("EventKey = %q, want \"purchase\" (from lineage.events[0])", result.LDMetric.EventKey)
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Error("event_count should map to a non-numeric count metric")
+	}
+	if result.LDMetric.UnitAggregationType != "sum" {
+		t.Errorf("UnitAggregationType = %q, want \"sum\"", result.LDMetric.UnitAggregationType)
+	}
+}
+
+func TestConvert_NoEventsNoLineage_Errors(t *testing.T) {
+	// With neither metricEvents nor lineage.events, there's no event key to map —
+	// still a hard error (not a known-incompatible skip).
+	sg := &statsig.Metric{
+		ID:             "broken::event_count",
+		Name:           "broken",
+		Type:           "event_count",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+	}
+	_, err := Convert(sg, Options{})
+	if err == nil {
+		t.Fatal("expected an error when there are no metric events and no lineage events")
+	}
+	if IsIncompatible(err) {
+		t.Error("missing events should be a hard error, not an IncompatibleError skip")
+	}
+}
+
 // --- Incompatible types ---
 
 func TestConvert_IncompatibleTypes(t *testing.T) {

@@ -28,6 +28,17 @@ type Metric struct {
 	FunnelCountDistinct    string            `json:"funnelCountDistinct"`
 
 	MetricSourceName string `json:"metricSourceName"`
+
+	// Lineage lists the raw events/metrics a metric derives from. Built-in
+	// event_count metrics carry their counted event here and have no
+	// metricEvents entry.
+	Lineage Lineage `json:"lineage"`
+}
+
+// Lineage records the events and metrics a Statsig metric is derived from.
+type Lineage struct {
+	Events  []string `json:"events"`
+	Metrics []string `json:"metrics"`
 }
 
 // MetricEvent represents an event definition within a Statsig metric.

@@ -121,6 +121,8 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	//   1. metricEvents[0].Name — cloud metrics with explicit events.
 	//   2. warehouse-native value column — the flat warehouseNative.valueColumn or
 	//      metricSources[0].valueColumn (both forms occur; see NumeratorValueColumn).
+	//   3. lineage.events[0] — built-in event_count metrics, which have no
+	//      metricEvents and carry the counted event in lineage.
 	var eventKey string
 	if len(sg.MetricEvents) > 0 {
 		eventKey = sg.MetricEvents[0].Name
@@ -140,12 +142,14 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("warehouse-native %q metric has no value column (it counts rows/units); LD eventKey set to the source name %q provisionally — verify against a created LD metric", effectiveType, src))
 		}
+	} else if len(sg.Lineage.Events) > 0 {
+		eventKey = sg.Lineage.Events[0]
 	}
 	if eventKey == "" {
 		if sg.IsWarehouseNative() {
 			return nil, fmt.Errorf("warehouse-native metric %q: cannot determine LD eventKey — no valueColumn or metric source on warehouseNative", sg.Name)
 		}
-		return nil, fmt.Errorf("Statsig metric %q has no metricEvents — cannot determine LD eventKey", sg.Name)
+		return nil, fmt.Errorf("Statsig metric %q has no metricEvents or lineage events — cannot determine LD eventKey", sg.Name)
 	}
 
 	// LaunchDarkly supports unitAggregationType=count_distinct ONLY on ratio
