@@ -108,7 +108,7 @@ If the user is also rewriting application code from the Statsig SDK to the Launc
 
 | Statsig usage | What to run | Why |
 |---|---|---|
-| Warehouse-native, **LD data sources already exist** (set up in the LD UI, via Terraform, or provisioned for the account — the **Figma** case) | **Skip `warehouse`.** `metrics convert` (step 5) with `--ld-data-source <key>` (one source for all) or `--source-mapping source-mapping.json` (per-source), supplied by you. | Nothing to create in LD, so `warehouse` has no job. You just tell `metrics convert` which existing data source key to bind each warehouse-native metric to. See the [`metrics convert` Warehouse Native section](#warehouse-native) for the JSON shape. |
+| Warehouse-native, **LD data sources already exist** (set up in the LD UI, via Terraform, or provisioned for the account) | **Skip `warehouse`.** `metrics convert` (step 5) with `--ld-data-source <key>` (one source for all) or `--source-mapping source-mapping.json` (per-source), supplied by you. | Nothing to create in LD, so `warehouse` has no job. You just tell `metrics convert` which existing data source key to bind each warehouse-native metric to. See the [`metrics convert` Warehouse Native section](#warehouse-native) for the JSON shape. |
 | Warehouse-native, data sources **do not** exist yet | `warehouse` (step 4) → `metrics convert --source-mapping source-mapping.json` (step 5). | `warehouse` creates the integrations + data sources but **not** the metrics, and writes the `source-mapping.json`. `metrics convert` then creates every metric definition and binds the warehouse-native ones to the data sources via the mapping. |
 | Event-based metrics only (Statsig Cloud, no warehouse-native) | `metrics convert` (step 5). Skip `warehouse` (step 4). | `warehouse` would have nothing to do — there are no data sources to create. |
 | Mixed (both) | Same as warehouse-native: `warehouse` (step 4, unless data sources already exist) → `metrics convert --source-mapping source-mapping.json` (step 5). | `metrics convert` walks all metrics; event-based ones don't need a data source binding, warehouse-native ones do — the mapping file resolves both in one pass. |
@@ -229,7 +229,7 @@ By default, metrics whose conversion would be **lossy** (a Statsig feature dropp
 
 ### Warehouse Native
 
-Warehouse-native metrics must bind to an LD metric **data source**. If you ran `warehouse` (step 4), pass the `source-mapping.json` it wrote. **If the data sources already exist** (LD UI, Terraform, or provisioned for the account — e.g. Figma), skip `warehouse` and supply the binding here yourself, either as a single default or a per-source mapping you hand-write.
+Warehouse-native metrics must bind to an LD metric **data source**. If you ran `warehouse` (step 4), pass the `source-mapping.json` it wrote. **If the data sources already exist** (LD UI, Terraform, or provisioned for the account), skip `warehouse` and supply the binding here yourself, either as a single default or a per-source mapping you hand-write.
 
 ```bash
 # Single source for all metrics — every warehouse-native metric binds to this key
