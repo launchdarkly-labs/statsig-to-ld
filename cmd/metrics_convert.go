@@ -111,7 +111,7 @@ func init() {
 	convertCmd.Flags().StringVar(&flagLDURL, "ld-url", "", "LaunchDarkly API base URL including scheme (e.g. https://app.launchdarkly.com/)")
 	convertCmd.Flags().StringVar(&flagLDProject, "ld-project", "", "LaunchDarkly project key (required)")
 
-	convertCmd.Flags().StringVar(&flagLDDataSource, "ld-data-source", "", "LD data source key for Warehouse Native metrics")
+	convertCmd.Flags().StringVar(&flagLDDataSource, "ld-data-source", "", "LD data source key bound to warehouse-native and ratio metrics. Required for them: ratio metrics are rejected without one, and others are created unbound. Use --source-mapping for per-source keys.")
 	convertCmd.Flags().StringVar(&flagSourceMapping, "source-mapping", "", "JSON file mapping Statsig source names to LD data source keys")
 	convertCmd.Flags().StringVar(&flagUnitTypeMapping, "unit-type-mapping", "", "JSON file mapping Statsig unit types to LD context kinds (e.g. {\"companyID\": \"company\"})")
 
@@ -319,6 +319,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	rpt := report.New()
 	rpt.DryRun = flagDryRun
 	total := len(metrics)
+	var needsDataSource int64 // converted WHN/ratio metrics with no data source bound
 
 	if total > 0 && !flagVerbose {
 		fmt.Fprintf(os.Stderr, "Processing %d metrics [.=ok  S=incompatible  L=lossy  E=exists  X=fail]: ", total)
@@ -327,7 +328,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	if flagDryRun || total <= 1 {
 		// Sequential for dry-run, single metric, or empty
 		for i, sg := range metrics {
-			processMetric(ctx, sg, convOpts, ldClient, rpt, flagLDProject, flagDryRun, i+1, total)
+			processMetric(ctx, sg, convOpts, ldClient, rpt, flagLDProject, flagDryRun, i+1, total, &needsDataSource)
 		}
 	} else {
 		// Parallel for bulk non-dry-run
@@ -349,7 +350,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 				defer wg.Done()
 				defer func() { <-sem }() // release
 				n := int(atomic.AddInt64(&processed, 1))
-				processMetric(ctx, sg, convOpts, ldClient, rpt, flagLDProject, false, n, total)
+				processMetric(ctx, sg, convOpts, ldClient, rpt, flagLDProject, false, n, total, &needsDataSource)
 			}(sg)
 		}
 		wg.Wait()
@@ -369,6 +370,17 @@ func runConvert(cmd *cobra.Command, args []string) error {
 
 	// Print summary table to stdout
 	rpt.PrintSummaryTable(os.Stdout)
+
+	// Warehouse-native and ratio metrics need a LaunchDarkly data source. Call
+	// this out prominently: on a dry run the report shows them as converted, but
+	// a real run rejects ratio metrics (HTTP 400) and creates the rest unbound.
+	if n := atomic.LoadInt64(&needsDataSource); n > 0 {
+		fmt.Printf("\n⚠  %d converted metric(s) resolved no LaunchDarkly data source.\n", n)
+		fmt.Println("   Warehouse-native metrics need one to collect data, and ratio metrics are")
+		fmt.Println("   rejected without it (HTTP 400). Bind them with --ld-data-source <key> or")
+		fmt.Println("   --source-mapping <file> (see `warehouse` for creating the data source).")
+	}
+
 	fmt.Printf("Report written to %s\n", flagOutput)
 
 	// Point the reader at where the per-metric detail lives, but only when
@@ -459,6 +471,7 @@ func processMetric(
 	ldProject string,
 	dryRun bool,
 	current, total int,
+	needsDataSourceCount *int64,
 ) {
 	progress := fmt.Sprintf("[%d/%d]", current, total)
 
@@ -499,8 +512,18 @@ func processMetric(
 		return
 	}
 
+	// A converted warehouse-native or ratio metric with no data source resolved
+	// still needs one bound in LaunchDarkly: ratio metrics are rejected without
+	// it (HTTP 400), others are created but collect no data. Count it so the
+	// summary can call it out (the dry-run report otherwise looks all-clear).
+	needsDataSource := result.LDMetric.DataSource == nil &&
+		(sg.IsWarehouseNative() || effType == "ratio")
+
 	if dryRun {
 		rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings)
+		if needsDataSource {
+			atomic.AddInt64(needsDataSourceCount, 1)
+		}
 		if flagVerbose {
 			status := "OK"
 			if len(result.Warnings) > 0 {
@@ -534,6 +557,9 @@ func processMetric(
 	}
 
 	rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings)
+	if needsDataSource {
+		atomic.AddInt64(needsDataSourceCount, 1)
+	}
 	if flagVerbose {
 		status := "OK"
 		if len(result.Warnings) > 0 {
