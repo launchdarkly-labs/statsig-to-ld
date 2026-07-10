@@ -367,6 +367,11 @@ Useful `jq` queries:
 # metrics convert: summary counts
 cat migration-report.json | jq '{total: .statsig_metrics_total, dry_run, converted, with_warnings: .converted_with_warnings, skipped_existing, skipped_incompatible, skipped_lossy, failed}'
 
+# metrics convert: per-type breakdown (which metric types convert vs drive the incompatible/failed buckets)
+cat migration-report.json | jq '.by_type'
+# just the types with failures or incompatibilities, worst first
+cat migration-report.json | jq '.by_type | to_entries | map(select(.value.failed + .value.skipped_incompatible > 0)) | sort_by(-(.value.failed + .value.skipped_incompatible)) | from_entries'
+
 # metrics convert: DATA LOSS warnings (most critical)
 cat migration-report.json | jq '.metrics[] | select(.warnings[]? | contains("DATA LOSS")) | {name: .statsig_name, warnings}'
 

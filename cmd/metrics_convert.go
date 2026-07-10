@@ -462,10 +462,15 @@ func processMetric(
 ) {
 	progress := fmt.Sprintf("[%d/%d]", current, total)
 
+	// Record the effective type (a warehouse-native metric's aggregation, e.g.
+	// "sum"/"percentile", rather than the "user_warehouse" wrapper) so the
+	// report groups metrics by what actually determines the outcome.
+	effType := sg.EffectiveType()
+
 	result, convErr := converter.Convert(&sg, convOpts)
 	if convErr != nil {
 		if converter.IsIncompatible(convErr) {
-			rpt.AddSkippedIncompatible(sg.Name, sg.Type, sg.ID, convErr.Error())
+			rpt.AddSkippedIncompatible(sg.Name, effType, sg.ID, convErr.Error())
 			if flagVerbose {
 				log.Printf("%s SKIP   %-45s  %s", progress, sg.Name, convErr.Error())
 			} else {
@@ -473,7 +478,7 @@ func processMetric(
 			}
 			return
 		}
-		rpt.AddFailed(sg.Name, sg.Type, sg.ID, convErr.Error())
+		rpt.AddFailed(sg.Name, effType, sg.ID, convErr.Error())
 		if flagVerbose {
 			log.Printf("%s FAIL   %-45s  %s", progress, sg.Name, convErr.Error())
 		} else {
@@ -485,7 +490,7 @@ func processMetric(
 	// Lossy conversions (a Statsig feature dropped or approximated) are skipped
 	// by default; --convert-lossy opts into the imperfect conversion.
 	if result.IsLossy() && !flagConvertLossy {
-		rpt.AddSkippedLossy(sg.Name, sg.Type, sg.ID, result.LossyReasons)
+		rpt.AddSkippedLossy(sg.Name, effType, sg.ID, result.LossyReasons)
 		if flagVerbose {
 			log.Printf("%s LOSSY  %-45s  skipped (lossy): %s", progress, sg.Name, strings.Join(result.LossyReasons, "; "))
 		} else {
@@ -495,7 +500,7 @@ func processMetric(
 	}
 
 	if dryRun {
-		rpt.AddConverted(sg.Name, sg.Type, sg.ID, result.LDMetric.Key, ldProject, result.Warnings)
+		rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings)
 		if flagVerbose {
 			status := "OK"
 			if len(result.Warnings) > 0 {
@@ -511,7 +516,7 @@ func processMetric(
 	_, createErr := ldClient.CreateMetric(ctx, result.LDMetric)
 	if createErr != nil {
 		if launchdarkly.IsConflict(createErr) {
-			rpt.AddSkippedExisting(sg.Name, sg.Type, sg.ID, result.LDMetric.Key, ldProject)
+			rpt.AddSkippedExisting(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject)
 			if flagVerbose {
 				log.Printf("%s EXIST  %-45s  → %s (already exists)", progress, sg.Name, result.LDMetric.Key)
 			} else {
@@ -519,7 +524,7 @@ func processMetric(
 			}
 			return
 		}
-		rpt.AddFailed(sg.Name, sg.Type, sg.ID, createErr.Error())
+		rpt.AddFailed(sg.Name, effType, sg.ID, createErr.Error())
 		if flagVerbose {
 			log.Printf("%s FAIL   %-45s  %s", progress, sg.Name, createErr.Error())
 		} else {
@@ -528,7 +533,7 @@ func processMetric(
 		return
 	}
 
-	rpt.AddConverted(sg.Name, sg.Type, sg.ID, result.LDMetric.Key, ldProject, result.Warnings)
+	rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings)
 	if flagVerbose {
 		status := "OK"
 		if len(result.Warnings) > 0 {
