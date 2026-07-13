@@ -229,6 +229,8 @@ By default, metrics whose conversion would be **lossy** (a Statsig feature dropp
 
 ### Warehouse Native
 
+> **Warehouse-native and ratio metrics need an LD data source, and a `--dry-run` will not fail without one.** The dry run reports these metrics as converted, but a real run rejects ratio metrics (HTTP 400) and creates the others unbound (they collect no data). Always pass `--ld-data-source <key>` or `--source-mapping <file>` when converting warehouse-native or ratio metrics. When any convert without a data source, the run prints a `⚠ N converted metric(s) resolved no LaunchDarkly data source` line under the summary and flags each one with a `no LD data source specified` warning in the report.
+
 Warehouse-native metrics must bind to an LD metric **data source**. If you ran `warehouse` (step 4), pass the `source-mapping.json` it wrote. **If the data sources already exist** (LD UI, Terraform, or provisioned for the account), skip `warehouse` and supply the binding here yourself, either as a single default or a per-source mapping you hand-write.
 
 ```bash
