@@ -88,6 +88,41 @@ func TestFinalize_AllConverted(t *testing.T) {
 	}
 }
 
+func TestFinalize_ByTypeBreakdown(t *testing.T) {
+	r := New()
+	// Two sum metrics: one clean, one with warnings.
+	r.AddConverted("s1", "sum", "s1::sum", "s1-sum", "proj", nil)
+	r.AddConverted("s2", "sum", "s2::sum", "s2-sum", "proj", []string{"no data source"})
+	// A mean metric that failed.
+	r.AddFailed("m1", "mean", "m1::mean", "API 500")
+	// Two percentile metrics, both incompatible. The type recorded is the
+	// effective Statsig type ("percentile"), which the caller resolves from a
+	// warehouse-native metric's aggregation rather than the "user_warehouse"
+	// wrapper — so the breakdown groups by what actually matters.
+	r.AddSkippedIncompatible("p1", "percentile", "p1::user_warehouse", "not supported")
+	r.AddSkippedIncompatible("p2", "percentile", "p2::user_warehouse", "not supported")
+
+	r.Finalize(5)
+
+	if len(r.ByType) != 3 {
+		t.Fatalf("ByType should have 3 types (sum, mean, percentile), got %d: %+v", len(r.ByType), r.ByType)
+	}
+	if sum := r.ByType["sum"]; sum == nil || sum.Total != 2 || sum.Converted != 2 || sum.ConvertedWithWarn != 1 {
+		t.Errorf("sum breakdown = %+v, want total=2 converted=2 withWarn=1", sum)
+	}
+	if mean := r.ByType["mean"]; mean == nil || mean.Total != 1 || mean.Failed != 1 || mean.Converted != 0 {
+		t.Errorf("mean breakdown = %+v, want total=1 failed=1 converted=0", mean)
+	}
+	if pct := r.ByType["percentile"]; pct == nil || pct.Total != 2 || pct.SkippedIncompatible != 2 {
+		t.Errorf("percentile breakdown = %+v, want total=2 skippedIncompatible=2", pct)
+	}
+	// Per-type counts must reconcile with the top-level totals.
+	if r.Converted != 2 || r.Failed != 1 || r.SkippedIncompatible != 2 {
+		t.Errorf("top-level totals drifted from per-type: converted=%d failed=%d incompat=%d",
+			r.Converted, r.Failed, r.SkippedIncompatible)
+	}
+}
+
 func TestWriteCSV(t *testing.T) {
 	r := New()
 	r.AddConverted("rev", "sum", "rev::sum", "rev-sum", "proj", []string{"warn1", "warn2"})
@@ -172,6 +207,26 @@ func TestPrintSummaryTable(t *testing.T) {
 	}
 	if !strings.Contains(output, "with warnings") {
 		t.Error("summary table should show 'with warnings' when there are warnings")
+	}
+}
+
+func TestPrintSummaryTable_ByType(t *testing.T) {
+	r := New()
+	r.AddConverted("s1", "sum", "s1::sum", "s1-sum", "proj", nil)
+	r.AddSkippedIncompatible("p1", "percentile", "p1::user_warehouse", "not supported")
+	r.AddSkippedIncompatible("p2", "percentile", "p2::user_warehouse", "not supported")
+	r.Finalize(3)
+
+	var buf bytes.Buffer
+	r.PrintSummaryTable(&buf)
+	output := buf.String()
+
+	if !strings.Contains(output, "By metric type") {
+		t.Errorf("summary should include a per-type breakdown section; got:\n%s", output)
+	}
+	// Both types should be named, so the reader sees the incompatible driver.
+	if !strings.Contains(output, "percentile") || !strings.Contains(output, "sum") {
+		t.Errorf("per-type table should list each effective type; got:\n%s", output)
 	}
 }
 

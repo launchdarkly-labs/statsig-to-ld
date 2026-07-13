@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -33,7 +34,27 @@ type Report struct {
 	SkippedIncompatible int           `json:"skipped_incompatible"`
 	SkippedLossy        int           `json:"skipped_lossy"`
 	Failed              int           `json:"failed"`
-	Metrics             []MetricEntry `json:"metrics"`
+
+	// ByType breaks the same outcome counts down per effective Statsig metric
+	// type (e.g. "sum", "ratio", "percentile"), so a reader can see which types
+	// convert cleanly and which drive the incompatible/failed buckets. Keyed by
+	// the effective type recorded on each MetricEntry.
+	ByType map[string]*TypeBreakdown `json:"by_type"`
+
+	Metrics []MetricEntry `json:"metrics"`
+}
+
+// TypeBreakdown tallies conversion outcomes for a single Statsig metric type.
+// The counters mirror the report's top-level summary so each type's row
+// reconciles against the whole.
+type TypeBreakdown struct {
+	Total               int `json:"total"`
+	Converted           int `json:"converted"`
+	ConvertedWithWarn   int `json:"converted_with_warnings"`
+	SkippedExisting     int `json:"skipped_existing"`
+	SkippedIncompatible int `json:"skipped_incompatible"`
+	SkippedLossy        int `json:"skipped_lossy"`
+	Failed              int `json:"failed"`
 }
 
 // MetricEntry records the conversion outcome for a single Statsig metric.
@@ -137,24 +158,65 @@ func (r *Report) Finalize(totalMetrics int) {
 	r.SkippedIncompatible = 0
 	r.SkippedLossy = 0
 	r.Failed = 0
+	r.ByType = map[string]*TypeBreakdown{}
 
 	for _, m := range r.Metrics {
+		bt := r.ByType[m.StatsigType]
+		if bt == nil {
+			bt = &TypeBreakdown{}
+			r.ByType[m.StatsigType] = bt
+		}
+		bt.Total++
+
 		switch m.Status {
 		case StatusConverted:
 			r.Converted++
+			bt.Converted++
 			if len(m.Warnings) > 0 {
 				r.ConvertedWithWarn++
+				bt.ConvertedWithWarn++
 			}
 		case StatusSkippedExisting:
 			r.SkippedExisting++
+			bt.SkippedExisting++
 		case StatusSkippedIncompatible:
 			r.SkippedIncompatible++
+			bt.SkippedIncompatible++
 		case StatusSkippedLossy:
 			r.SkippedLossy++
+			bt.SkippedLossy++
 		case StatusFailed:
 			r.Failed++
+			bt.Failed++
 		}
 	}
+}
+
+// printByTypeTable writes the per-effective-type outcome breakdown as a compact
+// table, types sorted by name for stable output. Skipped when nothing ran.
+func (r *Report) printByTypeTable(w io.Writer) {
+	if len(r.ByType) == 0 {
+		return
+	}
+
+	types := make([]string, 0, len(r.ByType))
+	for typ := range r.ByType {
+		types = append(types, typ)
+	}
+	sort.Strings(types)
+
+	fmt.Fprintln(w, "\nBy metric type")
+	fmt.Fprintln(w, "─────────────────────────────────────")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "  TYPE\tTOTAL\tCONVERTED\t+WARN\tEXISTING\tINCOMPAT\tLOSSY\tFAILED")
+	for _, typ := range types {
+		b := r.ByType[typ]
+		fmt.Fprintf(tw, "  %s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
+			typ, b.Total, b.Converted, b.ConvertedWithWarn,
+			b.SkippedExisting, b.SkippedIncompatible, b.SkippedLossy, b.Failed)
+	}
+	tw.Flush()
+	fmt.Fprintln(w, "─────────────────────────────────────")
 }
 
 // WriteCSV writes the report metrics as CSV to the given writer.
@@ -201,6 +263,8 @@ func (r *Report) PrintSummaryTable(w io.Writer) {
 	fmt.Fprintf(tw, "  Failed:\t%d\n", r.Failed)
 	fmt.Fprintln(tw, "─────────────────────────────────────")
 	tw.Flush()
+
+	r.printByTypeTable(w)
 
 	// When metrics failed, name them inline so the reader doesn't have to open
 	// the report file to learn what broke.
