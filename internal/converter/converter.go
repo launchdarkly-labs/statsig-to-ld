@@ -113,8 +113,17 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	eventDefault := spec.eventDefault
 	unitAggField := spec.unitAggField
 
-	if effectiveType == "daily_participation" {
-		result.addLossy("Statsig daily_participation (per-unit share of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
+	// Daily participation RATE is a per-unit fraction of active days. LaunchDarkly
+	// has no fraction-of-days aggregation, so approximating it as a binary
+	// (participated-or-not) metric drops the rate — lossy. The rate rollup appears
+	// as "daily" on warehouse-native metrics and "daily_participation_rate" on
+	// cloud metrics. Every other rollup mode in the unit-count family (one-time
+	// "max", windowed "custom", or unset) is a per-unit binary flag, which is
+	// exactly a LaunchDarkly binary metric and converts with no loss. (A "custom"
+	// window is handled separately below and is only lossy when left unbound.)
+	switch sg.EffectiveRollupTimeWindow() {
+	case "daily", "daily_participation_rate":
+		result.addLossy("Statsig daily participation rate (per-unit fraction of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
 	}
 
 	// Event key resolution:
@@ -223,11 +232,9 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 
 	// Custom rollup windows are mapped to LD window offsets after the metric is
 	// built (they depend on whether a data source is bound). See below.
-
-	// Daily participation rate
-	if sg.RollupTimeWindow == "daily_participation_rate" {
-		result.addLossy("daily participation rate rollup is not supported in LaunchDarkly — metric will use standard binary conversion")
-	}
+	//
+	// (The daily-participation-rate rollup is handled at the aggregation check
+	// above via EffectiveRollupTimeWindow.)
 
 	// ---------------------------------------------------------------
 	// Success criteria
