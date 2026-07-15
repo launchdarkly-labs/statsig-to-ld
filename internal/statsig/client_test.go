@@ -21,6 +21,62 @@ func newTestServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *C
 }
 
 // ============================================================================
+// ListAllMetricSources
+// ============================================================================
+
+// TestListAllMetricSources_ParsesRealShape feeds a body shaped like the real
+// /metrics/metric_source/list response — the field names are confirmed against
+// Statsig's terraform-provider-statsig MetricSourceAPIModel (name,
+// idTypeMapping[].statsigUnitID, idTypeMapping[].column). Extra source fields
+// must be ignored, and a source may declare multiple id types.
+func TestListAllMetricSources_ParsesRealShape(t *testing.T) {
+	const body = `{
+      "data": [
+        {
+          "name": "checkout_events",
+          "description": "orders",
+          "sql": "SELECT * FROM checkout",
+          "timestampColumn": "ts",
+          "sourceType": "table",
+          "idTypeMapping": [
+            {"statsigUnitID": "userID", "column": "user_id"},
+            {"statsigUnitID": "companyID", "column": "company_id"}
+          ]
+        },
+        {"name": "no_units", "idTypeMapping": []}
+      ],
+      "pagination": {"itemsPerPage":100,"pageNumber":1,"totalItems":2,"nextPage":null}
+    }`
+
+	var gotPath string
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(body))
+	})
+
+	sources, err := client.ListAllMetricSources(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllMetricSources: %v", err)
+	}
+	if gotPath != "/metrics/metric_source/list" {
+		t.Errorf("path = %q, want /metrics/metric_source/list", gotPath)
+	}
+	if len(sources) != 2 {
+		t.Fatalf("got %d sources, want 2", len(sources))
+	}
+	s := sources[0]
+	if s.Name != "checkout_events" || len(s.IDTypeMapping) != 2 {
+		t.Fatalf("source[0] = %+v, want name=checkout_events with 2 id types", s)
+	}
+	if s.IDTypeMapping[0].StatsigUnitID != "userID" || s.IDTypeMapping[0].Column != "user_id" {
+		t.Errorf("idTypeMapping[0] = %+v, want {userID, user_id}", s.IDTypeMapping[0])
+	}
+	if s.IDTypeMapping[1].StatsigUnitID != "companyID" {
+		t.Errorf("idTypeMapping[1] = %+v, want statsigUnitID=companyID", s.IDTypeMapping[1])
+	}
+}
+
+// ============================================================================
 // ListGates
 // ============================================================================
 
