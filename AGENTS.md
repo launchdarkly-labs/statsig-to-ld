@@ -266,6 +266,8 @@ EOF
 
 Without this mapping, non-`userID` unit types are lowercased and a warning is emitted.
 
+Warehouse-native metrics often carry no `unitTypes` on the metric itself; the analysis unit lives on the metric source's id-type mapping. When such metrics are present, `metrics convert` makes one extra Console API call to list the metric sources and resolves each metric's analysis unit from its source instead of defaulting to `user`. If that call fails (or a source has no id-type mapping), the metric falls back to `user` with a warning. `--unit-type-mapping` still applies to the resolved unit names.
+
 ### Metric type conversion
 
 | Statsig type | LD kind | Status |

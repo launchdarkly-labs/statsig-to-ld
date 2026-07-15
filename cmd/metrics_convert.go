@@ -312,6 +312,22 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		log.Printf("Filtered %d → %d metrics (tags=%v, types=%v)", before, len(metrics), includeTags, includeTypes)
 	}
 
+	// Warehouse-native metrics often omit unitTypes; their analysis unit lives on
+	// the metric source. When any such metric is present, fetch the source
+	// configs once and map each source to its declared unit types so the
+	// converter resolves the real unit instead of defaulting to "user".
+	// Best-effort: if the lookup fails, conversion proceeds with the default.
+	if needsSourceUnitTypes(metrics) {
+		log.Printf("Some warehouse-native metrics have no unitTypes; fetching metric sources to resolve their analysis unit...")
+		sources, srcErr := sgClient.ListAllMetricSources(ctx)
+		if srcErr != nil {
+			log.Printf("WARNING: could not fetch Statsig metric sources (%v); warehouse-native metrics without unitTypes will default to the \"user\" analysis unit", srcErr)
+		} else {
+			convOpts.SourceUnitTypes = buildSourceUnitTypes(sources)
+			log.Printf("Loaded analysis-unit id-type mappings for %d metric sources", len(convOpts.SourceUnitTypes))
+		}
+	}
+
 	// Pre-flight: warn about potential key collisions
 	warnKeyCollisions(metrics)
 
@@ -456,6 +472,37 @@ func annotateStatsigAuthErr(err error) error {
 		return fmt.Errorf("%w\n  hint: this looks like an authentication failure — check that your Statsig Console API key (console-…) is valid and active", err)
 	}
 	return err
+}
+
+// needsSourceUnitTypes reports whether any metric is warehouse-native with no
+// unitTypes of its own — the case where the analysis unit must be resolved from
+// the metric source's id-type mapping.
+func needsSourceUnitTypes(metrics []statsig.Metric) bool {
+	for i := range metrics {
+		if len(metrics[i].UnitTypes) == 0 && metrics[i].IsWarehouseNative() {
+			return true
+		}
+	}
+	return false
+}
+
+// buildSourceUnitTypes maps each metric source name to the Statsig unit IDs it
+// declares (from its id-type mapping), for the converter's analysis-unit
+// fallback. Sources with no name or no mapping are skipped.
+func buildSourceUnitTypes(sources []statsig.MetricSourceConfig) map[string][]string {
+	out := make(map[string][]string, len(sources))
+	for _, s := range sources {
+		var ids []string
+		for _, m := range s.IDTypeMapping {
+			if m.StatsigUnitID != "" {
+				ids = append(ids, m.StatsigUnitID)
+			}
+		}
+		if s.Name != "" && len(ids) > 0 {
+			out[s.Name] = ids
+		}
+	}
+	return out
 }
 
 // processMetric handles a single metric: convert → create → record in report.
