@@ -5,11 +5,13 @@ import (
 	"testing"
 )
 
-// Statsig's "daily_participation" aggregation is the unit-count family; the
-// rollupTimeWindow selects the mode (per the Statsig API): "daily" = daily
-// participation rate (a per-unit fraction of active days), "max" = one-time
-// event, "custom" = windowed. Only the rate is lossy in LaunchDarkly (no
-// fraction-of-days aggregation); the binary variants convert exactly.
+// Statsig's unit-count participation family (warehouse-native "daily_participation"
+// and cloud "event_user"); the rollupTimeWindow selects the mode. The rate is the
+// DEFAULT: it appears as an unset rollupTimeWindow (confirmed against a live
+// cloud metric), "daily" (warehouse-native), or "daily_participation_rate" (cloud
+// legacy). Only the explicit "max" (one-time) and "custom" (windowed) rollups are
+// a per-unit binary that converts exactly. The rate is lossy in LaunchDarkly (no
+// fraction-of-days aggregation).
 
 func dpMetric(rollup string, extra string) string {
 	fields := []string{`"aggregation":"daily_participation"`, `"metricSourceName":"Events"`}
@@ -52,12 +54,46 @@ func TestConvert_DailyParticipation_OneTime_NotLossy(t *testing.T) {
 	}
 }
 
-func TestConvert_DailyParticipation_EmptyRollup_NotLossy(t *testing.T) {
-	// No rollupTimeWindow: not the "daily" rate, so treat as a clean binary.
+func TestConvert_DailyParticipation_EmptyRollup_IsLossy(t *testing.T) {
+	// Unset rollupTimeWindow is the participation-rate DEFAULT, so it's lossy.
 	res := mustConvert(t, dpMetric("", ""), Options{LDDataSource: "ds"})
 	assertBinary(t, res)
+	if !res.IsLossy() {
+		t.Errorf("unset-rollup daily_participation (the rate default) should be lossy; LossyReasons=%v", res.LossyReasons)
+	}
+	assertHasWarning(t, res.LossyReasons, "rate")
+}
+
+// eventUserMetric builds a cloud event_user (participation) metric. An unset
+// rollup is the daily-participation-rate default; "max" is one-time.
+func eventUserMetric(rollup string) string {
+	r := ""
+	if rollup != "" {
+		r = `"rollupTimeWindow":"` + rollup + `",`
+	}
+	return `{
+	  "type":"event_user","name":"EU","id":"EU::event_user","directionality":"increase",
+	  "unitTypes":["userID"],` + r + `
+	  "metricEvents":[{"name":"page_view","type":"count"}]}`
+}
+
+func TestConvert_EventUser_EmptyRollup_IsLossy(t *testing.T) {
+	// A cloud event_user with no rollup is the participation-rate default (live-
+	// confirmed: the UI's "Daily Participation Rate" produces an unset rollup).
+	res := mustConvert(t, eventUserMetric(""), Options{})
+	assertBinary(t, res)
+	if !res.IsLossy() {
+		t.Errorf("cloud event_user with unset rollup (rate default) should be lossy; LossyReasons=%v", res.LossyReasons)
+	}
+	assertHasWarning(t, res.LossyReasons, "rate")
+}
+
+func TestConvert_EventUser_OneTime_NotLossy(t *testing.T) {
+	// "max" = one-time event (live-confirmed): a per-unit binary, converts clean.
+	res := mustConvert(t, eventUserMetric("max"), Options{})
+	assertBinary(t, res)
 	if res.IsLossy() {
-		t.Errorf("non-rate daily_participation should NOT be lossy; LossyReasons=%v", res.LossyReasons)
+		t.Errorf("event_user with rollupTimeWindow=max (one-time) should NOT be lossy; LossyReasons=%v", res.LossyReasons)
 	}
 }
 

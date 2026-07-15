@@ -113,17 +113,21 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	eventDefault := spec.eventDefault
 	unitAggField := spec.unitAggField
 
-	// Daily participation RATE is a per-unit fraction of active days. LaunchDarkly
-	// has no fraction-of-days aggregation, so approximating it as a binary
-	// (participated-or-not) metric drops the rate — lossy. The rate rollup appears
-	// as "daily" on warehouse-native metrics and "daily_participation_rate" on
-	// cloud metrics. Every other rollup mode in the unit-count family (one-time
-	// "max", windowed "custom", or unset) is a per-unit binary flag, which is
-	// exactly a LaunchDarkly binary metric and converts with no loss. (A "custom"
-	// window is handled separately below and is only lossy when left unbound.)
-	switch sg.EffectiveRollupTimeWindow() {
-	case "daily", "daily_participation_rate":
-		result.addLossy("Statsig daily participation rate (per-unit fraction of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
+	// Daily participation RATE is a per-unit fraction of active days, which
+	// LaunchDarkly has no aggregation for; approximating it as a binary
+	// (participated-or-not) metric drops the rate — lossy. In Statsig's unit-count
+	// participation family (warehouse-native "daily_participation" and cloud
+	// "event_user"), the rate is the DEFAULT rollup: it appears as an unset
+	// rollupTimeWindow, "daily" (warehouse-native), or "daily_participation_rate"
+	// (cloud, legacy). Only the explicit "max" (one-time) and "custom" (windowed)
+	// rollups are a per-unit binary flag that converts to a LaunchDarkly binary
+	// metric with no loss. (A "custom" window is handled separately below and is
+	// only lossy when left unbound.)
+	if effectiveType == "daily_participation" || effectiveType == "event_user" {
+		switch sg.EffectiveRollupTimeWindow() {
+		case "", "daily", "daily_participation_rate":
+			result.addLossy("Statsig daily participation rate (per-unit fraction of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
+		}
 	}
 
 	// Event key resolution:

@@ -273,9 +273,9 @@ Without this mapping, non-`userID` unit types are lowercased and a warning is em
 | `event_count_custom` | custom | Supported |
 | `sum` | custom (numeric, sum) | Supported |
 | `mean` | custom (numeric, average) | Supported |
-| `event_user` | custom | Supported |
+| `event_user` | custom (binary) | Supported. This is the participation family: an unset rollup is the daily-participation-**rate** default (lossy — see below); `max` (one-time) and `custom` (windowed) convert cleanly. |
 | `event_user_window` | custom | Supported |
-| `daily_participation` (unit count) | custom (binary) | Supported as a binary metric. One-time (`max`), windowed (`custom`), and latest rollups convert exactly. Only the daily-participation-**rate** rollup (`rollupTimeWindow: daily`) is lossy — LD has no fraction-of-days aggregation, so it's approximated as binary. |
+| `daily_participation` (unit count) | custom (binary) | Supported as a binary metric. Only the daily-participation-**rate** is lossy (LD has no fraction-of-days aggregation, so it's approximated as binary). The rate is the DEFAULT: unset `rollupTimeWindow`, `daily` (warehouse-native), or `daily_participation_rate` (cloud). Explicit `max` (one-time) and `custom` (windowed) rollups convert exactly. |
 | `ratio` | custom + denominator | Supported — requires a warehouse data source (`--ld-data-source` / `--source-mapping`) |
 | `funnel` | — | Not converted — would need an LD metric group |
 | `composite` | — | No LD equivalent |
@@ -294,7 +294,7 @@ Many of these mark a conversion **lossy**: by default the metric is skipped (`sk
 | `winsorization ... occurrence metric` | Low | Lossy — LD can't winsorize an occurrence metric (numeric metrics winsorize fine). |
 | `per-unit capping` | Low | Lossy — per-unit cap not applied. |
 | `custom rollup window` | Low | Lossy only when no data source is bound; pass `--ld-data-source` (snowflake) to apply the window. |
-| `daily participation rate ... loses the per-day rate` | Medium | Lossy — only the true rate rollup (`rollupTimeWindow: daily`), approximated as a binary metric. One-time/windowed unit-count rollups convert cleanly and are not flagged. |
+| `daily participation rate ... loses the per-day rate` | Medium | Lossy — the participation-rate default (unset rollup, `daily`, or `daily_participation_rate`) on `event_user`/`daily_participation` metrics, approximated as a binary metric. Explicit one-time (`max`) and windowed (`custom`) rollups convert cleanly and are not flagged. |
 | `unitType ... may not match an LD context kind` | Medium | Use `--unit-type-mapping` to map explicitly. |
 | `no LD data source specified` | Medium | Warehouse-native metric is being created without a data source binding. Fix: run `statsig-to-ld warehouse` first (it creates the data sources and writes `source-mapping.json`), then re-run `metrics convert --source-mapping source-mapping.json`. If the data sources already exist (set up by hand or via Terraform), pass `--ld-data-source` or `--source-mapping` directly. |
 
