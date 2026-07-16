@@ -117,6 +117,21 @@ type MetricSource struct {
 	ValueColumn      string      `json:"valueColumn"`
 }
 
+// MetricSourceConfig is a warehouse-native metric source as returned by
+// /console/v1/metrics/metric_source/list. Only the fields the converter needs
+// are modeled; the analysis unit(s) a metric can use live in IDTypeMapping.
+type MetricSourceConfig struct {
+	Name          string          `json:"name"`
+	IDTypeMapping []IDTypeMapping `json:"idTypeMapping"`
+}
+
+// IDTypeMapping maps a Statsig unit ID (e.g. "userID", "companyID") to the
+// source column that holds it. StatsigUnitID is the analysis unit.
+type IDTypeMapping struct {
+	StatsigUnitID string `json:"statsigUnitID"`
+	Column        string `json:"column"`
+}
+
 // IsWarehouseNative reports whether the metric's real aggregation lives in
 // WarehouseNative.Aggregation rather than the top-level Type.
 func (m *Metric) IsWarehouseNative() bool {

@@ -37,6 +37,13 @@ type Options struct {
 	// e.g. {"companyID": "company", "teamID": "team"}.
 	// Takes precedence over the default lowercase behavior.
 	UnitTypeMapping map[string]string
+
+	// SourceUnitTypes maps a Statsig metric source name to the unit types (id
+	// types) declared on that source. Warehouse-native metrics frequently omit
+	// unitTypes on the metric itself; the analysis unit comes from the source's
+	// id-type mapping. When a metric has no unitTypes, the converter falls back
+	// to its source's unit types here before defaulting to "user".
+	SourceUnitTypes map[string][]string
 }
 
 // Result holds the converted LD metric and any warnings about Statsig features
@@ -361,8 +368,22 @@ func lowerKeyMapping(m map[string]string) map[string]string {
 // often carry no unitTypes (the unit comes from the source's idTypeMapping), so
 // an empty result defaults to "user".
 func randomizationUnits(sg *statsig.Metric, opts Options) (units, warnings []string) {
+	// A metric's own unitTypes win. Warehouse-native metrics usually omit them,
+	// carrying the unit on the metric source instead; fall back to the source's
+	// id-type mapping when we have it.
+	unitTypes := sg.UnitTypes
+	fromSource := false
+	if len(unitTypes) == 0 {
+		if src := sg.NumeratorSourceName(); src != "" {
+			if su := opts.SourceUnitTypes[src]; len(su) > 0 {
+				unitTypes = su
+				fromSource = true
+			}
+		}
+	}
+
 	lowerMapping := lowerKeyMapping(opts.UnitTypeMapping)
-	for _, u := range sg.UnitTypes {
+	for _, u := range unitTypes {
 		if mapped, ok := opts.UnitTypeMapping[u]; ok {
 			units = append(units, mapped)
 			continue
@@ -380,10 +401,15 @@ func randomizationUnits(sg *statsig.Metric, opts Options) (units, warnings []str
 				fmt.Sprintf("Statsig unitType %q may not match an LD context kind — verify in LD or use --unit-type-mapping", u))
 		}
 	}
+
+	if fromSource && len(units) > 0 {
+		warnings = append(warnings,
+			fmt.Sprintf("metric has no unitTypes of its own; used the metric source's analysis unit(s) %v (from its id-type mapping)", unitTypes))
+	}
 	if len(units) == 0 {
 		units = []string{"user"}
 		warnings = append(warnings,
-			"no Statsig unitTypes on the metric (common for warehouse-native, where the unit comes from the source's idTypeMapping) — defaulted the LD randomization unit to \"user\"; use --unit-type-mapping if that's wrong")
+			"no Statsig unitTypes on the metric and none resolvable from its source — defaulted the LD randomization unit to \"user\"; pass --unit-type-mapping or check the metric source's id-type mapping if that's wrong")
 	}
 	return units, warnings
 }

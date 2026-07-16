@@ -232,6 +232,43 @@ func (c *Client) ListDynamicConfigs(ctx context.Context) ([]DynamicConfig, error
 	return configs, fmt.Errorf("Statsig dynamic configs pagination exceeded %d pages", maxPages)
 }
 
+// ListAllMetricSources fetches every warehouse-native metric source from
+// /console/v1/metrics/metric_source/list. It exists so the converter can
+// resolve a metric's analysis unit from its source's id-type mapping, which the
+// /metrics/list response does not include.
+func (c *Client) ListAllMetricSources(ctx context.Context) ([]MetricSourceConfig, error) {
+	reqURL, err := url.JoinPath(c.apiBase, "metrics", "metric_source", "list")
+	if err != nil {
+		return nil, fmt.Errorf("building metric_source list URL: %w", err)
+	}
+
+	sources := make([]MetricSourceConfig, 0)
+	for page := 1; page <= maxPages; page++ {
+		body, statusCode, err := c.makePagedRequest(ctx, reqURL, page)
+		if err != nil {
+			return nil, err
+		}
+		if statusCode != http.StatusOK {
+			return nil, fmt.Errorf("listing Statsig metric sources: HTTP %d: %s", statusCode, httputil.Truncate(string(body), 300))
+		}
+
+		var r struct {
+			Data       []MetricSourceConfig `json:"data"`
+			Pagination pagination           `json:"pagination"`
+		}
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, fmt.Errorf("parsing metric_source response: %w (body: %s)", err, httputil.Truncate(string(body), 200))
+		}
+
+		sources = append(sources, r.Data...)
+
+		if r.Pagination.NextPage == "" || len(r.Data) < pageSize {
+			return sources, nil
+		}
+	}
+	return sources, fmt.Errorf("Statsig metric sources pagination exceeded %d pages", maxPages)
+}
+
 // ============================================================================
 // Environment + Override endpoints (unpaged)
 // ============================================================================
