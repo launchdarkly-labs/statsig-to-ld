@@ -155,6 +155,18 @@ func (m *Metric) EffectiveType() string {
 	return m.Type
 }
 
+// EffectiveRollupTimeWindow returns the metric's rollup mode: the
+// warehouse-native rollupTimeWindow when present, else the top-level value.
+// For the unit-count ("daily_participation") family, Statsig's values are
+// "daily" (daily participation rate), "max" (one-time event), and "custom"
+// (custom attribution window).
+func (m *Metric) EffectiveRollupTimeWindow() string {
+	if m.WarehouseNative != nil && m.WarehouseNative.RollupTimeWindow != "" {
+		return m.WarehouseNative.RollupTimeWindow
+	}
+	return m.RollupTimeWindow
+}
+
 // NumeratorSourceName returns the numerator's warehouse source name, preferring
 // MetricSources over the deprecated single-source fields.
 func (m *Metric) NumeratorSourceName() string {

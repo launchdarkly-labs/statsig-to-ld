@@ -99,16 +99,18 @@ func TestConvert_WHN_CountDistinctOnColumn_IsLossyBinary(t *testing.T) {
 }
 
 func TestConvert_WHN_DailyParticipation_WindowInsideWarehouseNative(t *testing.T) {
-	// aggregation=daily_participation (lossy binary approximation), no value
-	// column (it counts active days per unit), with a custom rollup window carried
-	// INSIDE warehouseNative — matches the real user_count fixture.
+	// aggregation=daily_participation with a "custom" (windowed) rollup — a
+	// per-unit binary, not the participation rate, so with a data source bound it
+	// converts cleanly (not lossy). No value column (it counts active days per
+	// unit); the custom rollup window is carried INSIDE warehouseNative — matches
+	// the real user_count fixture.
 	raw := `{
 	  "type":"user_warehouse","name":"User Count","id":"User Count::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"daily_participation","metricSourceName":"Checkout Events",
 	    "rollupTimeWindow":"custom","customRollUpStart":0,"customRollUpEnd":5}}`
 	res := mustConvert(t, raw, Options{LDDataSource: "snowflake-ds"})
-	if !res.IsLossy() {
-		t.Errorf("daily_participation should be lossy (binary approximation); LossyReasons=%v", res.LossyReasons)
+	if res.IsLossy() {
+		t.Errorf("windowed daily_participation with a data source should not be lossy; LossyReasons=%v", res.LossyReasons)
 	}
 	// No value column → eventKey falls back to the source name (provisional).
 	if res.LDMetric.EventKey != "Checkout Events" {

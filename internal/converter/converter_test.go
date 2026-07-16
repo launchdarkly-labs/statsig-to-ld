@@ -1163,9 +1163,10 @@ func TestConvert_WarehouseNativeNoAggregation_ExplicitError(t *testing.T) {
 }
 
 func TestConvert_WarehouseNativeDailyParticipation_Lossy(t *testing.T) {
-	// A warehouse-native daily_participation metric now converts (binary
-	// approximation) but is marked lossy — skipped by default, --convert-lossy
-	// converts it. It must NOT be a hard error/incompatible anymore.
+	// A warehouse-native daily-participation-RATE metric (rollupTimeWindow
+	// "daily") converts as a binary approximation but is marked lossy — skipped
+	// by default, --convert-lossy converts it. It must NOT be a hard
+	// error/incompatible. (Other unit-count rollups are binary and not lossy.)
 	sg := &statsig.Metric{
 		ID:             "engagement::user_warehouse",
 		Name:           "engagement",
@@ -1173,8 +1174,9 @@ func TestConvert_WarehouseNativeDailyParticipation_Lossy(t *testing.T) {
 		Directionality: "increase",
 		UnitTypes:      []string{"userID"},
 		WarehouseNative: &statsig.WarehouseNative{
-			Aggregation:   "daily_participation",
-			MetricSources: []statsig.MetricSource{{MetricSourceName: "events_src", ValueColumn: "active"}},
+			Aggregation:      "daily_participation",
+			RollupTimeWindow: "daily",
+			MetricSources:    []statsig.MetricSource{{MetricSourceName: "events_src", ValueColumn: "active"}},
 		},
 	}
 	result, err := Convert(sg, Options{LDDataSource: "ds-key"})
@@ -1182,9 +1184,9 @@ func TestConvert_WarehouseNativeDailyParticipation_Lossy(t *testing.T) {
 		t.Fatalf("daily_participation should convert (lossy), not error: %v", err)
 	}
 	if !result.IsLossy() {
-		t.Error("daily_participation conversion should be marked lossy")
+		t.Error("daily-participation-rate conversion should be marked lossy")
 	}
-	assertHasWarning(t, result.LossyReasons, "daily_participation")
+	assertHasWarning(t, result.LossyReasons, "participation rate")
 	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
 		t.Errorf("expected non-numeric (binary), got IsNumeric=%v", result.LDMetric.IsNumeric)
 	}
