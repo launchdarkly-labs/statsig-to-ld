@@ -29,7 +29,12 @@ func dpMetric(rollup string, extra string) string {
 
 func assertBinary(t *testing.T, res *Result) {
 	t.Helper()
-	if res.LDMetric.IsNumeric == nil || *res.LDMetric.IsNumeric {
+	// A binary metric is explicitly isNumeric=false (a non-nil *bool), so LD
+	// receives "isNumeric": false rather than an omitted field.
+	if res.LDMetric.IsNumeric == nil {
+		t.Fatal("IsNumeric should be set to false for a binary metric, got nil")
+	}
+	if *res.LDMetric.IsNumeric {
 		t.Error("daily_participation must convert to a non-numeric (binary) metric")
 	}
 	if res.LDMetric.UnitAggregationType != "average" {
