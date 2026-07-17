@@ -47,6 +47,8 @@ read -rs STATSIG_CONSOLE_KEY && export STATSIG_CONSOLE_KEY
 read -rs LD_API_KEY && export LD_API_KEY
 ```
 
+The LaunchDarkly project key (not a secret) can be set once via `LD_PROJECT` instead of passing `--ld-project` on every command: `export LD_PROJECT=my-project`.
+
 ## Subcommands
 
 ### analyze
@@ -113,6 +115,13 @@ See `statsig-to-ld targeting import --help` for the full flag list.
 Converts Statsig metric definitions into LaunchDarkly metrics. Supports both Statsig Cloud and Warehouse Native metrics, with idempotent re-runs, parallel processing, and structured migration reports.
 
 ```bash
+# List available metric names/types, then exit (only the Statsig key needed)
+statsig-to-ld metrics convert --list
+
+# Export every metric's raw Statsig JSON to a file, then continue (Statsig key
+# only). Useful for debugging conversion — see "Debugging a conversion" below.
+statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json
+
 # Dry-run preview
 statsig-to-ld metrics convert --all --dry-run
 
@@ -121,6 +130,10 @@ statsig-to-ld metrics convert --all --ld-project my-project
 
 # Single metric
 statsig-to-ld metrics convert --metric purchase_revenue --ld-project my-project
+
+# Include lossy conversions too (skipped by default — see
+# "Statsig features not carried over" below)
+statsig-to-ld metrics convert --all --ld-project my-project --convert-lossy
 
 # Warehouse Native with a single data source
 statsig-to-ld metrics convert --all --ld-project my-project \
@@ -161,12 +174,26 @@ Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` �
 | `mean` | custom (isNumeric, average) | Supported |
 | `event_user` | custom | Supported |
 | `event_user_window` | custom | Supported |
-| `ratio` | — | Not yet supported in LD |
+| `ratio` | custom + denominator | Supported — requires a warehouse data source (`--ld-data-source` / `--source-mapping`) |
 | `funnel` | — | Requires LD metric group |
 | `composite` | — | Not supported in LD |
 | `percentile` | — | Not supported as LD type |
 
 See `statsig-to-ld metrics convert --help` for the full flag list.
+
+#### Debugging a conversion (`--dump-raw`)
+
+When a metric converts incorrectly — or, for warehouse-native metrics, isn't recognized — the fastest way to diagnose it is to capture the raw Statsig definition. `--dump-raw <file>` writes every metric's JSON exactly as the Statsig Console API returns it (all fields, including ones the converter doesn't yet model), then continues with whatever else the command was doing:
+
+```bash
+# Just export the raw JSON and stop (only the Statsig key is needed)
+statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json
+
+# Export the raw JSON and preview the conversion in one safe pass (no writes to LD)
+statsig-to-ld metrics convert --all --dry-run --dump-raw statsig-metrics-raw.json
+```
+
+The tool sees a metric only through this response, so the dump is exactly what it works from. It can contain warehouse table and column names — **review and redact before sharing**, and note that the JSON *keys/structure* (Statsig's schema) are what matter for debugging, not the *values* (which you can replace with placeholders).
 
 ## Lossy targeting features
 
@@ -200,6 +227,38 @@ There's also a softer category — **approximated operators** — that import wi
 The `warehouse` subcommand sets up the LaunchDarkly side of a Statsig warehouse-native experimentation project — data export integration, experimentation integration, and LD metric data sources. **It does not migrate metric definitions.** After `warehouse` completes, run [`statsig-to-ld metrics convert`](#metrics-convert) to migrate the warehouse-native metric definitions, using the `source-mapping.json` that `warehouse` writes.
 
 This boundary is deliberate: the warehouse subcommand handles the parts that are unique to warehouse-native (interactive wizard for warehouse credentials, SQL setup scripts, data source schema discovery via LD's preview API), and `metrics convert` handles the parts that are common across all Statsig metrics (DATA LOSS detection on event filters, unit-type mapping, idempotent re-runs, structured warnings).
+
+### Already have LD data sources? Skip `warehouse`
+
+The **only** reason to run `warehouse` is to *create* LaunchDarkly metric data sources. If they already exist — set up in the LD UI, managed via Terraform, or provisioned for you as part of your account — **don't run `warehouse` at all.** Go straight to `metrics convert` and tell it which data source each warehouse-native metric should bind to, in one of two ways:
+
+**One data source for everything** — pass `--ld-data-source <ld-data-source-key>`; every warehouse-native metric binds to that single source:
+
+```bash
+statsig-to-ld metrics convert --all --ld-project my-project \
+  --ld-data-source snowflake-prod
+```
+
+**Per-source mapping** — hand-write the same `source-mapping.json` that `warehouse` would have produced, then pass `--source-mapping`. It's a flat JSON object of **Statsig metric source name → LD data source key**:
+
+```json
+{
+  "purchases_table": "snowflake-purchases-ds",
+  "sessions_table": "snowflake-sessions-ds"
+}
+```
+
+```bash
+statsig-to-ld metrics convert --all --ld-project my-project \
+  --source-mapping source-mapping.json
+```
+
+Finding the two names:
+
+- **Statsig metric source name** (the JSON keys) — each warehouse-native metric's `metricSourceName`, as returned by the Statsig metrics API / shown in the Statsig console. To enumerate every source at once, run `statsig-to-ld warehouse --dry-run`: it fetches the metric sources and writes each one's `name` to its export file without changing anything in LD.
+- **LD data source key** (the JSON values) — the key of the existing metric data source in LaunchDarkly.
+
+A warehouse-native metric whose source resolves through neither flag is still created, but **without** a data source binding (you'll see a `no LD data source specified` warning), and ratio metrics are rejected by LD at creation without one. Event-based (Statsig Cloud) metrics never need a data source, so a project with no warehouse-native metrics needs neither flag.
 
 ### How it works
 
@@ -308,18 +367,26 @@ statsig-to-ld warehouse \
 
 ## Statsig features not carried over (metrics convert)
 
-| Feature | Warning | Impact |
-|---|---|---|
-| Event filter criteria | `DATA LOSS` | LD metric matches all events, not just the filtered subset. Manual filter setup required. |
-| Winsorization | Outlier clipping not applied | Experiment results may be more sensitive to outliers |
-| Per-unit capping | Daily cap not applied | No per-user-per-day value cap |
-| Log transform | Values not log-transformed | Distribution shape may differ |
-| Custom rollup windows | Measurement windows not applied | LD uses full experiment duration |
-| Daily participation rate | Uses standard binary conversion | Different aggregation method |
-| Count distinct | Counts all occurrences instead | Higher counts than Statsig |
-| Metadata aggregation | Aggregates `track()` metricValue | Ensure events send correct value |
+Some Statsig features can't be reproduced faithfully in LaunchDarkly. A metric whose conversion would **drop or approximate** one of these is treated as **lossy**, and by default it is **skipped** — recorded as `skipped_lossy` in the report — rather than silently converted into something subtly different. Pass `--convert-lossy` to convert them anyway and accept the imperfect result; the specific reasons then appear as warnings on each converted metric. (This mirrors `targeting import`'s `--accept-data-loss`.)
 
-Metrics with these features are still converted; the warning appears per-entry in the report.
+**Always lossy — skipped by default:**
+
+| Feature | Effect if converted |
+|---|---|
+| Event filter criteria | LD metric matches all events, not just the filtered subset (`DATA LOSS`) |
+| Per-unit capping | No per-user-per-day value cap |
+| Log transform | Values not log-transformed; distribution shape may differ |
+| Daily participation rate | Falls back to standard binary conversion (different aggregation) |
+| Count distinct (event-based metric) | LD counts all occurrences instead |
+| Metadata aggregation | LD aggregates the `track()` metricValue instead |
+| Multiple metric events | Only the first event is used; the rest are ignored |
+
+**Conditionally lossy — converted faithfully in the common case; lossy (and skipped) only when noted:**
+
+| Feature | Converts when… | Lossy (skipped) when… |
+|---|---|---|
+| Winsorization | numeric or count metric (mapped to LD `winsorLowerPercentile`/`winsorUpperPercentile`) | occurrence metric (non-numeric average), where LD can't apply it |
+| Custom rollup window | a warehouse data source is bound (mapped to LD window offsets via `--ld-data-source`) | no data source is bound (LD windows require a snowflake source) |
 
 ## EU / FedRAMP instances
 
@@ -339,7 +406,9 @@ These are explicit non-goals for v1.0; they're tracked for follow-up releases:
 
 ## Releasing a new version (contributors)
 
-Releases are driven by Git tags. Pushing a `v*` tag triggers CI to cross-compile binaries for macOS, Linux, and Windows and publish them to the [Releases page](https://github.com/launchdarkly-labs/statsig-to-ld/releases).
+Releases are driven by Git tags. Pushing a `v*` tag triggers CI to cross-compile binaries for macOS, Linux, and Windows.
+
+> **The recommended path is to build from source with `go build`** (see the [README](../README.md#cli-build-from-source)). The tagged release binaries are published mainly for Linux, and for shipping major collections of updates and bug fixes.
 
 ```bash
 git tag v0.2.0

@@ -58,6 +58,25 @@ func TestFinalize_MixedStatuses(t *testing.T) {
 	}
 }
 
+func TestFinalize_SkippedLossy(t *testing.T) {
+	r := New()
+	r.AddSkippedLossy("dp", "event_user", "dp::event_user", []string{"daily participation rate not supported"})
+	r.Finalize(1)
+
+	if r.SkippedLossy != 1 {
+		t.Errorf("SkippedLossy = %d, want 1", r.SkippedLossy)
+	}
+	if len(r.Metrics) != 1 || r.Metrics[0].Status != StatusSkippedLossy {
+		t.Fatalf("expected one %s metric, got %+v", StatusSkippedLossy, r.Metrics)
+	}
+	if len(r.Metrics[0].Warnings) != 1 {
+		t.Errorf("expected the lossy reason recorded as a warning, got %v", r.Metrics[0].Warnings)
+	}
+	if r.Converted != 0 {
+		t.Errorf("Converted = %d, want 0 (a lossy-skipped metric is not converted)", r.Converted)
+	}
+}
+
 func TestFinalize_AllConverted(t *testing.T) {
 	r := New()
 	r.AddConverted("m1", "sum", "m1::sum", "m1-sum", "proj", nil)
@@ -66,6 +85,41 @@ func TestFinalize_AllConverted(t *testing.T) {
 
 	if r.Converted != 2 || r.ConvertedWithWarn != 0 {
 		t.Errorf("Converted=%d ConvertedWithWarn=%d, want 2/0", r.Converted, r.ConvertedWithWarn)
+	}
+}
+
+func TestFinalize_ByTypeBreakdown(t *testing.T) {
+	r := New()
+	// Two sum metrics: one clean, one with warnings.
+	r.AddConverted("s1", "sum", "s1::sum", "s1-sum", "proj", nil)
+	r.AddConverted("s2", "sum", "s2::sum", "s2-sum", "proj", []string{"no data source"})
+	// A mean metric that failed.
+	r.AddFailed("m1", "mean", "m1::mean", "API 500")
+	// Two percentile metrics, both incompatible. The type recorded is the
+	// effective Statsig type ("percentile"), which the caller resolves from a
+	// warehouse-native metric's aggregation rather than the "user_warehouse"
+	// wrapper — so the breakdown groups by what actually matters.
+	r.AddSkippedIncompatible("p1", "percentile", "p1::user_warehouse", "not supported")
+	r.AddSkippedIncompatible("p2", "percentile", "p2::user_warehouse", "not supported")
+
+	r.Finalize(5)
+
+	if len(r.ByType) != 3 {
+		t.Fatalf("ByType should have 3 types (sum, mean, percentile), got %d: %+v", len(r.ByType), r.ByType)
+	}
+	if sum := r.ByType["sum"]; sum == nil || sum.Total != 2 || sum.Converted != 2 || sum.ConvertedWithWarn != 1 {
+		t.Errorf("sum breakdown = %+v, want total=2 converted=2 withWarn=1", sum)
+	}
+	if mean := r.ByType["mean"]; mean == nil || mean.Total != 1 || mean.Failed != 1 || mean.Converted != 0 {
+		t.Errorf("mean breakdown = %+v, want total=1 failed=1 converted=0", mean)
+	}
+	if pct := r.ByType["percentile"]; pct == nil || pct.Total != 2 || pct.SkippedIncompatible != 2 {
+		t.Errorf("percentile breakdown = %+v, want total=2 skippedIncompatible=2", pct)
+	}
+	// Per-type counts must reconcile with the top-level totals.
+	if r.Converted != 2 || r.Failed != 1 || r.SkippedIncompatible != 2 {
+		t.Errorf("top-level totals drifted from per-type: converted=%d failed=%d incompat=%d",
+			r.Converted, r.Failed, r.SkippedIncompatible)
 	}
 }
 
@@ -153,6 +207,62 @@ func TestPrintSummaryTable(t *testing.T) {
 	}
 	if !strings.Contains(output, "with warnings") {
 		t.Error("summary table should show 'with warnings' when there are warnings")
+	}
+}
+
+func TestPrintSummaryTable_ByType(t *testing.T) {
+	r := New()
+	r.AddConverted("s1", "sum", "s1::sum", "s1-sum", "proj", nil)
+	r.AddSkippedIncompatible("p1", "percentile", "p1::user_warehouse", "not supported")
+	r.AddSkippedIncompatible("p2", "percentile", "p2::user_warehouse", "not supported")
+	r.Finalize(3)
+
+	var buf bytes.Buffer
+	r.PrintSummaryTable(&buf)
+	output := buf.String()
+
+	if !strings.Contains(output, "By metric type") {
+		t.Errorf("summary should include a per-type breakdown section; got:\n%s", output)
+	}
+	// Both types should be named, so the reader sees the incompatible driver.
+	if !strings.Contains(output, "percentile") || !strings.Contains(output, "sum") {
+		t.Errorf("per-type table should list each effective type; got:\n%s", output)
+	}
+}
+
+func TestPrintSummaryTable_DryRun(t *testing.T) {
+	r := New()
+	r.DryRun = true
+	r.AddConverted("m1", "sum", "m1::sum", "m1-sum", "proj", nil)
+	r.Finalize(1)
+
+	var buf bytes.Buffer
+	r.PrintSummaryTable(&buf)
+	output := buf.String()
+
+	if !strings.Contains(output, "Would convert") {
+		t.Errorf("dry-run summary should say 'Would convert', not 'Converted'; got:\n%s", output)
+	}
+	if !strings.Contains(strings.ToLower(output), "dry run") {
+		t.Errorf("dry-run summary should be labeled as a dry run; got:\n%s", output)
+	}
+}
+
+func TestPrintSummaryTable_ListsFailures(t *testing.T) {
+	r := New()
+	r.AddConverted("ok1", "sum", "ok1::sum", "ok1-sum", "proj", nil)
+	r.AddFailed("boom", "sum", "boom::sum", "LD API returned HTTP 500")
+	r.Finalize(2)
+
+	var buf bytes.Buffer
+	r.PrintSummaryTable(&buf)
+	output := buf.String()
+
+	if !strings.Contains(output, "boom") {
+		t.Errorf("summary should name the failed metric 'boom'; got:\n%s", output)
+	}
+	if !strings.Contains(output, "LD API returned HTTP 500") {
+		t.Errorf("summary should show the failure reason; got:\n%s", output)
 	}
 }
 

@@ -1,18 +1,18 @@
 {
   "exported_at": "2026-05-12T20:00:00+00:00",
   "warehouse_connection": {
-    "accountName": "LD_NATIVE_EXPERIMENTATION_DEV",
-    "snowflakeHostAddress": "IDMXGKA-LD_NATIVE_EXPERIMENTATION_DEV.snowflakecomputing.com",
+    "accountName": "ACME_ANALYTICS",
+    "snowflakeHostAddress": "XY12345-ACME_ANALYTICS.snowflakecomputing.com",
     "serviceUserName": "STATSIG_SERVICE_USER",
     "stagingDatabaseName": "LD_EXPORT",
-    "stagingSchemaName": "EXPORT_SBODKE__NEW_ENVIRONMENT",
-    "computeWarehouse": "LD_EXPERIMENTATION_WH"
+    "stagingSchemaName": "EXPORT_DEMO__PRODUCTION",
+    "computeWarehouse": "COMPUTE_WH"
   },
   "metric_sources": [
     {
       "name": "daily_user_metrics_v2",
       "sourceType": "table",
-      "tableName": "LD_EXPORT.EXPORT_SBODKE__NEW_ENVIRONMENT.STAGING_METRIC_EVENTS",
+      "tableName": "LD_EXPORT.EXPORT_DEMO__PRODUCTION.STAGING_METRIC_EVENTS",
       "description": "Daily aggregated user metrics from product events",
       "tags": ["production", "daily"],
       "timestampColumn": "received_time",
@@ -40,7 +40,7 @@
     {
       "name": "conversion_events",
       "sourceType": "query",
-      "sql": "SELECT context_key, kind AS event_name, received_time AS timestamp, event_value FROM LD_EXPORT.EXPORT_SBODKE__NEW_ENVIRONMENT.STAGING_METRIC_EVENTS WHERE received_time >= DATEADD(day, -90, CURRENT_DATE())",
+      "sql": "SELECT context_key, kind AS event_name, received_time AS timestamp, event_value FROM LD_EXPORT.EXPORT_DEMO__PRODUCTION.STAGING_METRIC_EVENTS WHERE received_time >= DATEADD(day, -90, CURRENT_DATE())",
       "description": "Conversion and purchase events",
       "tags": ["production"],
       "timestampColumn": "received_time",

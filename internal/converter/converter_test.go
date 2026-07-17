@@ -151,6 +151,53 @@ func TestConvert_EventUserWindow(t *testing.T) {
 	}
 }
 
+func TestConvert_EventCount_UsesLineageEvent(t *testing.T) {
+	// Built-in event_count metrics carry no metricEvents; the counted event is in
+	// lineage.events. The converter should use it and produce a normal count
+	// metric, not fail with "no metricEvents".
+	sg := &statsig.Metric{
+		ID:             "purchase::event_count",
+		Name:           "purchase",
+		Type:           "event_count",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		MetricEvents:   nil, // event_count has none
+		Lineage:        statsig.Lineage{Events: []string{"purchase"}},
+	}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("event_count should convert via lineage.events, got error: %v", err)
+	}
+	if result.LDMetric.EventKey != "purchase" {
+		t.Errorf("EventKey = %q, want \"purchase\" (from lineage.events[0])", result.LDMetric.EventKey)
+	}
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Error("event_count should map to a non-numeric count metric")
+	}
+	if result.LDMetric.UnitAggregationType != "sum" {
+		t.Errorf("UnitAggregationType = %q, want \"sum\"", result.LDMetric.UnitAggregationType)
+	}
+}
+
+func TestConvert_NoEventsNoLineage_Errors(t *testing.T) {
+	// With neither metricEvents nor lineage.events, there's no event key to map —
+	// still a hard error (not a known-incompatible skip).
+	sg := &statsig.Metric{
+		ID:             "broken::event_count",
+		Name:           "broken",
+		Type:           "event_count",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+	}
+	_, err := Convert(sg, Options{})
+	if err == nil {
+		t.Fatal("expected an error when there are no metric events and no lineage events")
+	}
+	if IsIncompatible(err) {
+		t.Error("missing events should be a hard error, not an IncompatibleError skip")
+	}
+}
+
 // --- Incompatible types ---
 
 func TestConvert_IncompatibleTypes(t *testing.T) {
@@ -661,17 +708,16 @@ func TestConvert_NoMetricEvents(t *testing.T) {
 
 // --- Ratio metrics ---
 //
-// Real Statsig (cloud) ratio metrics carry the numerator and denominator inline
-// as metricEvents[0] and metricEvents[1] — verified against the live Statsig
-// Console API. They do NOT populate metricComponentMetrics (that field is for
-// composite metrics), and Statsig rejects a ratio defined that way (HTTP 400
-// "Metric event is empty"). Each event's Type is its aggregation ("count",
-// "count_distinct", "value", "metadata").
+// Statsig (cloud) ratio metrics carry the numerator and denominator inline as
+// metricEvents[0] and metricEvents[1]. They do NOT populate
+// metricComponentMetrics (that field is for composite metrics), and Statsig
+// rejects a ratio defined that way (HTTP 400 "Metric event is empty"). Each
+// event's Type is its aggregation ("count", "count_distinct", "value",
+// "metadata").
 
-// ratioMetric builds a Statsig cloud ratio in the order Statsig actually stores
-// them: metricEvents[0] = denominator, metricEvents[1] = numerator (verified
-// against the Statsig console). Params stay (numerator, denominator) for
-// readable call sites.
+// ratioMetric builds a Statsig cloud ratio in the order Statsig stores them:
+// metricEvents[0] = denominator, metricEvents[1] = numerator. Params stay
+// (numerator, denominator) for readable call sites.
 func ratioMetric(numEvent, numType, denEvent, denType string) *statsig.Metric {
 	return &statsig.Metric{
 		ID:             "checkout_per_visit::ratio",
@@ -689,12 +735,11 @@ func ratioMetric(numEvent, numType, denEvent, denType string) *statsig.Metric {
 }
 
 func TestConvert_Ratio_NumeratorIsSecondEvent(t *testing.T) {
-	// Statsig stores a cloud ratio positionally with no explicit numerator/
-	// denominator field. Verified against the Statsig console: metricEvents[0] is
-	// the DENOMINATOR and metricEvents[1] is the NUMERATOR. This ratio is
-	// "checkout_completed per page_view" — numerator = checkout_completed
-	// (index 1), denominator = page_view (index 0). Built inline (not via the
-	// helper) so it independently pins the numerator/denominator direction.
+	// A cloud ratio is positional, with no explicit numerator/denominator field:
+	// metricEvents[0] is the DENOMINATOR and metricEvents[1] is the NUMERATOR.
+	// This ratio is "checkout_completed per page_view" — numerator =
+	// checkout_completed (index 1), denominator = page_view (index 0). Built
+	// inline (not via the helper) so it independently pins the direction.
 	sg := &statsig.Metric{
 		ID:             "checkouts_per_visit::ratio",
 		Name:           "checkouts_per_visit",
@@ -922,6 +967,75 @@ func TestConvert_Ratio_WithDataSourceNoWarning(t *testing.T) {
 	}
 }
 
+// --- Lossy classification (drives the default skip; --convert-lossy overrides) ---
+
+func TestConvert_Lossy_DailyParticipation(t *testing.T) {
+	sg := baseMetric("event_user")
+	sg.RollupTimeWindow = "daily_participation_rate"
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("daily participation rate should mark the conversion lossy")
+	}
+	assertHasWarning(t, result.LossyReasons, "daily participation")
+}
+
+func TestConvert_Lossy_Capping(t *testing.T) {
+	sg := baseMetric("sum")
+	sg.MetricEvents[0] = statsig.MetricEvent{Name: "purchase", Type: "value"}
+	sg.WarehouseNative = &statsig.WarehouseNative{Cap: float64Ptr(500)}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("per-unit capping should mark the conversion lossy")
+	}
+}
+
+func TestConvert_Lossy_EventFilters(t *testing.T) {
+	sg := baseMetric("event_count_custom")
+	sg.MetricEvents[0].Criteria = []statsig.Criterion{
+		{Type: "metadata", Column: "country", Condition: "=", Values: []string{"US"}},
+	}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("dropped event filter criteria should mark the conversion lossy")
+	}
+}
+
+func TestConvert_NotLossy_AdvisoryUnitType(t *testing.T) {
+	// A non-standard unit type is an advisory warning, not a lossy conversion —
+	// the metric still converts faithfully.
+	sg := baseMetric("event_count_custom")
+	sg.UnitTypes = []string{"userID", "companyID"}
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatal("expected an advisory warning about companyID")
+	}
+	if result.IsLossy() {
+		t.Errorf("advisory unit-type warning must not be lossy; LossyReasons = %v", result.LossyReasons)
+	}
+}
+
+func TestConvert_NotLossy_Clean(t *testing.T) {
+	result, err := Convert(baseMetric("event_count_custom"), Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsLossy() {
+		t.Errorf("clean conversion must not be lossy; LossyReasons = %v", result.LossyReasons)
+	}
+}
+
 // --- Helpers ---
 
 func assertHasWarning(t *testing.T, warnings []string, substr string) {
@@ -932,4 +1046,208 @@ func assertHasWarning(t *testing.T, warnings []string, substr string) {
 		}
 	}
 	t.Errorf("expected warning containing %q, got: %v", substr, warnings)
+}
+
+// --- Warehouse-native routing ---
+
+func TestConvert_WarehouseNativeSum_RoutesByAggregation(t *testing.T) {
+	// Top-level type is user_warehouse; the real shape is in warehouseNative.
+	sg := &statsig.Metric{
+		ID:             "revenue::user_warehouse",
+		Name:           "revenue",
+		Type:           "user_warehouse",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		WarehouseNative: &statsig.WarehouseNative{
+			Aggregation:   "sum",
+			MetricSources: []statsig.MetricSource{{MetricSourceName: "purchase_src", ValueColumn: "price_usd"}},
+		},
+	}
+	result, err := Convert(sg, Options{SourceMapping: map[string]string{"purchase_src": "ld-purchase"}})
+	if err != nil {
+		t.Fatalf("unexpected error (WN sum should route via aggregation, not error as unknown type): %v", err)
+	}
+	if result.LDMetric.UnitAggregationType != "sum" {
+		t.Errorf("UnitAggregationType = %q, want \"sum\"", result.LDMetric.UnitAggregationType)
+	}
+	if result.LDMetric.EventKey != "price_usd" {
+		t.Errorf("EventKey = %q, want \"price_usd\"", result.LDMetric.EventKey)
+	}
+	if result.LDMetric.DataSource == nil || result.LDMetric.DataSource.Key != "ld-purchase" {
+		t.Errorf("DataSource = %+v, want key ld-purchase", result.LDMetric.DataSource)
+	}
+}
+
+func TestConvert_WarehouseNativeRatio_PerTermSources(t *testing.T) {
+	sg := &statsig.Metric{
+		ID:             "rev-per-visitor::user_warehouse",
+		Name:           "rev-per-visitor",
+		Type:           "user_warehouse",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		WarehouseNative: &statsig.WarehouseNative{
+			Aggregation:                 "ratio",
+			MetricSources:               []statsig.MetricSource{{MetricSourceName: "purchase_src", ValueColumn: "price_usd"}},
+			NumeratorAggregation:        "sum",
+			DenominatorMetricSourceName: "visitor_src",
+			DenominatorAggregation:      "count",
+		},
+	}
+	result, err := Convert(sg, Options{SourceMapping: map[string]string{
+		"purchase_src": "ld-purchase",
+		"visitor_src":  "ld-visitor",
+	}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.DataSource == nil || result.LDMetric.DataSource.Key != "ld-purchase" {
+		t.Errorf("numerator DataSource = %+v, want key ld-purchase", result.LDMetric.DataSource)
+	}
+	if result.LDMetric.Denominator == nil {
+		t.Fatalf("Denominator is nil, want a denominator term")
+	}
+	if result.LDMetric.Denominator.DataSource == nil || result.LDMetric.Denominator.DataSource.Key != "ld-visitor" {
+		t.Errorf("denominator DataSource = %+v, want key ld-visitor (independent of numerator)", result.LDMetric.Denominator.DataSource)
+	}
+}
+
+func TestMetric_WarehouseNativeHelpers(t *testing.T) {
+	wn := &statsig.Metric{Type: "user_warehouse", WarehouseNative: &statsig.WarehouseNative{
+		Aggregation:   "count_distinct",
+		MetricSources: []statsig.MetricSource{{MetricSourceName: "src_a"}},
+	}}
+	if !wn.IsWarehouseNative() {
+		t.Error("IsWarehouseNative() = false, want true")
+	}
+	if wn.EffectiveType() != "count_distinct" {
+		t.Errorf("EffectiveType() = %q, want \"count_distinct\"", wn.EffectiveType())
+	}
+	if wn.NumeratorSourceName() != "src_a" {
+		t.Errorf("NumeratorSourceName() = %q, want \"src_a\"", wn.NumeratorSourceName())
+	}
+
+	cloud := &statsig.Metric{Type: "sum", MetricSourceName: "top_src"}
+	if cloud.IsWarehouseNative() {
+		t.Error("IsWarehouseNative() = true for cloud metric, want false")
+	}
+	if cloud.EffectiveType() != "sum" {
+		t.Errorf("EffectiveType() = %q, want \"sum\"", cloud.EffectiveType())
+	}
+	if cloud.NumeratorSourceName() != "top_src" {
+		t.Errorf("NumeratorSourceName() = %q, want \"top_src\"", cloud.NumeratorSourceName())
+	}
+}
+
+func TestConvert_WarehouseNativeNoAggregation_ExplicitError(t *testing.T) {
+	// type user_warehouse but no aggregation (parsing gap / incomplete metric):
+	// should fail with a clear error, not a generic "unknown type", and not be
+	// treated as a known-incompatible skip.
+	sg := &statsig.Metric{
+		ID:              "broken::user_warehouse",
+		Name:            "broken",
+		Type:            "user_warehouse",
+		Directionality:  "increase",
+		UnitTypes:       []string{"userID"},
+		WarehouseNative: &statsig.WarehouseNative{}, // Aggregation == ""
+	}
+	_, err := Convert(sg, Options{})
+	if err == nil {
+		t.Fatal("expected an error for warehouse-native metric with no aggregation")
+	}
+	if IsIncompatible(err) {
+		t.Errorf("should be a hard error, not an IncompatibleError skip: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no aggregation") {
+		t.Errorf("error should mention the missing aggregation, got: %v", err)
+	}
+}
+
+func TestConvert_WarehouseNativeDailyParticipation_Lossy(t *testing.T) {
+	// A warehouse-native daily-participation-RATE metric (rollupTimeWindow
+	// "daily") converts as a binary approximation but is marked lossy — skipped
+	// by default, --convert-lossy converts it. It must NOT be a hard
+	// error/incompatible. (Other unit-count rollups are binary and not lossy.)
+	sg := &statsig.Metric{
+		ID:             "engagement::user_warehouse",
+		Name:           "engagement",
+		Type:           "user_warehouse",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		WarehouseNative: &statsig.WarehouseNative{
+			Aggregation:      "daily_participation",
+			RollupTimeWindow: "daily",
+			MetricSources:    []statsig.MetricSource{{MetricSourceName: "events_src", ValueColumn: "active"}},
+		},
+	}
+	result, err := Convert(sg, Options{LDDataSource: "ds-key"})
+	if err != nil {
+		t.Fatalf("daily_participation should convert (lossy), not error: %v", err)
+	}
+	if !result.IsLossy() {
+		t.Error("daily-participation-rate conversion should be marked lossy")
+	}
+	assertHasWarning(t, result.LossyReasons, "participation rate")
+	if result.LDMetric.IsNumeric == nil || *result.LDMetric.IsNumeric {
+		t.Errorf("expected non-numeric (binary), got IsNumeric=%v", result.LDMetric.IsNumeric)
+	}
+	if result.LDMetric.UnitAggregationType != "average" {
+		t.Errorf("UnitAggregationType = %q, want \"average\"", result.LDMetric.UnitAggregationType)
+	}
+}
+
+// --- Ratio winsorization + windowing ---
+
+func ratioWithWindowAndWinsor() *statsig.Metric {
+	return &statsig.Metric{
+		ID:             "rev-ratio::ratio",
+		Name:           "rev-ratio",
+		Type:           "ratio",
+		Directionality: "increase",
+		UnitTypes:      []string{"userID"},
+		MetricEvents: []statsig.MetricEvent{
+			{Name: "add_to_cart", Type: "count"}, // [0] = denominator (per inversion fix)
+			{Name: "purchase", Type: "value"},    // [1] = numerator (numeric)
+		},
+		RollupTimeWindow:  "custom",
+		CustomRollUpStart: float64Ptr(0),
+		CustomRollUpEnd:   float64Ptr(7),
+		WarehouseNative:   &statsig.WarehouseNative{WinsorizationLow: float64Ptr(0.01), WinsorizationHigh: float64Ptr(0.99)},
+	}
+}
+
+func TestConvertRatio_WinsorizationAndWindow(t *testing.T) {
+	sg := ratioWithWindowAndWinsor()
+	result, err := Convert(sg, Options{LDDataSource: "ds-key"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ld := result.LDMetric
+	// Winsorization mapped to numerator (0–1 → 0–100).
+	if ld.WinsorLowerPercentile == nil || *ld.WinsorLowerPercentile != 1 {
+		t.Errorf("WinsorLowerPercentile = %v, want 1", ld.WinsorLowerPercentile)
+	}
+	if ld.WinsorUpperPercentile == nil || *ld.WinsorUpperPercentile != 99 {
+		t.Errorf("WinsorUpperPercentile = %v, want 99", ld.WinsorUpperPercentile)
+	}
+	// Window offsets set because a data source is bound (days → ms).
+	if ld.WindowStartOffset == nil || *ld.WindowStartOffset != 0 {
+		t.Errorf("WindowStartOffset = %v, want 0", ld.WindowStartOffset)
+	}
+	if ld.WindowEndOffset == nil || *ld.WindowEndOffset != int64(7*millisPerDay) {
+		t.Errorf("WindowEndOffset = %v, want %d", ld.WindowEndOffset, int64(7*millisPerDay))
+	}
+}
+
+func TestConvertRatio_WindowWithoutDataSourceWarns(t *testing.T) {
+	sg := ratioWithWindowAndWinsor()
+	// No LDDataSource and no source mapping → no data source → window not applied.
+	result, err := Convert(sg, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LDMetric.WindowStartOffset != nil || result.LDMetric.WindowEndOffset != nil {
+		t.Errorf("window offsets should be unset without a data source, got start=%v end=%v",
+			result.LDMetric.WindowStartOffset, result.LDMetric.WindowEndOffset)
+	}
+	assertHasWarning(t, result.Warnings, "custom rollup window")
 }

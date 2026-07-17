@@ -28,6 +28,17 @@ type Metric struct {
 	FunnelCountDistinct    string            `json:"funnelCountDistinct"`
 
 	MetricSourceName string `json:"metricSourceName"`
+
+	// Lineage lists the raw events/metrics a metric derives from. Built-in
+	// event_count metrics carry their counted event here and have no
+	// metricEvents entry.
+	Lineage Lineage `json:"lineage"`
+}
+
+// Lineage records the events and metrics a Statsig metric is derived from.
+type Lineage struct {
+	Events  []string `json:"events"`
+	Metrics []string `json:"metrics"`
 }
 
 // MetricEvent represents an event definition within a Statsig metric.
@@ -46,13 +57,154 @@ type Criterion struct {
 	Values    []string `json:"values"`
 }
 
-// WarehouseNative contains Statsig Warehouse Native-specific metric configuration.
+// WarehouseNative holds Statsig warehouse-native metric config. For these
+// metrics the top-level Metric.Type is "user_warehouse"/"hybrid_warehouse" and
+// the real shape lives in Aggregation. Field names/shapes are confirmed against
+// Statsig's own public repos: real metric dumps in statsig-io/semantic_layer and
+// the marshaling contract in statsig-io/terraform-provider-statsig
+// (WarehouseNativeAPIModel). Two source forms occur in the wild — a flat
+// single-source form (MetricSourceName/ValueColumn/Criteria directly here) and a
+// MetricSources array — so the converter reads both (see NumeratorValueColumn /
+// NumeratorCriteria).
 type WarehouseNative struct {
+	// Aggregation is the real shape: count | sum | mean | count_distinct |
+	// percentile | daily_participation | ratio | funnel.
+	Aggregation string `json:"aggregation"`
+
+	MetricSources []MetricSource `json:"metricSources"`
+
+	// Flat single-source form: source name, value column, and filter criteria
+	// live directly on warehouseNative (Statsig's Terraform model and the
+	// semantic_layer dumps use this form).
+	MetricSourceName string      `json:"metricSourceName"`
+	ValueColumn      string      `json:"valueColumn"`
+	Criteria         []Criterion `json:"criteria"`
+
+	// Windowing lives inside warehouseNative for WHN metrics (top-level on the
+	// metric for cloud metrics).
+	RollupTimeWindow  string   `json:"rollupTimeWindow"`
+	CustomRollUpStart *float64 `json:"customRollUpStart"`
+	CustomRollUpEnd   *float64 `json:"customRollUpEnd"`
+
+	// Ratio terms (top-level Aggregation is "ratio"): the numerator uses the
+	// fields above; the denominator has its own aggregation, column, and filters.
+	NumeratorAggregation        string      `json:"numeratorAggregation"`
+	DenominatorMetricSourceName string      `json:"denominatorMetricSourceName"`
+	DenominatorAggregation      string      `json:"denominatorAggregation"`
+	DenominatorValueColumn      string      `json:"denominatorValueColumn"`
+	DenominatorCriteria         []Criterion `json:"denominatorCriteria"`
+
 	WinsorizationHigh *float64 `json:"winsorizationHigh"`
 	WinsorizationLow  *float64 `json:"winsorizationLow"`
 	Cap               *float64 `json:"cap"`
 	Percentile        *float64 `json:"percentile"`
 	UseLogTransform   *bool    `json:"useLogTransform"`
+	ValueThreshold    *float64 `json:"valueThreshold"`
+
+	// Advanced analysis features with no direct LaunchDarkly equivalent; the
+	// converter flags them but they don't change the core metric definition.
+	CupedAttributionWindow *float64 `json:"cupedAttributionWindow"`
+	MetricDimensionColumns []string `json:"metricDimensionColumns"`
+	WaitForCohortWindow    *bool    `json:"waitForCohortWindow"`
+	MetricBakeDays         *float64 `json:"metricBakeDays"`
+}
+
+// MetricSource is a numerator-side warehouse source. The criteria sub-shape is
+// unverified against a live Console API response.
+type MetricSource struct {
+	MetricSourceName string      `json:"metricSourceName"`
+	Criteria         []Criterion `json:"criteria"`
+	ValueColumn      string      `json:"valueColumn"`
+}
+
+// MetricSourceConfig is a warehouse-native metric source as returned by
+// /console/v1/metrics/metric_source/list. Only the fields the converter needs
+// are modeled; the analysis unit(s) a metric can use live in IDTypeMapping.
+type MetricSourceConfig struct {
+	Name          string          `json:"name"`
+	IDTypeMapping []IDTypeMapping `json:"idTypeMapping"`
+}
+
+// IDTypeMapping maps a Statsig unit ID (e.g. "userID", "companyID") to the
+// source column that holds it. StatsigUnitID is the analysis unit.
+type IDTypeMapping struct {
+	StatsigUnitID string `json:"statsigUnitID"`
+	Column        string `json:"column"`
+}
+
+// IsWarehouseNative reports whether the metric's real aggregation lives in
+// WarehouseNative.Aggregation rather than the top-level Type.
+func (m *Metric) IsWarehouseNative() bool {
+	return m.Type == "user_warehouse" || m.Type == "hybrid_warehouse" || m.HasWarehouseAggregation()
+}
+
+// HasWarehouseAggregation reports whether an explicit warehouse-native
+// aggregation is set (the value EffectiveType returns).
+func (m *Metric) HasWarehouseAggregation() bool {
+	return m.WarehouseNative != nil && m.WarehouseNative.Aggregation != ""
+}
+
+// EffectiveType returns the aggregation to dispatch on: the warehouse-native
+// aggregation when present, else the top-level type. (Convert rejects a
+// warehouse-native metric that reaches it without an aggregation, so the
+// fallback is only a defensive default.)
+func (m *Metric) EffectiveType() string {
+	if m.HasWarehouseAggregation() {
+		return m.WarehouseNative.Aggregation
+	}
+	return m.Type
+}
+
+// EffectiveRollupTimeWindow returns the metric's rollup mode: the
+// warehouse-native rollupTimeWindow when present, else the top-level value.
+// For the unit-count ("daily_participation") family, Statsig's values are
+// "daily" (daily participation rate), "max" (one-time event), and "custom"
+// (custom attribution window).
+func (m *Metric) EffectiveRollupTimeWindow() string {
+	if m.WarehouseNative != nil && m.WarehouseNative.RollupTimeWindow != "" {
+		return m.WarehouseNative.RollupTimeWindow
+	}
+	return m.RollupTimeWindow
+}
+
+// NumeratorSourceName returns the numerator's warehouse source name, preferring
+// MetricSources over the deprecated single-source fields.
+func (m *Metric) NumeratorSourceName() string {
+	if m.WarehouseNative != nil {
+		if len(m.WarehouseNative.MetricSources) > 0 && m.WarehouseNative.MetricSources[0].MetricSourceName != "" {
+			return m.WarehouseNative.MetricSources[0].MetricSourceName
+		}
+		if m.WarehouseNative.MetricSourceName != "" {
+			return m.WarehouseNative.MetricSourceName
+		}
+	}
+	return m.MetricSourceName
+}
+
+// NumeratorValueColumn returns the numerator's warehouse value column, reading
+// either the MetricSources array or the flat warehouseNative.valueColumn form.
+func (m *Metric) NumeratorValueColumn() string {
+	if m.WarehouseNative == nil {
+		return ""
+	}
+	wn := m.WarehouseNative
+	if len(wn.MetricSources) > 0 && wn.MetricSources[0].ValueColumn != "" {
+		return wn.MetricSources[0].ValueColumn
+	}
+	return wn.ValueColumn
+}
+
+// NumeratorCriteria returns the numerator's filter criteria, reading either the
+// MetricSources array or the flat warehouseNative.criteria form.
+func (m *Metric) NumeratorCriteria() []Criterion {
+	if m.WarehouseNative == nil {
+		return nil
+	}
+	wn := m.WarehouseNative
+	if len(wn.MetricSources) > 0 && len(wn.MetricSources[0].Criteria) > 0 {
+		return wn.MetricSources[0].Criteria
+	}
+	return wn.Criteria
 }
 
 // ComponentMetric is a reference to another metric used in composite metrics.

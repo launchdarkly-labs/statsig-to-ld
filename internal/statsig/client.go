@@ -72,6 +72,28 @@ func (c *Client) ListAllMetrics(ctx context.Context) ([]Metric, error) {
 	return all, fmt.Errorf("Statsig metrics pagination exceeded %d pages", maxPages)
 }
 
+// ListAllMetricsRaw fetches every metric definition and returns each one's raw
+// JSON exactly as the Statsig Console API returns it — including fields the typed
+// Metric struct does not model. It powers the `metrics convert --dump-raw` flag,
+// so the true shape of a metric (notably warehouse-native metrics, whose schema
+// we don't yet have a live sample of) can be captured and inspected.
+func (c *Client) ListAllMetricsRaw(ctx context.Context) ([]json.RawMessage, error) {
+	all := make([]json.RawMessage, 0)
+	for page := 1; page <= maxPages; page++ {
+		reqURL := fmt.Sprintf("%s/metrics/list?limit=%d&page=%d", c.apiBase, pageSize, page)
+		batch, nextPage, err := c.fetchMetricsPageRaw(ctx, reqURL)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, batch...)
+
+		if nextPage == "" || len(batch) < pageSize {
+			return all, nil
+		}
+	}
+	return all, fmt.Errorf("Statsig metrics pagination exceeded %d pages", maxPages)
+}
+
 // GetMetricByName fetches all metrics and returns the one matching the given name.
 // Note: the Statsig Console API does not support server-side name filtering,
 // so this fetches the full metric list and scans locally.
@@ -107,6 +129,36 @@ func (c *Client) fetchMetricsPage(ctx context.Context, reqURL string) ([]Metric,
 	}
 
 	var listResp metricListResponse
+	if err := json.Unmarshal(body, &listResp); err != nil {
+		return nil, "", fmt.Errorf("parsing response: %w (body: %s)", err, httputil.Truncate(string(body), 200))
+	}
+
+	return listResp.Data, listResp.Pagination.NextPage, nil
+}
+
+// fetchMetricsPageRaw is the raw-JSON counterpart of fetchMetricsPage: it keeps
+// each metric object as a json.RawMessage instead of decoding into Metric, so no
+// fields are dropped.
+func (c *Client) fetchMetricsPageRaw(ctx context.Context, reqURL string) ([]json.RawMessage, string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("STATSIG-API-KEY", c.apiKey)
+
+	body, statusCode, err := httputil.DoWithRetry(ctx, c.httpClient, req, nil)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if statusCode != 200 {
+		return nil, "", fmt.Errorf("Statsig API returned HTTP %d: %s", statusCode, httputil.Truncate(string(body), 300))
+	}
+
+	var listResp struct {
+		Data       []json.RawMessage `json:"data"`
+		Pagination pagination        `json:"pagination"`
+	}
 	if err := json.Unmarshal(body, &listResp); err != nil {
 		return nil, "", fmt.Errorf("parsing response: %w (body: %s)", err, httputil.Truncate(string(body), 200))
 	}
@@ -178,6 +230,43 @@ func (c *Client) ListDynamicConfigs(ctx context.Context) ([]DynamicConfig, error
 		}
 	}
 	return configs, fmt.Errorf("Statsig dynamic configs pagination exceeded %d pages", maxPages)
+}
+
+// ListAllMetricSources fetches every warehouse-native metric source from
+// /console/v1/metrics/metric_source/list. It exists so the converter can
+// resolve a metric's analysis unit from its source's id-type mapping, which the
+// /metrics/list response does not include.
+func (c *Client) ListAllMetricSources(ctx context.Context) ([]MetricSourceConfig, error) {
+	reqURL, err := url.JoinPath(c.apiBase, "metrics", "metric_source", "list")
+	if err != nil {
+		return nil, fmt.Errorf("building metric_source list URL: %w", err)
+	}
+
+	sources := make([]MetricSourceConfig, 0)
+	for page := 1; page <= maxPages; page++ {
+		body, statusCode, err := c.makePagedRequest(ctx, reqURL, page)
+		if err != nil {
+			return nil, err
+		}
+		if statusCode != http.StatusOK {
+			return nil, fmt.Errorf("listing Statsig metric sources: HTTP %d: %s", statusCode, httputil.Truncate(string(body), 300))
+		}
+
+		var r struct {
+			Data       []MetricSourceConfig `json:"data"`
+			Pagination pagination           `json:"pagination"`
+		}
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, fmt.Errorf("parsing metric_source response: %w (body: %s)", err, httputil.Truncate(string(body), 200))
+		}
+
+		sources = append(sources, r.Data...)
+
+		if r.Pagination.NextPage == "" || len(r.Data) < pageSize {
+			return sources, nil
+		}
+	}
+	return sources, fmt.Errorf("Statsig metric sources pagination exceeded %d pages", maxPages)
 }
 
 // ============================================================================
