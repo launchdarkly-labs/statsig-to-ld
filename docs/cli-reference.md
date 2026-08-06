@@ -150,6 +150,22 @@ Where `sources.json` is:
 {"purchases_table": "snowflake-purchases-ds", "sessions_table": "snowflake-sessions-ds"}
 ```
 
+#### Flags worth knowing more about
+
+`--help` keeps every flag description to one line so the list stays scannable. These are the ones with more to them:
+
+| Flag | Detail |
+|---|---|
+| `--ld-data-source` | Binds warehouse-native and ratio metrics to a LaunchDarkly data source. Effectively required for them: a ratio metric is **rejected** without one (HTTP 400), and other warehouse-native metrics are created unbound, collecting no data. Metric filters and measurement windows also only convert when a data source is bound. Use `--source-mapping` instead when different Statsig sources map to different LD data sources. |
+| `--source-mapping` | Takes precedence over `--ld-data-source` for any Statsig source name it lists. Unlisted sources fall back to `--ld-data-source`. |
+| `--concurrency` | Defaults to 4, deliberately low to stay under LaunchDarkly's API rate limiter. Raise it if your project's limits allow; lower it if you start seeing 429s. |
+| `--convert-lossy` | Off by default. A lossy metric is one where converting would drop or approximate a Statsig feature, so it is recorded as `skipped_lossy` in the report with the reason, rather than being silently converted into something subtly different. Pass this to convert them anyway and accept the imperfect result. See "Statsig features not carried over" below. |
+| `--dump-raw` | Writes every Statsig metric's raw JSON verbatim, all fields, then continues the run. Needs only the Statsig key. The fastest way to see what Statsig actually returned for a metric that converted oddly. See "Debugging a conversion" below. |
+| `--list` | Prints name, type, and id for every metric, then exits without converting. Needs only the Statsig key. |
+| `--default-unit` | Applies to numeric metrics, which LaunchDarkly requires a unit for. Defaults to `units` when unset. Examples: `$`, `ms`, `count`. |
+| `--unit-type-mapping` | Maps Statsig unit types to LD context kinds, e.g. `{"companyID": "company"}`. Without a mapping, a non-`userID` unit type is lowercased as a best guess and warned about. |
+| `--verbose` | Replaces the compact per-metric ticker with a line per metric showing status, name, key, and any error. |
+
 #### Custom unit types (company-level experiments)
 
 If your Statsig project uses unit types beyond `userID` (e.g. `companyID`, `teamID`), map them to your LD context kinds:

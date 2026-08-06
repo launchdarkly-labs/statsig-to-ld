@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -42,6 +43,10 @@ const statsigCriterionTypeMetadata = "metadata"
 // It names the offending condition so the operator can see exactly what blocked
 // the metric rather than a generic failure.
 type unsupportedCriteriaError struct {
+	// Code is a stable identifier for the class of problem, for aggregation in the
+	// migration report. Condition names the Statsig condition responsible, when
+	// one is; some problems (too many clauses) are not tied to a single condition.
+	Code      string
 	Condition string
 	Reason    string
 }
@@ -54,8 +59,31 @@ func (e *unsupportedCriteriaError) Error() string {
 }
 
 func unsupported(condition, reason string) error {
-	return &unsupportedCriteriaError{Condition: condition, Reason: reason}
+	return &unsupportedCriteriaError{Code: FilterBlockedCondition, Condition: condition, Reason: reason}
 }
+
+// unsupportedCoded is unsupported() with an explicit code, for problems that are
+// not "this condition has no equivalent".
+func unsupportedCoded(code, condition, reason string) error {
+	return &unsupportedCriteriaError{Code: code, Condition: condition, Reason: reason}
+}
+
+// Codes for why a term's filter could not be produced. They appear as
+// FilterOutcome.BlockedBy in the migration report.
+const (
+	FilterBlockedCondition      = "unsupported_condition"
+	FilterBlockedCriterionType  = "unsupported_criterion_type"
+	FilterBlockedNullOverride   = "null_vacuous_override"
+	FilterBlockedMissingColumn  = "missing_column"
+	FilterBlockedValue          = "invalid_value"
+	FilterBlockedValueCount     = "wrong_value_count"
+	FilterBlockedTooManyClauses = "too_many_clauses"
+	FilterBlockedNoDataSource   = "no_data_source"
+	FilterBlockedCloudMetric    = "cloud_metric"
+	// FilterBlockedDuplicateLocation means the metric carried criteria on both
+	// warehouseNative and metricEvents, and only the warehouseNative ones convert.
+	FilterBlockedDuplicateLocation = "criteria_in_two_locations"
+)
 
 // criteriaToFilter converts one term's Statsig filter criteria into a
 // LaunchDarkly metric filter.
@@ -81,7 +109,7 @@ func criteriaToFilter(criteria []statsig.Criterion) (*launchdarkly.EventFilter, 
 		return nil, nil
 	}
 	if len(criteria) > ldFilterMaxLeaves {
-		return nil, unsupported("", fmt.Sprintf(
+		return nil, unsupportedCoded(FilterBlockedTooManyClauses, "", fmt.Sprintf(
 			"this metric has %d filter criteria, but LaunchDarkly allows at most %d",
 			len(criteria), ldFilterMaxLeaves))
 	}
@@ -121,7 +149,7 @@ func criterionToLeaf(c statsig.Criterion) (*launchdarkly.EventFilter, error) {
 	// criterion. LaunchDarkly has no equivalent knob, so honoring the criterion
 	// without it would silently change which rows match.
 	if c.NullVacuousOverride != nil {
-		return nil, unsupported(c.Condition,
+		return nil, unsupportedCoded(FilterBlockedNullOverride, c.Condition,
 			"it sets nullVacuousOverride to change how empty values are treated, and LaunchDarkly has no equivalent setting, so the filter would match a different set of rows")
 	}
 
@@ -129,7 +157,7 @@ func criterionToLeaf(c statsig.Criterion) (*launchdarkly.EventFilter, error) {
 	// filters, which LaunchDarkly rejects on warehouse-native metrics, and "value"
 	// filters on the metric value rather than a column.
 	if c.Type != "" && c.Type != statsigCriterionTypeMetadata {
-		return nil, unsupported(c.Condition, fmt.Sprintf(
+		return nil, unsupportedCoded(FilterBlockedCriterionType, c.Condition, fmt.Sprintf(
 			"it filters on %q, but a warehouse-native metric in LaunchDarkly can only filter on a column from its data source", c.Type))
 	}
 
@@ -150,7 +178,7 @@ func criterionToLeaf(c statsig.Criterion) (*launchdarkly.EventFilter, error) {
 
 	column := strings.TrimSpace(c.Column)
 	if column == "" {
-		return nil, unsupported(c.Condition,
+		return nil, unsupportedCoded(FilterBlockedMissingColumn, c.Condition,
 			"it names no column, so there is nothing to filter on")
 	}
 
@@ -265,16 +293,16 @@ func criterionToLeaf(c statsig.Criterion) (*launchdarkly.EventFilter, error) {
 // Guessing would silently change which rows match.
 func stringValues(c statsig.Criterion) ([]any, error) {
 	if len(c.Values) == 0 {
-		return nil, unsupported(c.Condition, "it needs at least one filter value, but none were set")
+		return nil, unsupportedCoded(FilterBlockedValueCount, c.Condition, "it needs at least one filter value, but none were set")
 	}
 	out := make([]any, 0, len(c.Values))
 	for _, v := range c.Values {
 		if v == "" {
-			return nil, unsupported(c.Condition,
+			return nil, unsupportedCoded(FilterBlockedValue, c.Condition,
 				"one of its values is empty, and it is unclear whether that means an empty value or no value at all; LaunchDarkly treats those differently")
 		}
 		if len(v) > ldFilterMaxStringLen {
-			return nil, unsupported(c.Condition, fmt.Sprintf(
+			return nil, unsupportedCoded(FilterBlockedValue, c.Condition, fmt.Sprintf(
 				"one of its values is %d characters, longer than LaunchDarkly's limit of %d", len(v), ldFilterMaxStringLen))
 		}
 		out = append(out, v)
@@ -289,12 +317,12 @@ func stringValues(c statsig.Criterion) ([]any, error) {
 // meaning, so a multi-value comparison is rejected instead.
 func singleNumberValue(c statsig.Criterion) (float64, error) {
 	if len(c.Values) != 1 {
-		return 0, unsupported(c.Condition, fmt.Sprintf(
+		return 0, unsupportedCoded(FilterBlockedValueCount, c.Condition, fmt.Sprintf(
 			"a numeric comparison in LaunchDarkly takes exactly one value, but this criterion has %d", len(c.Values)))
 	}
 	n, err := strconv.ParseFloat(strings.TrimSpace(c.Values[0]), 64)
 	if err != nil {
-		return 0, unsupported(c.Condition, fmt.Sprintf(
+		return 0, unsupportedCoded(FilterBlockedValue, c.Condition, fmt.Sprintf(
 			"its value %q is not a number, so the comparison would match no rows at all", c.Values[0]))
 	}
 	return n, nil
@@ -360,27 +388,45 @@ func convertTermCriteria(
 	}
 	detail := criteriaDetail(criteria)
 
+	blocked := func(code, condition string) {
+		result.FilterOutcomes = append(result.FilterOutcomes, FilterOutcome{
+			Term: termLabel, Criteria: len(criteria), Applied: false,
+			BlockedBy: code, BlockedCondition: condition,
+		})
+	}
+
 	if !warehouseNative {
-		result.addLossy("DATA LOSS: %s %s not applied. Filter conversion currently works on warehouse-native metrics only, so this metric will match every event instead of just the filtered subset. Dropped filters: [%s]. Add them by hand in LaunchDarkly if you need them.",
+		result.addLossy(WarnFilterCloudUnsupported, "DATA LOSS: %s %s not applied. Filter conversion currently works on warehouse-native metrics only, so this metric will match every event instead of just the filtered subset. Dropped filters: [%s]. Add them by hand in LaunchDarkly if you need them.",
 			criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), detail)
+		blocked(FilterBlockedCloudMetric, "")
 		return nil
 	}
 
 	if !hasDataSource {
-		result.addLossy("DATA LOSS: %s %s not applied. LaunchDarkly metric filters need a warehouse data source and this metric is not bound to one. Pass --ld-data-source or --source-mapping and run again to convert the filters. Dropped filters: [%s].",
+		result.addLossy(WarnFilterNoDataSource, "DATA LOSS: %s %s not applied. LaunchDarkly metric filters need a warehouse data source and this metric is not bound to one. Pass --ld-data-source or --source-mapping and run again to convert the filters. Dropped filters: [%s].",
 			criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), detail)
+		blocked(FilterBlockedNoDataSource, "")
 		return nil
 	}
 
 	filter, err := criteriaToFilter(criteria)
 	if err != nil {
-		result.addLossy("DATA LOSS: %s %s not applied. %v. This metric would match every row instead of just the filtered subset. Dropped filters: [%s]. Add them by hand in LaunchDarkly if you need them.",
+		result.addLossy(WarnFilterConditionBlocked, "DATA LOSS: %s %s not applied. %v. This metric would match every row instead of just the filtered subset. Dropped filters: [%s]. Add them by hand in LaunchDarkly if you need them.",
 			criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), err, detail)
+		var ue *unsupportedCriteriaError
+		if errors.As(err, &ue) {
+			blocked(ue.Code, ue.Condition)
+		} else {
+			blocked(FilterBlockedCondition, "")
+		}
 		return nil
 	}
 
-	result.Warnings = append(result.Warnings,
-		fmt.Sprintf("converted %s into a LaunchDarkly metric filter (metric filters only work on Snowflake data sources today)",
-			criteriaPhrase(len(criteria), termLabel)))
+	result.addWarning(WarnFilterApplied,
+		"converted %s into a LaunchDarkly metric filter (metric filters only work on Snowflake data sources today)",
+		criteriaPhrase(len(criteria), termLabel))
+	result.FilterOutcomes = append(result.FilterOutcomes, FilterOutcome{
+		Term: termLabel, Criteria: len(criteria), Applied: true,
+	})
 	return filter
 }

@@ -16,8 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the term keeps no filter and stays lossy, because criteria are AND-ed and applying a subset would widen what the
   metric matches. Requires a bound data source, and filters currently compute only on Snowflake-backed sources.
 
+- `metrics convert`: the migration report now carries machine-readable diagnostics per metric, so a run can be
+  analysed without pattern-matching warning text. New fields: `warning_codes` (parallel to `warnings`),
+  `lossy_reasons` and `lossy_codes`, `ld_data_source`, `randomization_units`, `statsig_rollup_time_window`,
+  `statsig_source_name`, and `filters` (one entry per metric term with its criteria count, whether a filter was
+  applied, and if not, `blocked_by` plus the responsible `blocked_condition`). The CSV output gains the flat
+  equivalents plus `filters_applied` / `filters_blocked`. `AGENTS.md` has `jq` recipes for all of them.
+
 ### Fixed
 
+- `metrics convert`: a skipped-lossy metric recorded only its lossy reasons, discarding every advisory warning on
+  it. Since a skipped metric is the one most likely to need triage, that hid useful context (the resolved analysis
+  unit, for instance) on exactly the wrong metrics. The report now keeps the full `warnings` list alongside the
+  `lossy_reasons` subset.
 - `metrics convert`: a ratio metric whose term filter criteria were dropped reported as a clean conversion instead of
   lossy, so it could be created in LaunchDarkly matching every row rather than the filtered subset. Dropped ratio-term
   criteria now mark the conversion lossy, matching the non-ratio path, and the warning lists the dropped criteria.

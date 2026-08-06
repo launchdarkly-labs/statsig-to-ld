@@ -382,6 +382,31 @@ cat migration-report.json | jq '.by_type | to_entries | map(select(.value.failed
 # metrics convert: DATA LOSS warnings (most critical)
 cat migration-report.json | jq '.metrics[] | select(.warnings[]? | contains("DATA LOSS")) | {name: .statsig_name, warnings}'
 
+# --- diagnostics: aggregate on codes, not on message text (wording changes, codes do not) ---
+
+# every warning code by frequency — the fastest read on what a run actually hit
+cat migration-report.json | jq -r '.metrics[].warning_codes[]?' | sort | uniq -c | sort -rn
+# just the codes that caused a skip
+cat migration-report.json | jq -r '.metrics[].lossy_codes[]?' | sort | uniq -c | sort -rn
+
+# metric filters: how many terms converted vs were blocked
+cat migration-report.json | jq '[.metrics[].filters[]?] | group_by(.applied) | map({applied: .[0].applied, terms: length, criteria: (map(.criteria) | add)})'
+# why filters were blocked, and which Statsig condition is responsible
+cat migration-report.json | jq -r '.metrics[].filters[]? | select(.applied == false) | "\(.blocked_by)\t\(.blocked_condition // "-")"' | sort | uniq -c | sort -rn
+# the metrics a --source-mapping re-run would fix (blocked only for lack of a data source)
+cat migration-report.json | jq '[.metrics[] | select(any(.filters[]?; .blocked_by == "no_data_source")) | .statsig_name] | {count: length, names: .[0:10]}'
+
+# data source binding, which gates filters and window offsets
+cat migration-report.json | jq '[.metrics[] | {bound: (.ld_data_source != null)}] | group_by(.bound) | map({bound: .[0].bound, count: length})'
+# Statsig sources that resolved to nothing — these are the --source-mapping entries to add
+cat migration-report.json | jq -r '.metrics[] | select(.ld_data_source == null and .statsig_source_name != null) | .statsig_source_name' | sort | uniq -c | sort -rn
+
+# analysis unit distribution (which metrics are analyzed at a non-user grain)
+cat migration-report.json | jq -r '.metrics[].randomization_units[]?' | sort | uniq -c | sort -rn
+
+# daily participation: split the lossy rate from the clean one-time/windowed rollups
+cat migration-report.json | jq -r '.metrics[] | select(.statsig_type == "daily_participation") | .statsig_rollup_time_window // "(unset = rate)"' | sort | uniq -c | sort -rn
+
 # targeting import: lossy skips
 cat targeting-import-report.json | jq '.flags[] | select(.status == "skipped_lossy") | {key: .flag_key, lossy: .lossy_features}'
 

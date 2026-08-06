@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -25,15 +26,15 @@ const (
 type Report struct {
 	mu sync.Mutex
 
-	Timestamp           string        `json:"timestamp"`
-	DryRun              bool          `json:"dry_run"`
-	StatsigMetricsTotal int           `json:"statsig_metrics_total"`
-	Converted           int           `json:"converted"`
-	ConvertedWithWarn   int           `json:"converted_with_warnings"`
-	SkippedExisting     int           `json:"skipped_existing"`
-	SkippedIncompatible int           `json:"skipped_incompatible"`
-	SkippedLossy        int           `json:"skipped_lossy"`
-	Failed              int           `json:"failed"`
+	Timestamp           string `json:"timestamp"`
+	DryRun              bool   `json:"dry_run"`
+	StatsigMetricsTotal int    `json:"statsig_metrics_total"`
+	Converted           int    `json:"converted"`
+	ConvertedWithWarn   int    `json:"converted_with_warnings"`
+	SkippedExisting     int    `json:"skipped_existing"`
+	SkippedIncompatible int    `json:"skipped_incompatible"`
+	SkippedLossy        int    `json:"skipped_lossy"`
+	Failed              int    `json:"failed"`
 
 	// ByType breaks the same outcome counts down per effective Statsig metric
 	// type (e.g. "sum", "ratio", "percentile"), so a reader can see which types
@@ -67,6 +68,57 @@ type MetricEntry struct {
 	LDProject   string   `json:"ld_project,omitempty"`
 	Warnings    []string `json:"warnings,omitempty"`
 	Reason      string   `json:"reason,omitempty"`
+
+	Diagnostics
+}
+
+// Diagnostics are the machine-readable per-metric fields. They exist because
+// answering questions about a run (how many metrics were bound to a data source,
+// which filter conditions blocked conversion, what analysis unit was resolved)
+// previously meant regex-parsing the prose in Warnings. Codes and counts also
+// survive the redaction customers apply before sharing a report, where free text
+// frequently does not.
+type Diagnostics struct {
+	// WarningCodes runs parallel to Warnings: WarningCodes[i] identifies
+	// Warnings[i]. Aggregate on these rather than on message text, which changes.
+	WarningCodes []string `json:"warning_codes,omitempty"`
+
+	// LossyReasons is the subset of warnings that made the conversion lossy, and
+	// LossyCodes their codes. Recorded separately from Warnings so a lossy metric
+	// keeps its advisory warnings too: previously a skipped-lossy entry stored only
+	// the lossy reasons, which silently discarded everything else about it.
+	LossyReasons []string `json:"lossy_reasons,omitempty"`
+	LossyCodes   []string `json:"lossy_codes,omitempty"`
+
+	// LDDataSource is the LaunchDarkly data source the metric resolved to, empty
+	// if none. This is the main thing gating filter and window conversion, so it
+	// is worth being able to count directly.
+	LDDataSource string `json:"ld_data_source,omitempty"`
+
+	// AnalysisUnits is the resolved LaunchDarkly analysis (randomization) units.
+	AnalysisUnits []string `json:"randomization_units,omitempty"`
+
+	// StatsigRollupTimeWindow is the metric's effective Statsig rollup window. It
+	// distinguishes a daily-participation rate (lossy) from a one-time or windowed
+	// unit count (clean), which is otherwise not visible in a shared report.
+	StatsigRollupTimeWindow string `json:"statsig_rollup_time_window,omitempty"`
+
+	// StatsigSourceName is the Statsig metric source the metric reads from, which
+	// is what a --source-mapping entry has to match.
+	StatsigSourceName string `json:"statsig_source_name,omitempty"`
+
+	// Filters records one entry per metric term that carried filter criteria.
+	Filters []FilterOutcome `json:"filters,omitempty"`
+}
+
+// FilterOutcome is what happened to one metric term's Statsig filter criteria.
+// A ratio metric produces one entry per term.
+type FilterOutcome struct {
+	Term             string `json:"term"`
+	Criteria         int    `json:"criteria"`
+	Applied          bool   `json:"applied"`
+	BlockedBy        string `json:"blocked_by,omitempty"`
+	BlockedCondition string `json:"blocked_condition,omitempty"`
 }
 
 // New creates an empty report.
@@ -77,7 +129,7 @@ func New() *Report {
 }
 
 // AddConverted records a successfully converted metric. Thread-safe.
-func (r *Report) AddConverted(name, typ, id, ldKey, ldProject string, warnings []string) {
+func (r *Report) AddConverted(name, typ, id, ldKey, ldProject string, warnings []string, diag Diagnostics) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Metrics = append(r.Metrics, MetricEntry{
@@ -88,6 +140,7 @@ func (r *Report) AddConverted(name, typ, id, ldKey, ldProject string, warnings [
 		LDKey:       ldKey,
 		LDProject:   ldProject,
 		Warnings:    warnings,
+		Diagnostics: diag,
 	})
 }
 
@@ -120,8 +173,13 @@ func (r *Report) AddSkippedIncompatible(name, typ, id, reason string) {
 
 // AddSkippedLossy records a metric skipped because its conversion would be lossy
 // (a Statsig feature dropped or approximated) and --convert-lossy was not set.
-// The specific lossy reasons are recorded as warnings. Thread-safe.
-func (r *Report) AddSkippedLossy(name, typ, id string, reasons []string) {
+//
+// warnings is the metric's FULL warning list and diag.LossyReasons the subset
+// that caused the skip. Both are kept: recording only the lossy reasons used to
+// discard every advisory warning on the metric, which made questions like "what
+// analysis unit did this resolve to" unanswerable for exactly the metrics most
+// likely to need triage. Thread-safe.
+func (r *Report) AddSkippedLossy(name, typ, id string, warnings []string, diag Diagnostics) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Metrics = append(r.Metrics, MetricEntry{
@@ -130,7 +188,8 @@ func (r *Report) AddSkippedLossy(name, typ, id string, reasons []string) {
 		StatsigID:   id,
 		Status:      StatusSkippedLossy,
 		Reason:      "lossy conversion — skipped; re-run with --convert-lossy to convert it anyway",
-		Warnings:    reasons,
+		Warnings:    warnings,
+		Diagnostics: diag,
 	})
 }
 
@@ -224,14 +283,32 @@ func (r *Report) WriteCSV(w io.Writer) error {
 	cw := csv.NewWriter(w)
 	defer cw.Flush()
 
-	header := []string{"statsig_name", "statsig_type", "statsig_id", "status", "ld_key", "ld_project", "warnings", "reason"}
+	// CSV carries the flat diagnostics. The nested per-term filter detail is
+	// JSON-only; here it collapses to applied/blocked counts, which is what a
+	// spreadsheet reader wants anyway.
+	header := []string{
+		"statsig_name", "statsig_type", "statsig_id", "status", "ld_key", "ld_project", "warnings", "reason",
+		"warning_codes", "lossy_codes", "ld_data_source", "randomization_units",
+		"statsig_rollup_time_window", "statsig_source_name", "filters_applied", "filters_blocked",
+	}
 	if err := cw.Write(header); err != nil {
 		return err
 	}
 
 	for _, m := range r.Metrics {
 		warnings := strings.Join(m.Warnings, "; ")
-		row := []string{m.StatsigName, m.StatsigType, m.StatsigID, m.Status, m.LDKey, m.LDProject, warnings, m.Reason}
+		var applied, blocked int
+		for _, f := range m.Filters {
+			if f.Applied {
+				applied++
+			} else {
+				blocked++
+			}
+		}
+		row := []string{m.StatsigName, m.StatsigType, m.StatsigID, m.Status, m.LDKey, m.LDProject, warnings, m.Reason,
+			strings.Join(m.WarningCodes, " "), strings.Join(m.LossyCodes, " "), m.LDDataSource,
+			strings.Join(m.AnalysisUnits, " "), m.StatsigRollupTimeWindow, m.StatsigSourceName,
+			strconv.Itoa(applied), strconv.Itoa(blocked)}
 		if err := cw.Write(row); err != nil {
 			return err
 		}
