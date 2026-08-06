@@ -373,7 +373,6 @@ Some Statsig features can't be reproduced faithfully in LaunchDarkly. A metric w
 
 | Feature | Effect if converted |
 |---|---|
-| Event filter criteria | LD metric matches all events, not just the filtered subset (`DATA LOSS`) |
 | Per-unit capping | No per-user-per-day value cap |
 | Log transform | Values not log-transformed; distribution shape may differ |
 | Daily participation rate | Falls back to standard binary conversion (different aggregation) |
@@ -387,6 +386,30 @@ Some Statsig features can't be reproduced faithfully in LaunchDarkly. A metric w
 |---|---|---|
 | Winsorization | numeric or count metric (mapped to LD `winsorLowerPercentile`/`winsorUpperPercentile`) | occurrence metric (non-numeric average), where LD can't apply it |
 | Custom rollup window | a warehouse data source is bound (mapped to LD window offsets via `--ld-data-source`) | no data source is bound (LD windows require a snowflake source) |
+| Metric filter criteria | a warehouse-native metric with a bound data source and every criterion mappable (see below) | a cloud metric, no data source bound, or any criterion unmappable |
+
+### Metric filter criteria
+
+Statsig filter criteria on a **warehouse-native** metric convert to a LaunchDarkly metric filter. Ratio metrics carry a filter per term, so the numerator and denominator convert independently.
+
+Statsig combines multiple criteria on one term with AND, and multiple values within one criterion with OR. That maps onto a LaunchDarkly `and` group of clauses, which is the same model.
+
+| Statsig condition | LaunchDarkly operator |
+|---|---|
+| `in`, `=` | `in` |
+| `not_in` | `in` negated |
+| `contains` | `contains` |
+| `not_contains` | `contains` negated |
+| `starts_with` / `ends_with` | `startsWith` / `endsWith` |
+| `>` `>=` `<` `<=` | `greaterThan` / `greaterThanOrEqual` / `lessThan` / `lessThanOrEqual` |
+| `non_null` | `exists` |
+| `is_null` | `exists` negated |
+
+**Not converted.** `sql_filter` is arbitrary SQL. `after_exposure` and `before_exposure` compare a column against each unit's exposure timestamp, which LaunchDarkly's date operators cannot express (they compare against a fixed date). `is_true` and `is_false` have no verified equivalent yet. A criterion is also unmappable if it sets `nullVacuousOverride`, has no column, uses a context-attribute type (`user`, `user_custom`), carries a non-numeric value for a numeric comparison, carries more than one value for a numeric comparison, or has an empty-string value.
+
+**All or nothing per term.** If any criterion on a term is unmappable, no filter is emitted for that term and the metric stays lossy. Because criteria are AND-ed, applying only the mappable subset would *widen* what the metric matches, producing a metric that looks converted but silently counts more rows than the original. The warning lists every dropped criterion so it can be rebuilt by hand.
+
+> **Requirements.** Filters must be enabled for the target LaunchDarkly project, and they currently compute only on **Snowflake**-backed data sources. A filter saved against another warehouse type persists but fails when results are computed. Filters also need a bound data source: without one LaunchDarkly treats the metric as SDK-hosted, where the same clause would mean a JSON payload lookup rather than a warehouse column, so those criteria are reported as lossy instead.
 
 ## EU / FedRAMP instances
 

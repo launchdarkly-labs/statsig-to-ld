@@ -291,7 +291,8 @@ Many of these mark a conversion **lossy**: by default the metric is skipped (`sk
 
 | Warning | Severity | What to do |
 |---|---|---|
-| `DATA LOSS: ... filter criteria` | High | Lossy — skipped by default. The LD metric would match ALL events, not just the filtered subset; set the filters up manually in LD, or `--convert-lossy` to accept the loss. |
+| `DATA LOSS: ... filter criteria` | High | Lossy — skipped by default. Statsig filter criteria on a **warehouse-native** metric with a bound data source convert to an LD metric filter automatically; this warning means they could not. Common causes: no data source bound (pass `--ld-data-source` / `--source-mapping` and re-run, which usually fixes it), a cloud metric (not supported yet), or an unmappable condition (`sql_filter`, `after_exposure`, `before_exposure`, `is_true`, `is_false`). The warning lists every dropped criterion so it can be rebuilt by hand. Conversion is all-or-nothing per term: one unmappable criterion drops the whole term's filter, because a partial AND-filter would silently match MORE rows than the original. |
+| `converted N ... filter criteria` | Info | Not lossy. Statsig filter criteria became an LD metric filter. Metric filters only work on Snowflake data sources today, so check the metric in LD if it uses a different warehouse. |
 | `N metric events — only the first is used` | Medium | Lossy — only the first event is used; extra events are dropped. |
 | `winsorization ... occurrence metric` | Low | Lossy — LD can't winsorize an occurrence metric (numeric metrics winsorize fine). |
 | `per-unit capping` | Low | Lossy — per-unit cap not applied. |

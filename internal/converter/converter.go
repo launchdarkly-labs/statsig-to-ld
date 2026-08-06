@@ -212,29 +212,28 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 			sg.MetricEvents[0].MetadataKey)
 	}
 
-	// Event criteria/filters — data-affecting: the migrated metric will be broader
-	// than the original because filters are not carried over
-	if len(sg.MetricEvents) > 0 && len(sg.MetricEvents[0].Criteria) > 0 {
-		criteria := sg.MetricEvents[0].Criteria
-		var details []string
-		for _, c := range criteria {
-			details = append(details, fmt.Sprintf("%s %s %s %v", c.Column, c.Type, c.Condition, c.Values))
-		}
-		result.addLossy("DATA LOSS: %d event filter criteria will NOT be applied — the LD metric will match all %q events, not just the filtered subset. Dropped filters: [%s]. Manual filter setup required in LD.",
-			len(criteria), eventKey, strings.Join(details, "; "))
-	}
-
-	// Warehouse-native filters live on warehouseNative.criteria (or per source),
-	// not metricEvents; drop them with the same DATA LOSS warning.
+	// Filter criteria. Warehouse-native criteria live on warehouseNative.criteria
+	// (or per source); cloud criteria live on metricEvents. Both are resolved into
+	// a LaunchDarkly metric filter further down, once the data source is known —
+	// LaunchDarkly only interprets a column filter as a warehouse column when the
+	// metric is bound to a data source. See convertTermCriteria.
+	var termCriteria []statsig.Criterion
+	termCriteriaLabel := "event"
 	if sg.IsWarehouseNative() {
-		if crit := sg.NumeratorCriteria(); len(crit) > 0 {
-			var details []string
-			for _, c := range crit {
-				details = append(details, fmt.Sprintf("%s %s %s %v", c.Column, c.Type, c.Condition, c.Values))
-			}
-			result.addLossy("DATA LOSS: %d warehouse-native filter criteria will NOT be applied — the LD metric will match all rows, not just the filtered subset. Dropped filters: [%s]. Manual filter setup required in LD.",
-				len(crit), strings.Join(details, "; "))
+		termCriteria = sg.NumeratorCriteria()
+		termCriteriaLabel = "warehouse-native"
+		// A warehouse-native metric carries its criteria on warehouseNative, but if
+		// any also show up on metricEvents they must not be dropped in silence —
+		// an unreported dropped filter is the one outcome this conversion must never
+		// produce, because the metric then measures more than it claims to.
+		if len(sg.MetricEvents) > 0 && len(sg.MetricEvents[0].Criteria) > 0 {
+			result.addLossy("DATA LOSS: %s on metricEvents %s not applied. This warehouse-native metric carries filter criteria in two places and only the warehouseNative ones convert. Dropped filters: [%s]. Add them by hand in LaunchDarkly if you need them.",
+				criteriaPhrase(len(sg.MetricEvents[0].Criteria), "event"),
+				wasWere(len(sg.MetricEvents[0].Criteria)),
+				criteriaDetail(sg.MetricEvents[0].Criteria))
 		}
+	} else if len(sg.MetricEvents) > 0 {
+		termCriteria = sg.MetricEvents[0].Criteria
 	}
 
 	// Warehouse Native advanced features
@@ -346,6 +345,15 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		// No explicit source name on the metric, but a global default was provided
 		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: opts.LDDataSource}
 	}
+
+	// ---------------------------------------------------------------
+	// Metric filters: map Statsig filter criteria to a LaunchDarkly metric filter.
+	// Resolved here, after the data source binding, because a filter is only
+	// meaningful once LaunchDarkly knows the metric reads warehouse columns.
+	// ---------------------------------------------------------------
+	result.LDMetric.Filters = convertTermCriteria(
+		result, termCriteriaLabel, termCriteria,
+		sg.IsWarehouseNative(), result.LDMetric.DataSource != nil)
 
 	// ---------------------------------------------------------------
 	// Windowed metrics: map a Statsig custom rollup window (days) to LD window
@@ -725,15 +733,8 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		result.addLossy("Statsig daily_participation ratio term approximated as binary in LaunchDarkly — the per-day rate is lost")
 	}
 
-	// Event filter criteria are not carried over (parity with the simple path).
-	if len(numEv.Criteria) > 0 {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("DATA LOSS: %d numerator event filter criteria will NOT be applied — the LD metric matches all %q events. Manual filter setup required in LD.", len(numEv.Criteria), numEv.Name))
-	}
-	if len(denEv.Criteria) > 0 {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("DATA LOSS: %d denominator event filter criteria will NOT be applied — the LD metric matches all %q events. Manual filter setup required in LD.", len(denEv.Criteria), denEv.Name))
-	}
+	// Per-term filter criteria are resolved further down, once each term's data
+	// source is known. See convertTermCriteria.
 
 	ldKey := SanitizeKey(sg.ID)
 	if ldKey == "" {
@@ -826,6 +827,18 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	if denDS != "" && result.LDMetric.Denominator != nil {
 		result.LDMetric.Denominator.DataSource = &launchdarkly.DataSource{Key: denDS}
+	}
+
+	// ---------------------------------------------------------------
+	// Per-term metric filters. Each term carries its own criteria and its own data
+	// source, so each is converted independently: one term can get its filter
+	// while the other stays lossy.
+	// ---------------------------------------------------------------
+	result.LDMetric.Filters = convertTermCriteria(
+		result, "numerator", numEv.Criteria, sg.IsWarehouseNative(), numDS != "")
+	if result.LDMetric.Denominator != nil {
+		result.LDMetric.Denominator.Filters = convertTermCriteria(
+			result, "denominator", denEv.Criteria, sg.IsWarehouseNative(), denDS != "")
 	}
 
 	// Custom rollup window applies to the whole ratio metric; resolve after the
