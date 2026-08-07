@@ -96,7 +96,7 @@ type Diagnostics struct {
 	LDDataSource string `json:"ld_data_source,omitempty"`
 
 	// AnalysisUnits is the resolved LaunchDarkly analysis (randomization) units.
-	AnalysisUnits []string `json:"randomization_units,omitempty"`
+	AnalysisUnits []string `json:"analysis_units,omitempty"`
 
 	// StatsigRollupTimeWindow is the metric's effective Statsig rollup window. It
 	// distinguishes a daily-participation rate (lossy) from a one-time or windowed
@@ -288,7 +288,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 	// spreadsheet reader wants anyway.
 	header := []string{
 		"statsig_name", "statsig_type", "statsig_id", "status", "ld_key", "ld_project", "warnings", "reason",
-		"warning_codes", "lossy_codes", "ld_data_source", "randomization_units",
+		"warning_codes", "lossy_codes", "ld_data_source", "analysis_units",
 		"statsig_rollup_time_window", "statsig_source_name", "filters_applied", "filters_blocked",
 	}
 	if err := cw.Write(header); err != nil {

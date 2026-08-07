@@ -245,8 +245,8 @@ func TestConvert_WHN_NoUnitTypes_DefaultsToUser(t *testing.T) {
 	  "type":"user_warehouse","name":"No Units","id":"No Units::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"sum","metricSourceName":"S","valueColumn":"v"}}`
 	res := mustConvert(t, raw, Options{LDDataSource: "snowflake-ds"})
-	if got := res.LDMetric.RandomizationUnits; len(got) != 1 || got[0] != "user" {
-		t.Errorf("RandomizationUnits = %v, want [user]", got)
+	if got := res.LDMetric.AnalysisUnits; len(got) != 1 || got[0] != "user" {
+		t.Errorf("AnalysisUnits = %v, want [user]", got)
 	}
-	assertHasWarning(t, res.Warnings, "defaulted the LD randomization unit")
+	assertHasWarning(t, res.Warnings, "defaulted the LD analysis unit")
 }

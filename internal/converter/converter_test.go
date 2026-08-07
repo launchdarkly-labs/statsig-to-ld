@@ -256,7 +256,7 @@ func TestConvert_LongKeyTruncated(t *testing.T) {
 
 // --- Randomization units ---
 
-func TestConvert_RandomizationUnits(t *testing.T) {
+func TestConvert_AnalysisUnits(t *testing.T) {
 	sg := baseMetric("event_count_custom")
 	sg.UnitTypes = []string{"userID", "companyID"}
 	result, err := Convert(sg, Options{})
@@ -264,9 +264,9 @@ func TestConvert_RandomizationUnits(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	units := result.LDMetric.RandomizationUnits
+	units := result.LDMetric.AnalysisUnits
 	if len(units) != 2 || units[0] != "user" || units[1] != "companyid" {
-		t.Errorf("RandomizationUnits = %v, want [user companyid]", units)
+		t.Errorf("AnalysisUnits = %v, want [user companyid]", units)
 	}
 
 	hasWarning := false
@@ -295,9 +295,9 @@ func TestConvert_UnitTypeMapping(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	units := result.LDMetric.RandomizationUnits
+	units := result.LDMetric.AnalysisUnits
 	if len(units) != 2 || units[0] != "user" || units[1] != "company" {
-		t.Errorf("RandomizationUnits = %v, want [user company]", units)
+		t.Errorf("AnalysisUnits = %v, want [user company]", units)
 	}
 
 	// Should NOT warn about companyID when it's in the mapping
@@ -323,8 +323,8 @@ func TestConvert_UnitTypeMapping_CaseInsensitive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := result.LDMetric.RandomizationUnits; len(got) != 1 || got[0] != "anonymousUser" {
-		t.Errorf("RandomizationUnits = %v, want [anonymousUser]", got)
+	if got := result.LDMetric.AnalysisUnits; len(got) != 1 || got[0] != "anonymousUser" {
+		t.Errorf("AnalysisUnits = %v, want [anonymousUser]", got)
 	}
 	for _, w := range result.Warnings {
 		if strings.Contains(w, "stableID") {
@@ -348,8 +348,8 @@ func TestConvert_UnitTypeMapping_ExactMatchPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := result.LDMetric.RandomizationUnits; len(got) != 1 || got[0] != "exact-match" {
-		t.Errorf("RandomizationUnits = %v, want [exact-match]", got)
+	if got := result.LDMetric.AnalysisUnits; len(got) != 1 || got[0] != "exact-match" {
+		t.Errorf("AnalysisUnits = %v, want [exact-match]", got)
 	}
 }
 
@@ -787,8 +787,8 @@ func TestConvert_Ratio_ConversionRate(t *testing.T) {
 	if result.LDMetric.SuccessCriteria != "HigherThanBaseline" {
 		t.Errorf("SuccessCriteria = %q, want HigherThanBaseline", result.LDMetric.SuccessCriteria)
 	}
-	if got := result.LDMetric.RandomizationUnits; len(got) != 1 || got[0] != "user" {
-		t.Errorf("RandomizationUnits = %v, want [user]", got)
+	if got := result.LDMetric.AnalysisUnits; len(got) != 1 || got[0] != "user" {
+		t.Errorf("AnalysisUnits = %v, want [user]", got)
 	}
 	if result.LDMetric.Denominator == nil {
 		t.Fatal("Denominator is nil; ratio metric should populate it")

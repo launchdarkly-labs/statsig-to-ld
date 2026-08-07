@@ -268,6 +268,14 @@ Without this mapping, non-`userID` unit types are lowercased and a warning is em
 
 Warehouse-native metrics often carry no `unitTypes` on the metric itself; the analysis unit lives on the metric source's id-type mapping. When such metrics are present, `metrics convert` makes one extra Console API call to list the metric sources and resolves each metric's analysis unit from its source instead of defaulting to `user`. If that call fails (or a source has no id-type mapping), the metric falls back to `user` with a warning. `--unit-type-mapping` still applies to the resolved unit names.
 
+### Analysis units and clustered experiments
+
+An LD metric carries `analysisUnits`: the context kinds an experiment may analyze it by, one chosen per metric when the experiment is created. That is how LaunchDarkly runs the experiment Statsig calls clustered — randomize by company, analyze per user. The list is what the converter controls; the choice itself is made later, in the experiment.
+
+- `--widen-analysis-units` (default on) adds the id types a metric's source declares to that metric's list, instead of stopping at the unit types on the metric. Warehouse-native metrics take their units from the source, so that mapping is the fuller set; cloud metrics have no such source and are unaffected. `=false` restores the narrower behavior.
+- `--extra-analysis-units user,request` adds LD context kinds directly, for units with no Statsig counterpart. Additive, not a replacement. Not subject to `--unit-type-mapping` — these are LD context kinds already.
+Widening changes only what an experiment may pick, never how a metric is measured. Statsig ratio metrics whose denominator is a count-distinct convert as LD ratio metrics; nothing here rewrites them.
+
 ### Metric type conversion
 
 | Statsig type | LD kind | Status |
@@ -402,7 +410,7 @@ cat migration-report.json | jq '[.metrics[] | {bound: (.ld_data_source != null)}
 cat migration-report.json | jq -r '.metrics[] | select(.ld_data_source == null and .statsig_source_name != null) | .statsig_source_name' | sort | uniq -c | sort -rn
 
 # analysis unit distribution (which metrics are analyzed at a non-user grain)
-cat migration-report.json | jq -r '.metrics[].randomization_units[]?' | sort | uniq -c | sort -rn
+cat migration-report.json | jq -r '.metrics[].analysis_units[]?' | sort | uniq -c | sort -rn
 
 # daily participation: split the lossy rate from the clean one-time/windowed rollups
 cat migration-report.json | jq -r '.metrics[] | select(.statsig_type == "daily_participation") | .statsig_rollup_time_window // "(unset = rate)"' | sort | uniq -c | sort -rn
@@ -455,9 +463,10 @@ Before running the tool, confirm:
 4. **Lossy targeting?** Run `analyze` first; if there are lossy sources the user wants to import, decide which `--accept-data-loss` features they'll accept.
 5. **Warehouse-native experimentation?** If yes, you'll run **two** subcommands: `warehouse` first (sets up integrations + data sources, writes `source-mapping.json`), then `metrics convert --source-mapping source-mapping.json` to create the metric definitions bound to those data sources. Confirm warehouse type (Snowflake / BigQuery / Databricks / Redshift) and the LD environment key (`--ld-environment`). If the LD integrations and data sources already exist (set up by hand or via Terraform), skip `warehouse` and pass `--ld-data-source` or `--source-mapping` directly to `metrics convert`.
 6. **Custom unit types?** If yes, need `--unit-type-mapping`.
-7. **Numeric metric units?** If known, use `--default-unit` to set a meaningful label (default is `"units"`).
-8. **EU/FedRAMP?** If yes, need `--ld-url https://app.eu.launchdarkly.com`.
-9. **SDK call-site rewrites?** Not handled by this CLI. If the user is migrating application code (Statsig SDK → LD SDK) for JS / TS / React / Node, point them at the [SDK-rewrite skill](skills/statsig-to-launchdarkly-migrator/SKILL.md). For other languages, point them at [`docs/migration-playbook.md`](docs/migration-playbook.md) §1.
+7. **Clustered experiments?** If the user randomizes by one unit and measures by another, confirm which LD context kinds each metric should be analyzable by — `--widen-analysis-units` and `--extra-analysis-units` above.
+8. **Numeric metric units?** If known, use `--default-unit` to set a meaningful label (default is `"units"`).
+9. **EU/FedRAMP?** If yes, need `--ld-url https://app.eu.launchdarkly.com`.
+10. **SDK call-site rewrites?** Not handled by this CLI. If the user is migrating application code (Statsig SDK → LD SDK) for JS / TS / React / Node, point them at the [SDK-rewrite skill](skills/statsig-to-launchdarkly-migrator/SKILL.md). For other languages, point them at [`docs/migration-playbook.md`](docs/migration-playbook.md) §1.
 
 ## Output
 

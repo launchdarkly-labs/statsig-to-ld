@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
@@ -44,6 +45,18 @@ type Options struct {
 	// id-type mapping. When a metric has no unitTypes, the converter falls back
 	// to its source's unit types here before defaulting to "user".
 	SourceUnitTypes map[string][]string
+
+	// WidenAnalysisUnits unions a metric's own unitTypes with the id types its
+	// metric source declares, rather than letting its own unitTypes win outright.
+	// A warehouse-native metric's units come from its source: Statsig supports a
+	// metric at several units of analysis as long as the source maps those id
+	// types. Inert for cloud metrics, which carry their own unitTypes and have no
+	// warehouse metric source to widen from.
+	WidenAnalysisUnits bool
+
+	// ExtraAnalysisUnits are LD context kinds added to every converted metric,
+	// for units with no Statsig counterpart the converter can see.
+	ExtraAnalysisUnits []string
 }
 
 // Warning codes are stable identifiers for the diagnostics the converter emits.
@@ -64,6 +77,7 @@ const (
 	WarnUnitTypeUnmapped         = "unit_type_unmapped"
 	WarnAnalysisUnitFromSource   = "analysis_unit_from_source"
 	WarnAnalysisUnitDefaulted    = "analysis_unit_defaulted"
+	WarnAnalysisUnitsWidened     = "analysis_units_widened"
 	WarnWinsorizationNotApplied  = "winsorization_not_applied"
 	WarnPerUnitCapDropped        = "per_unit_cap_dropped"
 	WarnLogTransformDropped      = "log_transform_dropped"
@@ -349,10 +363,10 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 
 	// ---------------------------------------------------------------
-	// Randomization units: Statsig "userID" → LD "user" (see randomizationUnits)
+	// Analysis units: Statsig "userID" → LD "user" (see analysisUnits)
 	// ---------------------------------------------------------------
-	randUnits, ruWarnings := randomizationUnits(sg, opts)
-	result.addCoded("", ruWarnings...)
+	units, unitWarnings := analysisUnits(sg, opts)
+	result.addCoded("", unitWarnings...)
 
 	// ---------------------------------------------------------------
 	// LD metric key: derived from Statsig ID (name::type) for idempotency
@@ -415,7 +429,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		UnitAggregationType:  unitAgg,
 		UnitAggregationField: unitAggField,
 		AnalysisType:         analysisType,
-		RandomizationUnits:   randUnits,
+		AnalysisUnits:        units,
 		Unit:                 unit,
 		Tags:                 tags,
 
@@ -475,56 +489,96 @@ func lowerKeyMapping(m map[string]string) map[string]string {
 	return out
 }
 
-// randomizationUnits maps Statsig unit types to LD randomization units (context
-// kinds): "userID" → "user"; others pass through lowercased with an advisory
-// warning unless remapped via --unit-type-mapping. Warehouse-native metrics
-// often carry no unitTypes (the unit comes from the source's idTypeMapping), so
-// an empty result defaults to "user".
-func randomizationUnits(sg *statsig.Metric, opts Options) (units []string, warnings []codedWarning) {
-	// A metric's own unitTypes win. Warehouse-native metrics usually omit them,
-	// carrying the unit on the metric source instead; fall back to the source's
-	// id-type mapping when we have it.
-	unitTypes := sg.UnitTypes
-	fromSource := false
-	if len(unitTypes) == 0 {
-		if src := sg.NumeratorSourceName(); src != "" {
-			if su := opts.SourceUnitTypes[src]; len(su) > 0 {
-				unitTypes = su
-				fromSource = true
-			}
-		}
+// analysisUnits builds the list of context kinds an experiment may analyze a
+// metric by, picking one per metric at experiment creation. Contributions, in
+// order: the metric's own unitTypes, the id types its metric source declares
+// (a fallback unless Options.WidenAnalysisUnits), then
+// Options.ExtraAnalysisUnits. Duplicates drop out, first occurrence wins.
+func analysisUnits(sg *statsig.Metric, opts Options) (units []string, warnings []codedWarning) {
+	var fromSource []string
+	if src := sg.NumeratorSourceName(); src != "" {
+		fromSource = opts.SourceUnitTypes[src]
 	}
 
+	own, ownWarnings := mapUnitTypes(sg.UnitTypes, opts)
+	units, warnings = own, ownWarnings
+
+	// Warehouse-native metrics usually omit unitTypes, carrying the unit on the source.
+	usedSourceAsFallback := len(own) == 0 && len(fromSource) > 0
+	if usedSourceAsFallback || (opts.WidenAnalysisUnits && len(fromSource) > 0) {
+		sourceUnits, sourceWarnings := mapUnitTypes(fromSource, opts)
+		units = appendUnique(units, sourceUnits...)
+		warnings = appendCodedUnique(warnings, sourceWarnings...)
+	}
+
+	switch {
+	case usedSourceAsFallback:
+		warnings = append(warnings, codedWarning{WarnAnalysisUnitFromSource,
+			fmt.Sprintf("metric has no unitTypes of its own; used the metric source's analysis unit(s) %v (from its id-type mapping)", fromSource)})
+	case len(units) > len(own):
+		warnings = append(warnings, codedWarning{WarnAnalysisUnitsWidened,
+			fmt.Sprintf("analysis units widened from %v to %v using the metric source's id-type mapping; pass --widen-analysis-units=false to keep only the metric's own unit types", own, units)})
+	}
+
+	// Already LD context kinds, so they bypass the unit-type mapping.
+	units = appendUnique(units, opts.ExtraAnalysisUnits...)
+
+	if len(units) == 0 {
+		units = []string{"user"}
+		warnings = append(warnings, codedWarning{WarnAnalysisUnitDefaulted,
+			"no Statsig unitTypes on the metric and none resolvable from its source — defaulted the LD analysis unit to \"user\"; pass --unit-type-mapping or check the metric source's id-type mapping if that's wrong"})
+	}
+	return units, warnings
+}
+
+// mapUnitTypes converts Statsig unit types to LD context kinds, preserving
+// order and dropping duplicates: "userID" → "user"; others pass through
+// lowercased with an advisory warning unless remapped via --unit-type-mapping.
+func mapUnitTypes(unitTypes []string, opts Options) (units []string, warnings []codedWarning) {
 	lowerMapping := lowerKeyMapping(opts.UnitTypeMapping)
 	for _, u := range unitTypes {
 		if mapped, ok := opts.UnitTypeMapping[u]; ok {
-			units = append(units, mapped)
+			units = appendUnique(units, mapped)
 			continue
 		}
 		if mapped, ok := lowerMapping[strings.ToLower(u)]; ok {
-			units = append(units, mapped)
+			units = appendUnique(units, mapped)
 			continue
 		}
 		switch strings.ToLower(u) {
 		case "userid":
-			units = append(units, "user")
+			units = appendUnique(units, "user")
 		default:
-			units = append(units, strings.ToLower(u))
-			warnings = append(warnings, codedWarning{WarnUnitTypeUnmapped,
+			units = appendUnique(units, strings.ToLower(u))
+			warnings = appendCodedUnique(warnings, codedWarning{WarnUnitTypeUnmapped,
 				fmt.Sprintf("Statsig unitType %q may not match an LD context kind — verify in LD or use --unit-type-mapping", u)})
 		}
 	}
-
-	if fromSource && len(units) > 0 {
-		warnings = append(warnings, codedWarning{WarnAnalysisUnitFromSource,
-			fmt.Sprintf("metric has no unitTypes of its own; used the metric source's analysis unit(s) %v (from its id-type mapping)", unitTypes)})
-	}
-	if len(units) == 0 {
-		units = []string{"user"}
-		warnings = append(warnings, codedWarning{WarnAnalysisUnitDefaulted,
-			"no Statsig unitTypes on the metric and none resolvable from its source — defaulted the LD randomization unit to \"user\"; pass --unit-type-mapping or check the metric source's id-type mapping if that's wrong"})
-	}
 	return units, warnings
+}
+
+// appendCodedUnique appends the warnings whose message is not already in dst,
+// preserving order.
+func appendCodedUnique(dst []codedWarning, values ...codedWarning) []codedWarning {
+	for _, v := range values {
+		if !slices.ContainsFunc(dst, func(w codedWarning) bool { return w.msg == v.msg }) {
+			dst = append(dst, v)
+		}
+	}
+	return dst
+}
+
+// appendUnique appends the values not already in dst, preserving order.
+func appendUnique(dst []string, values ...string) []string {
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		if !slices.Contains(dst, v) {
+			dst = append(dst, v)
+		}
+	}
+	return dst
 }
 
 // resolveDataSource determines the LD data source key for a Statsig metric
@@ -765,7 +819,7 @@ func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []codedWarning, error) {
 // metrics, not ratios, and a ratio defined that way is rejected. The numerator's
 // settings sit at the top level of the LD MetricPost; the denominator populates
 // the Denominator subfield. Identity and shared fields (key, name, tags,
-// randomizationUnits, etc.) come from the ratio metric.
+// analysisUnits, etc.) come from the ratio metric.
 func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	result := &Result{}
 
@@ -841,8 +895,8 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		successCriteria = "LowerThanBaseline"
 	}
 
-	randUnits, ruWarnings := randomizationUnits(sg, opts)
-	result.addCoded("", ruWarnings...)
+	units, unitWarnings := analysisUnits(sg, opts)
+	result.addCoded("", unitWarnings...)
 
 	desc := sg.Description
 	if desc == "" {
@@ -885,7 +939,7 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		UnitAggregationType:  numSpec.unitAgg,
 		UnitAggregationField: numSpec.unitAggField,
 		AnalysisType:         numSpec.analysisType,
-		RandomizationUnits:   randUnits,
+		AnalysisUnits:        units,
 		Unit:                 unit,
 		Tags:                 tags,
 		EventDefault:         numSpec.eventDefault,

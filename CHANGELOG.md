@@ -18,10 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `metrics convert`: the migration report now carries machine-readable diagnostics per metric, so a run can be
   analysed without pattern-matching warning text. New fields: `warning_codes` (parallel to `warnings`),
-  `lossy_reasons` and `lossy_codes`, `ld_data_source`, `randomization_units`, `statsig_rollup_time_window`,
+  `lossy_reasons` and `lossy_codes`, `ld_data_source`, `analysis_units`, `statsig_rollup_time_window`,
   `statsig_source_name`, and `filters` (one entry per metric term with its criteria count, whether a filter was
   applied, and if not, `blocked_by` plus the responsible `blocked_condition`). The CSV output gains the flat
   equivalents plus `filters_applied` / `filters_blocked`. `AGENTS.md` has `jq` recipes for all of them.
+
+- `metrics convert`: support for experiments that analyze a metric by a different unit than they randomize on —
+  Statsig's clustered experiments. Converted metrics carry the full set of units they can be analyzed by, so the
+  unit can be selected per metric when the experiment is created. `--widen-analysis-units` (default on) adds the id
+  types a metric's Statsig source declares; `--extra-analysis-units` adds LD context kinds directly.
+
+### Changed
+
+- `metrics convert`: metric payloads now use LaunchDarkly's `analysisUnits` field instead of the deprecated
+  `randomizationUnits`. Same list, current name. The migration report's matching field and CSV column are
+  `analysis_units` for the same reason.
 
 ### Fixed
 

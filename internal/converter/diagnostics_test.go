@@ -195,8 +195,8 @@ func TestDiagnosticFields_AvailableOnResult(t *testing.T) {
 	res := mustConvert(t, raw, Options{LDDataSource: "ds"})
 	// An unmapped unit type is lowercased as a best guess, not translated, and
 	// warned about. --unit-type-mapping is how you turn companyID into "company".
-	if len(res.LDMetric.RandomizationUnits) != 1 || res.LDMetric.RandomizationUnits[0] != "companyid" {
-		t.Errorf("RandomizationUnits = %v, want [companyid]", res.LDMetric.RandomizationUnits)
+	if len(res.LDMetric.AnalysisUnits) != 1 || res.LDMetric.AnalysisUnits[0] != "companyid" {
+		t.Errorf("AnalysisUnits = %v, want [companyid]", res.LDMetric.AnalysisUnits)
 	}
 	assertHasWarning(t, res.Warnings, "may not match an LD context kind")
 	if res.LDMetric.DataSource == nil || res.LDMetric.DataSource.Key != "ds" {
@@ -206,7 +206,7 @@ func TestDiagnosticFields_AvailableOnResult(t *testing.T) {
 	// And with a mapping supplied, it resolves properly.
 	mapped := mustConvert(t, raw, Options{LDDataSource: "ds",
 		UnitTypeMapping: map[string]string{"companyID": "company"}})
-	if len(mapped.LDMetric.RandomizationUnits) != 1 || mapped.LDMetric.RandomizationUnits[0] != "company" {
-		t.Errorf("with --unit-type-mapping, RandomizationUnits = %v, want [company]", mapped.LDMetric.RandomizationUnits)
+	if len(mapped.LDMetric.AnalysisUnits) != 1 || mapped.LDMetric.AnalysisUnits[0] != "company" {
+		t.Errorf("with --unit-type-mapping, AnalysisUnits = %v, want [company]", mapped.LDMetric.AnalysisUnits)
 	}
 }

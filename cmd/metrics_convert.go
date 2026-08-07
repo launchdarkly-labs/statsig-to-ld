@@ -68,6 +68,8 @@ var (
 	flagLDDataSource    string
 	flagSourceMapping   string
 	flagUnitTypeMapping string
+	flagExtraUnits      string
+	flagWidenUnits      bool
 	flagOutput          string
 	flagFormat          string
 	flagDefaultUnit     string
@@ -102,6 +104,9 @@ func init() {
 	convertCmd.Flags().StringVar(&flagLDDataSource, "ld-data-source", "", "LD data source for warehouse-native and ratio metrics")
 	convertCmd.Flags().StringVar(&flagSourceMapping, "source-mapping", "", "JSON file mapping Statsig sources to LD data sources")
 	convertCmd.Flags().StringVar(&flagUnitTypeMapping, "unit-type-mapping", "", "JSON file mapping unit types to LD context kinds")
+
+	convertCmd.Flags().StringVar(&flagExtraUnits, "extra-analysis-units", "", "Extra LD context kinds added to every metric's analysis units (comma-separated, additive)")
+	convertCmd.Flags().BoolVar(&flagWidenUnits, "widen-analysis-units", true, "Add the id types a metric's Statsig source declares to its analysis units")
 
 	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Migration report path")
 	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
@@ -254,10 +259,12 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	includeTypes := parseCommaSeparated(flagIncludeTypes)
 
 	convOpts := converter.Options{
-		LDDataSource:    flagLDDataSource,
-		SourceMapping:   sourceMapping,
-		DefaultUnit:     flagDefaultUnit,
-		UnitTypeMapping: unitTypeMapping,
+		LDDataSource:       flagLDDataSource,
+		SourceMapping:      sourceMapping,
+		DefaultUnit:        flagDefaultUnit,
+		UnitTypeMapping:    unitTypeMapping,
+		WidenAnalysisUnits: flagWidenUnits,
+		ExtraAnalysisUnits: parseCommaSeparated(flagExtraUnits),
 	}
 
 	var ldClient *launchdarkly.Client
@@ -300,13 +307,11 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		log.Printf("Filtered %d → %d metrics (tags=%v, types=%v)", before, len(metrics), includeTags, includeTypes)
 	}
 
-	// Warehouse-native metrics often omit unitTypes; their analysis unit lives on
-	// the metric source. When any such metric is present, fetch the source
-	// configs once and map each source to its declared unit types so the
-	// converter resolves the real unit instead of defaulting to "user".
-	// Best-effort: if the lookup fails, conversion proceeds with the default.
-	if needsSourceUnitTypes(metrics) {
-		log.Printf("Some warehouse-native metrics have no unitTypes; fetching metric sources to resolve their analysis unit...")
+	// A metric source's id-type mapping names the units its metrics can be
+	// analyzed by. Fetch the source configs once when any metric needs them.
+	// Best-effort: if the lookup fails, conversion proceeds without it.
+	if needsSourceUnitTypes(metrics, convOpts) {
+		log.Printf("Fetching Statsig metric sources to resolve analysis units...")
 		sources, srcErr := sgClient.ListAllMetricSources(ctx)
 		if srcErr != nil {
 			log.Printf("WARNING: could not fetch Statsig metric sources (%v); warehouse-native metrics without unitTypes will default to the \"user\" analysis unit", srcErr)
@@ -462,12 +467,15 @@ func annotateStatsigAuthErr(err error) error {
 	return err
 }
 
-// needsSourceUnitTypes reports whether any metric is warehouse-native with no
-// unitTypes of its own — the case where the analysis unit must be resolved from
-// the metric source's id-type mapping.
-func needsSourceUnitTypes(metrics []statsig.Metric) bool {
+// needsSourceUnitTypes reports whether any metric's analysis units depend on
+// the metric sources' id-type mappings.
+func needsSourceUnitTypes(metrics []statsig.Metric, opts converter.Options) bool {
 	for i := range metrics {
-		if len(metrics[i].UnitTypes) == 0 && metrics[i].IsWarehouseNative() {
+		m := &metrics[i]
+		if !m.IsWarehouseNative() {
+			continue
+		}
+		if len(m.UnitTypes) == 0 || opts.WidenAnalysisUnits {
 			return true
 		}
 	}
@@ -737,7 +745,7 @@ func buildDiagnostics(sg statsig.Metric, result *converter.Result) report.Diagno
 		WarningCodes:            result.WarningCodes,
 		LossyReasons:            result.LossyReasons,
 		LossyCodes:              result.LossyCodes,
-		AnalysisUnits:           result.LDMetric.RandomizationUnits,
+		AnalysisUnits:           result.LDMetric.AnalysisUnits,
 		StatsigRollupTimeWindow: sg.EffectiveRollupTimeWindow(),
 		StatsigSourceName:       sg.NumeratorSourceName(),
 	}

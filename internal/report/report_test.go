@@ -336,7 +336,7 @@ func TestJSON_IncludesDiagnostics(t *testing.T) {
 		Metrics []struct {
 			WarningCodes            []string `json:"warning_codes"`
 			LDDataSource            string   `json:"ld_data_source"`
-			RandomizationUnits      []string `json:"randomization_units"`
+			AnalysisUnits           []string `json:"analysis_units"`
 			StatsigRollupTimeWindow string   `json:"statsig_rollup_time_window"`
 			StatsigSourceName       string   `json:"statsig_source_name"`
 			Filters                 []struct {
@@ -358,8 +358,8 @@ func TestJSON_IncludesDiagnostics(t *testing.T) {
 	if m.LDDataSource != "warehouse-ds" || m.StatsigRollupTimeWindow != "max" || m.StatsigSourceName != "Checkout" {
 		t.Errorf("flat diagnostics missing from JSON: %+v", m)
 	}
-	if len(m.RandomizationUnits) != 1 || m.RandomizationUnits[0] != "user" {
-		t.Errorf("randomization_units = %v", m.RandomizationUnits)
+	if len(m.AnalysisUnits) != 1 || m.AnalysisUnits[0] != "user" {
+		t.Errorf("analysis_units = %v", m.AnalysisUnits)
 	}
 	if len(m.Filters) != 2 {
 		t.Fatalf("filters = %+v, want 2 terms", m.Filters)

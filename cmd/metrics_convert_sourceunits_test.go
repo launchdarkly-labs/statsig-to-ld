@@ -3,6 +3,7 @@ package cmd
 import (
 	"testing"
 
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/converter"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 )
 
@@ -22,7 +23,7 @@ func TestNeedsSourceUnitTypes(t *testing.T) {
 		{"empty", nil, false},
 	}
 	for _, tc := range cases {
-		if got := needsSourceUnitTypes(tc.metrics); got != tc.want {
+		if got := needsSourceUnitTypes(tc.metrics, converter.Options{}); got != tc.want {
 			t.Errorf("%s: needsSourceUnitTypes = %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -34,9 +35,9 @@ func TestBuildSourceUnitTypes(t *testing.T) {
 			{StatsigUnitID: "userID", Column: "user_id"},
 			{StatsigUnitID: "companyID", Column: "company_id"},
 		}},
-		{Name: "no_mapping", IDTypeMapping: nil},                                   // skipped (no ids)
-		{Name: "", IDTypeMapping: []statsig.IDTypeMapping{{StatsigUnitID: "x"}}},    // skipped (no name)
-		{Name: "blank_id", IDTypeMapping: []statsig.IDTypeMapping{{Column: "c"}}},   // skipped (blank id)
+		{Name: "no_mapping", IDTypeMapping: nil},                                  // skipped (no ids)
+		{Name: "", IDTypeMapping: []statsig.IDTypeMapping{{StatsigUnitID: "x"}}},  // skipped (no name)
+		{Name: "blank_id", IDTypeMapping: []statsig.IDTypeMapping{{Column: "c"}}}, // skipped (blank id)
 	}
 	got := buildSourceUnitTypes(sources)
 
@@ -46,5 +47,28 @@ func TestBuildSourceUnitTypes(t *testing.T) {
 	units := got["checkout"]
 	if len(units) != 2 || units[0] != "userID" || units[1] != "companyID" {
 		t.Errorf("checkout units = %v, want [userID companyID]", units)
+	}
+}
+
+// Widening needs the sources even when every metric already declares its own
+// unitTypes.
+func TestNeedsSourceUnitTypes_Widening(t *testing.T) {
+	whnWithUnits := statsig.Metric{Type: "user_warehouse", UnitTypes: []string{"userID"}, WarehouseNative: &statsig.WarehouseNative{Aggregation: "sum"}}
+	cloudRatio := statsig.Metric{Type: "ratio", UnitTypes: []string{"userID"}}
+
+	cases := []struct {
+		name    string
+		metrics []statsig.Metric
+		opts    converter.Options
+		want    bool
+	}{
+		{"widen wants warehouse-native sources", []statsig.Metric{whnWithUnits}, converter.Options{WidenAnalysisUnits: true}, true},
+		{"widen does not pull sources for cloud metrics", []statsig.Metric{cloudRatio}, converter.Options{WidenAnalysisUnits: true}, false},
+		{"no widening, units already known", []statsig.Metric{whnWithUnits}, converter.Options{}, false},
+	}
+	for _, tc := range cases {
+		if got := needsSourceUnitTypes(tc.metrics, tc.opts); got != tc.want {
+			t.Errorf("%s: needsSourceUnitTypes = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
