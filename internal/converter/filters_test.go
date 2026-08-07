@@ -40,6 +40,11 @@ func TestCriteriaToFilter_MappedConditions(t *testing.T) {
 		// negate=true. Getting this backwards inverts the filter.
 		{"non_null maps to exists", crit("coupon", "non_null"), ldOpExists, false, []any{}},
 		{"is_null maps to negated exists", crit("coupon", "is_null"), ldOpExists, true, []any{}},
+		// A boolean check is "in" with one boolean value. LaunchDarkly filter values
+		// may be booleans, and a boolean column renders as "true"/"false" when the
+		// warehouse filter compares its text form.
+		{"is_true maps to in [true]", crit("flag", "is_true"), ldOpIn, false, []any{true}},
+		{"is_false maps to in [false]", crit("flag", "is_false"), ldOpIn, false, []any{false}},
 	}
 
 	for _, tt := range tests {
@@ -215,8 +220,6 @@ func TestCriteriaToFilter_RejectedConditions(t *testing.T) {
 		{"sql_filter", statsig.Criterion{Type: "metadata", Condition: "sql_filter", Values: []string{"1=1"}}, "raw SQL snippet"},
 		{"after_exposure", crit("ts", "after_exposure", "0"), "exposure time"},
 		{"before_exposure", crit("ts", "before_exposure", "0"), "exposure time"},
-		{"is_true", crit("flag", "is_true"), "true/false column check"},
-		{"is_false", crit("flag", "is_false"), "true/false column check"},
 		{"unknown condition", crit("col", "zzz_nonsense", "x"), "no matching filter operator"},
 		{"missing column", statsig.Criterion{Type: "metadata", Condition: "in", Values: []string{"x"}}, "no column"},
 		{"context attribute type", statsig.Criterion{Type: "user", Column: "country", Condition: "in", Values: []string{"JP"}}, "can only filter on a column"},
@@ -456,4 +459,36 @@ func TestConvert_CloudCriteriaStayLossy(t *testing.T) {
 		t.Errorf("dropped cloud criteria should be lossy; LossyReasons=%v", res.LossyReasons)
 	}
 	assertHasWarning(t, res.LossyReasons, "warehouse-native metrics only")
+}
+
+// A boolean check must serialize an unquoted JSON boolean, and must ignore whatever
+// Statsig happened to store in values, since the condition carries the meaning.
+func TestCriteriaToFilter_BooleanCheckWirePayload(t *testing.T) {
+	c := crit("IS_TERM", "is_true")
+	c.Values = []string{"ignored"}
+	got, err := criteriaToFilter([]statsig.Criterion{c})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"type":"eventProperty","attribute":"IS_TERM","op":"in","values":[true],"negate":false}`
+	if string(b) != want {
+		t.Errorf("payload mismatch\n got: %s\nwant: %s", b, want)
+	}
+}
+
+// is_true still needs a column, like every other column filter.
+func TestCriteriaToFilter_BooleanCheckNeedsAColumn(t *testing.T) {
+	_, err := criteriaToFilter([]statsig.Criterion{
+		{Type: "metadata", Condition: "is_true"},
+	})
+	if err == nil {
+		t.Fatal("a boolean check with no column should be rejected")
+	}
+	if !strings.Contains(err.Error(), "no column") {
+		t.Errorf("error should mention the missing column, got %q", err.Error())
+	}
 }

@@ -168,12 +168,21 @@ func criterionToLeaf(c statsig.Criterion) (*launchdarkly.EventFilter, error) {
 	case "sql_filter":
 		return nil, unsupported(c.Condition,
 			"it is a raw SQL snippet, which cannot be turned into a LaunchDarkly filter")
+
+	// TODO: support Statsig's "is after exposure" filtering.
+	//
+	// These compare a column against each unit's own exposure time, so the value on
+	// the other side of the comparison is different for every row. LaunchDarkly's
+	// before/after operators compare against one fixed date, so there is nothing to
+	// map onto today: this needs a new filter capability on the LaunchDarkly side
+	// that can reference the exposure timestamp.
+	//
+	// Worth confirming how much this is actually used before building it. Statsig
+	// documents it as "is after exposure":
+	// https://docs.statsig.com/statsig-warehouse-native/configuration/metrics#is-after-exposure
 	case "after_exposure", "before_exposure":
 		return nil, unsupported(c.Condition,
 			"it compares the column against each unit's exposure time, but LaunchDarkly can only compare against a fixed date")
-	case "is_true", "is_false":
-		return nil, unsupported(c.Condition,
-			"LaunchDarkly does not support a true/false column check yet")
 	}
 
 	column := strings.TrimSpace(c.Column)
@@ -276,6 +285,19 @@ func criterionToLeaf(c statsig.Criterion) (*launchdarkly.EventFilter, error) {
 		leaf.Negate = true
 		leaf.Values = []any{}
 
+	// Boolean checks. LaunchDarkly filter values may be booleans as well as strings
+	// and numbers, so a true/false check is just "in" with one boolean value.
+	// Whatever Statsig happened to store in values is ignored, since the condition
+	// itself carries the whole meaning.
+	//
+	// This assumes the column really is a boolean. Warehouse-native filters compare
+	// the column's text form, and a boolean column renders as "true"/"false", so the
+	// match lines up. A column that stores 1/0 or "TRUE" instead renders as "1" or
+	// "TRUE" and will not match, in which case the filter selects no rows.
+	case "is_true", "is_false":
+		leaf.Op = ldOpIn
+		leaf.Values = []any{c.Condition == "is_true"}
+
 	// The never-mappable conditions are rejected above, before the column check.
 	default:
 		return nil, unsupported(c.Condition, "LaunchDarkly has no matching filter operator")
@@ -368,14 +390,35 @@ func criteriaDetail(criteria []statsig.Criterion) string {
 //
 // warehouseNative and hasDataSource are both required for a filter to be emitted:
 //
-//   - Cloud (SDK-event) criteria are out of scope. Their criterion types are
-//     context attributes, which LaunchDarkly rejects on warehouse-native metrics,
-//     and the hosted filter mapping is a separate piece of work.
+//   - Cloud (SDK-event) criteria are not converted yet. See the TODO below for what
+//     that would take. LaunchDarkly does support filters on hosted metrics, so this
+//     is deferred work rather than something that cannot be done.
 //   - Without a bound data source LaunchDarkly treats the metric as SDK-hosted,
 //     where the same eventProperty clause means "extract this key from the event's
 //     JSON payload" rather than "read this warehouse column". Emitting the filter
 //     anyway would produce a metric that saves and then measures something else.
 //     LaunchDarkly also refuses the "exists" operator on a hosted metric outright.
+//
+// TODO: convert filter criteria on cloud (SDK-event) metrics into hosted
+// LaunchDarkly metric filters.
+//
+// LaunchDarkly hosted metrics accept filters, including filters on context
+// attributes, so the gap here is a mapping we have not written rather than a
+// missing capability. Four things need deciding first:
+//
+//  1. A LaunchDarkly context-attribute filter must say which context kind it
+//     applies to. Statsig criteria carry no equivalent, so the kind has to come
+//     from somewhere else (the metric's analysis unit is the obvious guess). Guess
+//     wrong and the filter quietly matches nothing.
+//  2. Value types matter on the hosted path in a way they do not for warehouse
+//     metrics. A warehouse filter compares the column's text form, so passing
+//     Statsig's values through as strings is correct. A hosted filter keeps the
+//     JSON type, so "5" and 5 are different filters. Statsig only ever gives us
+//     strings, so hosted needs a typing rule that warehouse-native does not.
+//  3. The "exists" operator is not available on hosted metrics, so is_null and
+//     non_null have no mapping there at all.
+//  4. Hosted filters sit behind a different feature gate than warehouse-native
+//     ones, so the save-time behaviour differs.
 func convertTermCriteria(
 	result *Result,
 	termLabel string,

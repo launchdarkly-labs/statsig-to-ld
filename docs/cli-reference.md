@@ -420,8 +420,11 @@ Statsig combines multiple criteria on one term with AND, and multiple values wit
 | `>` `>=` `<` `<=` | `greaterThan` / `greaterThanOrEqual` / `lessThan` / `lessThanOrEqual` |
 | `non_null` | `exists` |
 | `is_null` | `exists` negated |
+| `is_true` / `is_false` | `in` with the boolean `true` / `false` |
 
-**Not converted.** `sql_filter` is arbitrary SQL. `after_exposure` and `before_exposure` compare a column against each unit's exposure timestamp, which LaunchDarkly's date operators cannot express (they compare against a fixed date). `is_true` and `is_false` have no verified equivalent yet. A criterion is also unmappable if it sets `nullVacuousOverride`, has no column, uses a context-attribute type (`user`, `user_custom`), carries a non-numeric value for a numeric comparison, carries more than one value for a numeric comparison, or has an empty-string value.
+**Not converted.** `sql_filter` is arbitrary SQL. `after_exposure` and `before_exposure` compare a column against each unit's exposure timestamp, which LaunchDarkly's date operators cannot express (they compare against a fixed date). A criterion is also unmappable if it sets `nullVacuousOverride`, has no column, uses a context-attribute type (`user`, `user_custom`), carries a non-numeric value for a numeric comparison, carries more than one value for a numeric comparison, or has an empty-string value.
+
+`is_true` and `is_false` assume the column really holds a boolean. A warehouse filter compares the column's text form, and a boolean column renders as `true`/`false`, so the match lines up. A column that stores `1`/`0` or `"TRUE"` instead will not match, and the filter selects no rows.
 
 **All or nothing per term.** If any criterion on a term is unmappable, no filter is emitted for that term and the metric stays lossy. Because criteria are AND-ed, applying only the mappable subset would *widen* what the metric matches, producing a metric that looks converted but silently counts more rows than the original. The warning lists every dropped criterion so it can be rebuilt by hand.
 

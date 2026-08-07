@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `metrics convert`: Statsig filter criteria on warehouse-native metrics now convert to LaunchDarkly metric filters
   instead of being dropped. Ratio metrics carry a filter per term, so the numerator and denominator convert
   independently. Mapped conditions: `in`, `=`, `not_in`, `contains`, `not_contains`, `starts_with`, `ends_with`,
-  `>`, `>=`, `<`, `<=`, `non_null`, `is_null`. Conversion is all-or-nothing per term: if any criterion is unmappable
+  `>`, `>=`, `<`, `<=`, `non_null`, `is_null`, `is_true`, `is_false`. Conversion is all-or-nothing per term: if any criterion is unmappable
   the term keeps no filter and stays lossy, because criteria are AND-ed and applying a subset would widen what the
   metric matches. Requires a bound data source, and filters currently compute only on Snowflake-backed sources.
 
