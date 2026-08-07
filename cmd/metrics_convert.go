@@ -25,49 +25,33 @@ import (
 var convertCmd = &cobra.Command{
 	Use:   "convert",
 	Short: "Convert Statsig metrics to LaunchDarkly format",
-	Long: `Fetch Statsig metrics via the Console API, convert them to LaunchDarkly
-metric definitions, and create them via the LD REST API.
+	Long: `Fetch Statsig metrics via the Console API, convert them to LaunchDarkly metric
+definitions, and create them via the LD REST API.
 
-Use --metric to convert a single metric by name, or --all to convert
-every metric in the Statsig project. Not sure of the names? Run --list
-first to print them.
+Use --metric for one metric or --all for the whole project. Run --list first if
+you need the names, and --dry-run to preview without creating anything.
 
-API Key Security:
-  Keys are resolved in order: flag → env var → interactive prompt.
-  The interactive prompt is the most secure option for manual use — keys
-  are entered with echo disabled and never touch disk, shell history, or
-  process listings. For CI/CD, use flags or env vars injected from a
-  secrets manager. --ld-project also reads LD_PROJECT from the environment.
+API keys resolve in order: flag, then env var, then an interactive prompt. The
+prompt is the safest for manual use, since input is hidden and never reaches
+disk or shell history. Set LD_PROJECT to avoid repeating --ld-project.
 
-Examples:
-  # See the available metric names/types (only the Statsig key is needed)
+Full flag reference, key handling, and the Warehouse Native workflow:
+docs/cli-reference.md`,
+	Example: `  # See what metrics exist (only the Statsig key is needed)
   statsig-to-ld metrics convert --list
 
-  # Export every metric's raw Statsig JSON for debugging (Statsig key only)
-  statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json
-
-  # Just run — the tool prompts for keys interactively (most secure)
+  # Preview everything without creating anything
   statsig-to-ld metrics convert --all --dry-run
 
-  # Or set env vars for the session (use 'read -rs' to avoid shell history)
-  read -rs STATSIG_CONSOLE_KEY && export STATSIG_CONSOLE_KEY
-  read -rs LD_API_KEY && export LD_API_KEY
-  export LD_PROJECT=my-project
-  statsig-to-ld metrics convert --all
-
-  # Convert a single metric
+  # Convert one metric
   statsig-to-ld metrics convert --metric purchase_revenue --ld-project my-project
 
-  # Bulk convert all metrics with CSV output
-  statsig-to-ld metrics convert --all --format csv --ld-project my-project
-
-  # Convert only sum and mean metrics, with a default unit
-  statsig-to-ld metrics convert --all --include-types sum,mean \
-    --default-unit "$" --ld-project my-project
-
-  # Bulk convert with Warehouse Native data source
+  # Convert everything, binding warehouse-native metrics to a data source
   statsig-to-ld metrics convert --all --ld-project my-project \
-    --ld-data-source snowflake-ds`,
+    --ld-data-source snowflake-ds
+
+  # Dump raw Statsig JSON to debug a conversion (Statsig key only)
+  statsig-to-ld metrics convert --dump-raw statsig-metrics-raw.json`,
 	RunE: runConvert,
 }
 
@@ -99,31 +83,35 @@ var (
 func init() {
 	metricsCmd.AddCommand(convertCmd)
 
+	// Keep every usage string to one short line. Cobra pads the flag-name column,
+	// so anything much past ~55 characters wraps in a normal terminal and the whole
+	// block becomes hard to scan. Rationale and caveats belong in
+	// docs/cli-reference.md, which the Long description points at.
 	convertCmd.Flags().StringVar(&flagMetric, "metric", "", "Statsig metric name to convert")
 	convertCmd.Flags().BoolVar(&flagAll, "all", false, "Convert all Statsig metrics")
-	convertCmd.Flags().BoolVar(&flagList, "list", false, "List the available Statsig metrics (name, type, id) and exit — no conversion, only the Statsig key needed")
+	convertCmd.Flags().BoolVar(&flagList, "list", false, "List available Statsig metrics and exit")
 	convertCmd.Flags().BoolVar(&flagDryRun, "dry-run", false, "Preview conversion without creating LD metrics")
-	convertCmd.Flags().StringVar(&flagDumpRaw, "dump-raw", "", "Write every Statsig metric's raw JSON (verbatim, all fields) to this file, then continue — for debugging conversion, especially warehouse-native metrics. Needs only the Statsig key.")
+	convertCmd.Flags().StringVar(&flagDumpRaw, "dump-raw", "", "Write raw Statsig JSON to this file, then continue")
 
 	convertCmd.Flags().StringVar(&flagStatsigKey, "statsig-key", "", "Statsig Console API key (console-xxx)")
-	convertCmd.Flags().StringVar(&flagStatsigURL, "statsig-url", "", "Statsig API base URL including scheme (e.g. https://statsigapi.net/console/v1)")
+	convertCmd.Flags().StringVar(&flagStatsigURL, "statsig-url", "", "Statsig API base URL (include the scheme)")
 	convertCmd.Flags().StringVar(&flagLDKey, "ld-key", "", "LaunchDarkly API access token (api-xxx)")
-	convertCmd.Flags().StringVar(&flagLDURL, "ld-url", "", "LaunchDarkly API base URL including scheme (e.g. https://app.launchdarkly.com/)")
+	convertCmd.Flags().StringVar(&flagLDURL, "ld-url", "", "LaunchDarkly API base URL (include the scheme)")
 	convertCmd.Flags().StringVar(&flagLDProject, "ld-project", "", "LaunchDarkly project key (required)")
 
-	convertCmd.Flags().StringVar(&flagLDDataSource, "ld-data-source", "", "LD data source key bound to warehouse-native and ratio metrics. Required for them: ratio metrics are rejected without one, and others are created unbound. Use --source-mapping for per-source keys.")
-	convertCmd.Flags().StringVar(&flagSourceMapping, "source-mapping", "", "JSON file mapping Statsig source names to LD data source keys")
-	convertCmd.Flags().StringVar(&flagUnitTypeMapping, "unit-type-mapping", "", "JSON file mapping Statsig unit types to LD context kinds (e.g. {\"companyID\": \"company\"})")
+	convertCmd.Flags().StringVar(&flagLDDataSource, "ld-data-source", "", "LD data source for warehouse-native and ratio metrics")
+	convertCmd.Flags().StringVar(&flagSourceMapping, "source-mapping", "", "JSON file mapping Statsig sources to LD data sources")
+	convertCmd.Flags().StringVar(&flagUnitTypeMapping, "unit-type-mapping", "", "JSON file mapping unit types to LD context kinds")
 
-	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Path for migration report output")
+	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Migration report path")
 	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
-	convertCmd.Flags().StringVar(&flagDefaultUnit, "default-unit", "", "Unit of measure for numeric metrics (e.g. \"$\", \"ms\", \"count\"). Defaults to \"units\" if unset.")
+	convertCmd.Flags().StringVar(&flagDefaultUnit, "default-unit", "", "Unit of measure for numeric metrics (default \"units\")")
 
-	convertCmd.Flags().StringVar(&flagIncludeTags, "include-tags", "", "Only convert metrics with these Statsig tags (comma-separated)")
-	convertCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert metrics of these Statsig types (comma-separated)")
-	convertCmd.Flags().IntVar(&flagConcurrency, "concurrency", 4, "Max concurrent LD API requests for bulk conversion (kept low to stay under LaunchDarkly's rate limiter; raise if your project's limits allow)")
-	convertCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed per-metric progress (status, name, key, errors)")
-	convertCmd.Flags().BoolVar(&flagConvertLossy, "convert-lossy", false, "Convert metrics whose conversion is lossy (a Statsig feature is dropped or approximated). By default these are skipped as \"incompatible - lossy\".")
+	convertCmd.Flags().StringVar(&flagIncludeTags, "include-tags", "", "Only convert these Statsig tags (comma-separated)")
+	convertCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert these Statsig types (comma-separated)")
+	convertCmd.Flags().IntVar(&flagConcurrency, "concurrency", 4, "Max concurrent LD API requests")
+	convertCmd.Flags().BoolVarP(&flagVerbose, "verbose", "v", false, "Show detailed per-metric progress")
+	convertCmd.Flags().BoolVar(&flagConvertLossy, "convert-lossy", false, "Convert lossy metrics instead of skipping them")
 }
 
 func runConvert(cmd *cobra.Command, args []string) error {
@@ -547,10 +535,15 @@ func processMetric(
 		return
 	}
 
+	diag := buildDiagnostics(sg, result)
+
 	// Lossy conversions (a Statsig feature dropped or approximated) are skipped
 	// by default; --convert-lossy opts into the imperfect conversion.
 	if result.IsLossy() && !flagConvertLossy {
-		rpt.AddSkippedLossy(sg.Name, effType, sg.ID, result.LossyReasons)
+		// Pass the FULL warning list, not just the lossy reasons: a skipped metric
+		// is the one most likely to need triage, so it should keep its advisory
+		// warnings too.
+		rpt.AddSkippedLossy(sg.Name, effType, sg.ID, result.Warnings, diag)
 		if flagVerbose {
 			log.Printf("%s LOSSY  %-45s  skipped (lossy): %s", progress, sg.Name, strings.Join(result.LossyReasons, "; "))
 		} else {
@@ -567,7 +560,7 @@ func processMetric(
 		(sg.IsWarehouseNative() || effType == "ratio")
 
 	if dryRun {
-		rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings)
+		rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings, diag)
 		if needsDataSource {
 			atomic.AddInt64(needsDataSourceCount, 1)
 		}
@@ -603,7 +596,7 @@ func processMetric(
 		return
 	}
 
-	rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings)
+	rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings, diag)
 	if needsDataSource {
 		atomic.AddInt64(needsDataSourceCount, 1)
 	}
@@ -734,4 +727,31 @@ func toSet(items []string) map[string]bool {
 		s[item] = true
 	}
 	return s
+}
+
+// buildDiagnostics collects the machine-readable fields for one metric's report
+// entry. Kept in one place so the lossy-skip and converted paths cannot drift
+// apart on what they record.
+func buildDiagnostics(sg statsig.Metric, result *converter.Result) report.Diagnostics {
+	diag := report.Diagnostics{
+		WarningCodes:            result.WarningCodes,
+		LossyReasons:            result.LossyReasons,
+		LossyCodes:              result.LossyCodes,
+		AnalysisUnits:           result.LDMetric.RandomizationUnits,
+		StatsigRollupTimeWindow: sg.EffectiveRollupTimeWindow(),
+		StatsigSourceName:       sg.NumeratorSourceName(),
+	}
+	if result.LDMetric.DataSource != nil {
+		diag.LDDataSource = result.LDMetric.DataSource.Key
+	}
+	for _, f := range result.FilterOutcomes {
+		diag.Filters = append(diag.Filters, report.FilterOutcome{
+			Term:             f.Term,
+			Criteria:         f.Criteria,
+			Applied:          f.Applied,
+			BlockedBy:        f.BlockedBy,
+			BlockedCondition: f.BlockedCondition,
+		})
+	}
+	return diag
 }

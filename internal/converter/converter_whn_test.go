@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 )
 
@@ -125,24 +126,74 @@ func TestConvert_WHN_DailyParticipation_WindowInsideWarehouseNative(t *testing.T
 	}
 }
 
-func TestConvert_WHN_Criteria_IsLossy(t *testing.T) {
-	// warehouse-native filters live on warehouseNative.criteria and are dropped.
+func TestConvert_WHN_Criteria_ConvertsToFilter(t *testing.T) {
+	// warehouse-native filters live on warehouseNative.criteria. A mappable
+	// criterion on a data-source-bound metric now converts to an LD metric filter
+	// with no loss, replacing the old blanket drop.
 	raw := `{
 	  "type":"user_warehouse","name":"Filtered Rev","id":"Filtered Rev::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout","valueColumn":"price_usd",
 	    "criteria":[{"type":"metadata","column":"event","condition":"in","values":["purchase"]}]}}`
-	var m statsig.Metric
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	res := mustConvert(t, raw, Options{LDDataSource: "snowflake-ds"})
+	if res.IsLossy() {
+		t.Errorf("a mappable warehouse-native criterion should convert without loss; LossyReasons=%v", res.LossyReasons)
 	}
-	res, err := Convert(&m, Options{LDDataSource: "snowflake-ds"})
-	if err != nil {
-		t.Fatalf("should still convert (lossy), got error: %v", err)
+	f := res.LDMetric.Filters
+	if f == nil {
+		t.Fatal("expected a metric filter to be set")
+	}
+	// One criterion emits a bare leaf, not a group.
+	if f.Type != launchdarkly.EventFilterTypeEventProperty {
+		t.Errorf("Type = %q, want %q", f.Type, launchdarkly.EventFilterTypeEventProperty)
+	}
+	if f.Attribute != "event" {
+		t.Errorf("Attribute = %q, want \"event\"", f.Attribute)
+	}
+	if f.Op != ldOpIn || f.Negate {
+		t.Errorf("Op/Negate = %q/%v, want %q/false", f.Op, f.Negate, ldOpIn)
+	}
+	if len(f.Values) != 1 || f.Values[0] != "purchase" {
+		t.Errorf("Values = %#v, want [\"purchase\"]", f.Values)
+	}
+}
+
+func TestConvert_WHN_UnmappableCriteria_StaysLossyWithNoFilter(t *testing.T) {
+	// sql_filter is arbitrary SQL with no column. All-or-nothing: the term gets no
+	// filter at all and stays lossy, rather than a partially applied filter that
+	// would silently match MORE rows than the original.
+	raw := `{
+	  "type":"user_warehouse","name":"Filtered Rev","id":"Filtered Rev::user_warehouse","directionality":"increase",
+	  "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout","valueColumn":"price_usd",
+	    "criteria":[{"type":"metadata","column":"event","condition":"in","values":["purchase"]},
+	                {"type":"metadata","condition":"sql_filter","values":["user_id IN (SELECT 1)"]}]}}`
+	res := mustConvert(t, raw, Options{LDDataSource: "snowflake-ds"})
+	if !res.IsLossy() {
+		t.Errorf("an unmappable criterion should keep the conversion lossy; LossyReasons=%v", res.LossyReasons)
+	}
+	if res.LDMetric.Filters != nil {
+		t.Errorf("no filter should be emitted when any criterion is unmappable, got %#v", res.LDMetric.Filters)
+	}
+	assertHasWarning(t, res.LossyReasons, "sql_filter")
+	// The dropped criteria are spelled out so they can be rebuilt by hand.
+	assertHasWarning(t, res.LossyReasons, "Dropped filters:")
+}
+
+func TestConvert_WHN_Criteria_WithoutDataSource_StaysLossy(t *testing.T) {
+	// Without a bound data source LaunchDarkly treats the metric as SDK-hosted,
+	// where the same eventProperty clause means a JSON payload lookup rather than a
+	// warehouse column. Emitting it would save and then measure something else.
+	raw := `{
+	  "type":"user_warehouse","name":"Filtered Rev","id":"Filtered Rev::user_warehouse","directionality":"increase",
+	  "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout","valueColumn":"price_usd",
+	    "criteria":[{"type":"metadata","column":"event","condition":"in","values":["purchase"]}]}}`
+	res := mustConvert(t, raw, Options{})
+	if res.LDMetric.Filters != nil {
+		t.Errorf("no filter should be emitted without a data source, got %#v", res.LDMetric.Filters)
 	}
 	if !res.IsLossy() {
-		t.Errorf("dropped warehouse-native criteria should mark the conversion lossy; LossyReasons=%v", res.LossyReasons)
+		t.Errorf("criteria dropped for lack of a data source should be lossy; LossyReasons=%v", res.LossyReasons)
 	}
-	assertHasWarning(t, res.LossyReasons, "DATA LOSS")
+	assertHasWarning(t, res.LossyReasons, "need a warehouse data source")
 }
 
 func TestConvert_WHN_Ratio_FlatDenominatorColumn(t *testing.T) {

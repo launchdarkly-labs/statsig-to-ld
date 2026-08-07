@@ -150,6 +150,22 @@ Where `sources.json` is:
 {"purchases_table": "snowflake-purchases-ds", "sessions_table": "snowflake-sessions-ds"}
 ```
 
+#### Flags worth knowing more about
+
+`--help` keeps every flag description to one line so the list stays scannable. These are the ones with more to them:
+
+| Flag | Detail |
+|---|---|
+| `--ld-data-source` | Binds warehouse-native and ratio metrics to a LaunchDarkly data source. Effectively required for them: a ratio metric is **rejected** without one (HTTP 400), and other warehouse-native metrics are created unbound, collecting no data. Metric filters and measurement windows also only convert when a data source is bound. Use `--source-mapping` instead when different Statsig sources map to different LD data sources. |
+| `--source-mapping` | Takes precedence over `--ld-data-source` for any Statsig source name it lists. Unlisted sources fall back to `--ld-data-source`. |
+| `--concurrency` | Defaults to 4, deliberately low to stay under LaunchDarkly's API rate limiter. Raise it if your project's limits allow; lower it if you start seeing 429s. |
+| `--convert-lossy` | Off by default. A lossy metric is one where converting would drop or approximate a Statsig feature, so it is recorded as `skipped_lossy` in the report with the reason, rather than being silently converted into something subtly different. Pass this to convert them anyway and accept the imperfect result. See "Statsig features not carried over" below. |
+| `--dump-raw` | Writes every Statsig metric's raw JSON verbatim, all fields, then continues the run. Needs only the Statsig key. The fastest way to see what Statsig actually returned for a metric that converted oddly. See "Debugging a conversion" below. |
+| `--list` | Prints name, type, and id for every metric, then exits without converting. Needs only the Statsig key. |
+| `--default-unit` | Applies to numeric metrics, which LaunchDarkly requires a unit for. Defaults to `units` when unset. Examples: `$`, `ms`, `count`. |
+| `--unit-type-mapping` | Maps Statsig unit types to LD context kinds, e.g. `{"companyID": "company"}`. Without a mapping, a non-`userID` unit type is lowercased as a best guess and warned about. |
+| `--verbose` | Replaces the compact per-metric ticker with a line per metric showing status, name, key, and any error. |
+
 #### Custom unit types (company-level experiments)
 
 If your Statsig project uses unit types beyond `userID` (e.g. `companyID`, `teamID`), map them to your LD context kinds:
@@ -373,7 +389,6 @@ Some Statsig features can't be reproduced faithfully in LaunchDarkly. A metric w
 
 | Feature | Effect if converted |
 |---|---|
-| Event filter criteria | LD metric matches all events, not just the filtered subset (`DATA LOSS`) |
 | Per-unit capping | No per-user-per-day value cap |
 | Log transform | Values not log-transformed; distribution shape may differ |
 | Daily participation rate | Falls back to standard binary conversion (different aggregation) |
@@ -387,6 +402,33 @@ Some Statsig features can't be reproduced faithfully in LaunchDarkly. A metric w
 |---|---|---|
 | Winsorization | numeric or count metric (mapped to LD `winsorLowerPercentile`/`winsorUpperPercentile`) | occurrence metric (non-numeric average), where LD can't apply it |
 | Custom rollup window | a warehouse data source is bound (mapped to LD window offsets via `--ld-data-source`) | no data source is bound (LD windows require a snowflake source) |
+| Metric filter criteria | a warehouse-native metric with a bound data source and every criterion mappable (see below) | a cloud metric, no data source bound, or any criterion unmappable |
+
+### Metric filter criteria
+
+Statsig filter criteria on a **warehouse-native** metric convert to a LaunchDarkly metric filter. Ratio metrics carry a filter per term, so the numerator and denominator convert independently.
+
+Statsig combines multiple criteria on one term with AND, and multiple values within one criterion with OR. That maps onto a LaunchDarkly `and` group of clauses, which is the same model.
+
+| Statsig condition | LaunchDarkly operator |
+|---|---|
+| `in`, `=` | `in` |
+| `not_in` | `in` negated |
+| `contains` | `contains` |
+| `not_contains` | `contains` negated |
+| `starts_with` / `ends_with` | `startsWith` / `endsWith` |
+| `>` `>=` `<` `<=` | `greaterThan` / `greaterThanOrEqual` / `lessThan` / `lessThanOrEqual` |
+| `non_null` | `exists` |
+| `is_null` | `exists` negated |
+| `is_true` / `is_false` | `in` with the boolean `true` / `false` |
+
+**Not converted.** `sql_filter` is arbitrary SQL. `after_exposure` and `before_exposure` compare a column against each unit's exposure timestamp, which LaunchDarkly's date operators cannot express (they compare against a fixed date). A criterion is also unmappable if it sets `nullVacuousOverride`, has no column, uses a context-attribute type (`user`, `user_custom`), carries a non-numeric value for a numeric comparison, carries more than one value for a numeric comparison, or has an empty-string value.
+
+`is_true` and `is_false` assume the column really holds a boolean. A warehouse filter compares the column's text form, and a boolean column renders as `true`/`false`, so the match lines up. A column that stores `1`/`0` or `"TRUE"` instead will not match, and the filter selects no rows.
+
+**All or nothing per term.** If any criterion on a term is unmappable, no filter is emitted for that term and the metric stays lossy. Because criteria are AND-ed, applying only the mappable subset would *widen* what the metric matches, producing a metric that looks converted but silently counts more rows than the original. The warning lists every dropped criterion so it can be rebuilt by hand.
+
+> **Requirements.** Filters must be enabled for the target LaunchDarkly project, and they currently compute only on **Snowflake**-backed data sources. A filter saved against another warehouse type persists but fails when results are computed. Filters also need a bound data source: without one LaunchDarkly treats the metric as SDK-hosted, where the same clause would mean a JSON payload lookup rather than a warehouse column, so those criteria are reported as lossy instead.
 
 ## EU / FedRAMP instances
 

@@ -46,6 +46,68 @@ type Options struct {
 	SourceUnitTypes map[string][]string
 }
 
+// Warning codes are stable identifiers for the diagnostics the converter emits.
+// They travel into the migration report next to the human message, so a reader
+// can aggregate outcomes with a tool instead of pattern-matching prose, and so
+// rewording a message does not silently break someone's analysis. Codes also
+// survive the redaction customers apply before sharing a report, where free text
+// often does not.
+const (
+	WarnDailyParticipationRate   = "daily_participation_rate_approximated"
+	WarnNoValueColumn            = "whn_no_value_column"
+	WarnCountDistinctApproximate = "count_distinct_approximated"
+	WarnMultipleMetricEvents     = "multiple_metric_events"
+	WarnCountDistinctEvent       = "count_distinct_event_metric"
+	WarnMetadataAggregation      = "metadata_aggregation"
+	WarnKeyTruncated             = "ld_key_truncated"
+	WarnNoDataSourceForSource    = "no_data_source_for_source"
+	WarnUnitTypeUnmapped         = "unit_type_unmapped"
+	WarnAnalysisUnitFromSource   = "analysis_unit_from_source"
+	WarnAnalysisUnitDefaulted    = "analysis_unit_defaulted"
+	WarnWinsorizationNotApplied  = "winsorization_not_applied"
+	WarnPerUnitCapDropped        = "per_unit_cap_dropped"
+	WarnLogTransformDropped      = "log_transform_dropped"
+	WarnValueThresholdDropped    = "value_threshold_dropped"
+	WarnAnalysisFeaturesDropped  = "whn_analysis_features_dropped"
+	WarnWindowNoDataSource       = "window_no_data_source"
+	WarnDailyParticipationRatio  = "daily_participation_ratio_term"
+	WarnRatioNoDataSource        = "ratio_no_data_source"
+
+	// Filter conversion.
+	WarnFilterApplied            = "filter_applied"
+	WarnFilterNoDataSource       = "filter_no_data_source"
+	WarnFilterCloudUnsupported   = "filter_cloud_metric_unsupported"
+	WarnFilterConditionBlocked   = "filter_condition_unsupported"
+	WarnFilterDuplicateLocations = "filter_criteria_in_two_locations"
+)
+
+// FilterOutcome records what happened to one metric term's Statsig filter
+// criteria. A ratio metric produces one per term, so a reader can see that (say)
+// the numerator converted while the denominator was blocked. Emitted into the
+// migration report so filter results can be counted directly rather than
+// recovered by parsing warning text.
+type FilterOutcome struct {
+	// Term is which part of the metric this covers: "warehouse-native" or "event"
+	// for a simple metric, "numerator" or "denominator" for a ratio.
+	Term string
+	// Criteria is how many Statsig criteria the term carried.
+	Criteria int
+	// Applied reports whether a LaunchDarkly filter was emitted for the term.
+	Applied bool
+	// BlockedBy is a stable code for why no filter was emitted. Empty when applied.
+	BlockedBy string
+	// BlockedCondition is the Statsig condition responsible, when one is. Empty
+	// when the term was blocked for a reason other than a specific condition.
+	BlockedCondition string
+}
+
+// codedWarning pairs a stable code with its human message, for the helpers that
+// build warnings before a Result exists.
+type codedWarning struct {
+	code string
+	msg  string
+}
+
 // Result holds the converted LD metric and any warnings about Statsig features
 // that could not be carried over.
 type Result struct {
@@ -56,15 +118,42 @@ type Result struct {
 	// approximated. Populated via addLossy; these messages also appear in
 	// Warnings. Drives the default skip that --convert-lossy overrides.
 	LossyReasons []string
+
+	// WarningCodes runs parallel to Warnings: WarningCodes[i] is the stable code
+	// for Warnings[i]. LossyCodes does the same for LossyReasons. The two
+	// add* helpers below are the only writers, which is what keeps them aligned —
+	// never append to these slices directly.
+	WarningCodes []string
+	LossyCodes   []string
+
+	// FilterOutcomes records one entry per metric term that carried filter
+	// criteria, whether or not a filter was produced.
+	FilterOutcomes []FilterOutcome
+}
+
+// addWarning records an advisory message. It does NOT mark the conversion lossy,
+// so the metric still converts by default.
+func (r *Result) addWarning(code, format string, args ...any) {
+	r.Warnings = append(r.Warnings, fmt.Sprintf(format, args...))
+	r.WarningCodes = append(r.WarningCodes, code)
 }
 
 // addLossy records a message that both warns the user and marks the conversion
 // as lossy (a Statsig feature was dropped or approximated). The message is added
 // to both Warnings and LossyReasons.
-func (r *Result) addLossy(format string, args ...any) {
+func (r *Result) addLossy(code, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	r.Warnings = append(r.Warnings, msg)
+	r.WarningCodes = append(r.WarningCodes, code)
 	r.LossyReasons = append(r.LossyReasons, msg)
+	r.LossyCodes = append(r.LossyCodes, code)
+}
+
+// addCoded records an already-built warning from a helper that had no Result.
+func (r *Result) addCoded(prefix string, ws ...codedWarning) {
+	for _, w := range ws {
+		r.addWarning(w.code, "%s%s", prefix, w.msg)
+	}
 }
 
 // IsLossy reports whether the conversion dropped or approximated a Statsig
@@ -133,7 +222,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	if effectiveType == "daily_participation" || effectiveType == "event_user" {
 		switch sg.EffectiveRollupTimeWindow() {
 		case "", "daily", "daily_participation_rate":
-			result.addLossy("Statsig daily participation rate (per-unit fraction of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
+			result.addLossy(WarnDailyParticipationRate, "Statsig daily participation rate (per-unit fraction of active days) has no exact LaunchDarkly equivalent — approximated as a binary metric, which loses the per-day rate")
 		}
 	}
 
@@ -159,8 +248,8 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 			// and carry no value column. LD still needs an event key, so use the
 			// source name as a provisional stand-in pending live LD verification.
 			eventKey = src
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("warehouse-native %q metric has no value column (it counts rows/units); LD eventKey set to the source name %q provisionally — verify against a created LD metric", effectiveType, src))
+			result.addWarning(WarnNoValueColumn,
+				"warehouse-native %q metric has no value column (it counts rows/units); LD eventKey set to the source name %q provisionally — verify against a created LD metric", effectiveType, src)
 		}
 	} else if len(sg.Lineage.Events) > 0 {
 		eventKey = sg.Lineage.Events[0]
@@ -183,14 +272,14 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		unitAgg = "average"
 		unitAggField = ""
 		if hadColumn {
-			result.addLossy("LaunchDarkly supports count_distinct only on ratio metrics; this non-ratio metric is approximated as a binary metric, losing the distinct-value count")
+			result.addLossy(WarnCountDistinctApproximate, "LaunchDarkly supports count_distinct only on ratio metrics; this non-ratio metric is approximated as a binary metric, losing the distinct-value count")
 		}
 	}
 
 	// Warn if multiple metric events — only the first is used (lossy: the
 	// additional events are dropped).
 	if len(sg.MetricEvents) > 1 {
-		result.addLossy("Statsig metric has %d metric events — only the first (%q) is used; %d additional events are ignored",
+		result.addLossy(WarnMultipleMetricEvents, "Statsig metric has %d metric events — only the first (%q) is used; %d additional events are ignored",
 			len(sg.MetricEvents), eventKey, len(sg.MetricEvents)-1)
 	}
 
@@ -202,39 +291,43 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 
 	// Count distinct
 	if len(sg.MetricEvents) > 0 && sg.MetricEvents[0].Type == "count_distinct" {
-		result.addLossy("Statsig counts distinct %q values — LaunchDarkly will count all occurrences instead",
+		result.addLossy(WarnCountDistinctEvent, "Statsig counts distinct %q values — LaunchDarkly will count all occurrences instead",
 			sg.MetricEvents[0].MetadataKey)
 	}
 
 	// Metadata-based aggregation
 	if len(sg.MetricEvents) > 0 && sg.MetricEvents[0].Type == "metadata" {
-		result.addLossy("Statsig aggregates metadata field %q — LaunchDarkly will aggregate the track() metricValue; ensure events send the same value in metricValue",
+		result.addLossy(WarnMetadataAggregation, "Statsig aggregates metadata field %q — LaunchDarkly will aggregate the track() metricValue; ensure events send the same value in metricValue",
 			sg.MetricEvents[0].MetadataKey)
 	}
 
-	// Event criteria/filters — data-affecting: the migrated metric will be broader
-	// than the original because filters are not carried over
-	if len(sg.MetricEvents) > 0 && len(sg.MetricEvents[0].Criteria) > 0 {
-		criteria := sg.MetricEvents[0].Criteria
-		var details []string
-		for _, c := range criteria {
-			details = append(details, fmt.Sprintf("%s %s %s %v", c.Column, c.Type, c.Condition, c.Values))
-		}
-		result.addLossy("DATA LOSS: %d event filter criteria will NOT be applied — the LD metric will match all %q events, not just the filtered subset. Dropped filters: [%s]. Manual filter setup required in LD.",
-			len(criteria), eventKey, strings.Join(details, "; "))
-	}
-
-	// Warehouse-native filters live on warehouseNative.criteria (or per source),
-	// not metricEvents; drop them with the same DATA LOSS warning.
+	// Filter criteria. Warehouse-native criteria live on warehouseNative.criteria
+	// (or per source); cloud criteria live on metricEvents. Both are resolved into
+	// a LaunchDarkly metric filter further down, once the data source is known —
+	// LaunchDarkly only interprets a column filter as a warehouse column when the
+	// metric is bound to a data source. See convertTermCriteria.
+	var termCriteria []statsig.Criterion
+	termCriteriaLabel := "event"
 	if sg.IsWarehouseNative() {
-		if crit := sg.NumeratorCriteria(); len(crit) > 0 {
-			var details []string
-			for _, c := range crit {
-				details = append(details, fmt.Sprintf("%s %s %s %v", c.Column, c.Type, c.Condition, c.Values))
-			}
-			result.addLossy("DATA LOSS: %d warehouse-native filter criteria will NOT be applied — the LD metric will match all rows, not just the filtered subset. Dropped filters: [%s]. Manual filter setup required in LD.",
-				len(crit), strings.Join(details, "; "))
+		termCriteria = sg.NumeratorCriteria()
+		termCriteriaLabel = "warehouse-native"
+		// A warehouse-native metric carries its criteria on warehouseNative, but if
+		// any also show up on metricEvents they must not be dropped in silence —
+		// an unreported dropped filter is the one outcome this conversion must never
+		// produce, because the metric then measures more than it claims to.
+		if len(sg.MetricEvents) > 0 && len(sg.MetricEvents[0].Criteria) > 0 {
+			result.addLossy(WarnFilterDuplicateLocations, "DATA LOSS: %s on metricEvents %s not applied. This warehouse-native metric carries filter criteria in two places and only the warehouseNative ones convert. Dropped filters: [%s]. Add them by hand in LaunchDarkly if you need them.",
+				criteriaPhrase(len(sg.MetricEvents[0].Criteria), "event"),
+				wasWere(len(sg.MetricEvents[0].Criteria)),
+				criteriaDetail(sg.MetricEvents[0].Criteria))
+			result.FilterOutcomes = append(result.FilterOutcomes, FilterOutcome{
+				Term:      "event",
+				Criteria:  len(sg.MetricEvents[0].Criteria),
+				BlockedBy: FilterBlockedDuplicateLocation,
+			})
 		}
+	} else if len(sg.MetricEvents) > 0 {
+		termCriteria = sg.MetricEvents[0].Criteria
 	}
 
 	// Warehouse Native advanced features
@@ -259,7 +352,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	// Randomization units: Statsig "userID" → LD "user" (see randomizationUnits)
 	// ---------------------------------------------------------------
 	randUnits, ruWarnings := randomizationUnits(sg, opts)
-	result.Warnings = append(result.Warnings, ruWarnings...)
+	result.addCoded("", ruWarnings...)
 
 	// ---------------------------------------------------------------
 	// LD metric key: derived from Statsig ID (name::type) for idempotency
@@ -270,8 +363,8 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	if len(ldKey) > maxLDKeyLength {
 		ldKey = ldKey[:maxLDKeyLength]
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("LD metric key truncated to %d characters (original Statsig ID was very long)", maxLDKeyLength))
+		result.addWarning(WarnKeyTruncated,
+			"LD metric key truncated to %d characters (original Statsig ID was very long)", maxLDKeyLength)
 	}
 
 	// ---------------------------------------------------------------
@@ -339,13 +432,22 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		if dsKey != "" {
 			result.LDMetric.DataSource = &launchdarkly.DataSource{Key: dsKey}
 		} else {
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("no LD data source specified for Statsig source %q — metric created without data source binding", srcName))
+			result.addWarning(WarnNoDataSourceForSource,
+				"no LD data source specified for Statsig source %q — metric created without data source binding", srcName)
 		}
 	} else if opts.LDDataSource != "" {
 		// No explicit source name on the metric, but a global default was provided
 		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: opts.LDDataSource}
 	}
+
+	// ---------------------------------------------------------------
+	// Metric filters: map Statsig filter criteria to a LaunchDarkly metric filter.
+	// Resolved here, after the data source binding, because a filter is only
+	// meaningful once LaunchDarkly knows the metric reads warehouse columns.
+	// ---------------------------------------------------------------
+	result.LDMetric.Filters = convertTermCriteria(
+		result, termCriteriaLabel, termCriteria,
+		sg.IsWarehouseNative(), result.LDMetric.DataSource != nil)
 
 	// ---------------------------------------------------------------
 	// Windowed metrics: map a Statsig custom rollup window (days) to LD window
@@ -378,7 +480,7 @@ func lowerKeyMapping(m map[string]string) map[string]string {
 // warning unless remapped via --unit-type-mapping. Warehouse-native metrics
 // often carry no unitTypes (the unit comes from the source's idTypeMapping), so
 // an empty result defaults to "user".
-func randomizationUnits(sg *statsig.Metric, opts Options) (units, warnings []string) {
+func randomizationUnits(sg *statsig.Metric, opts Options) (units []string, warnings []codedWarning) {
 	// A metric's own unitTypes win. Warehouse-native metrics usually omit them,
 	// carrying the unit on the metric source instead; fall back to the source's
 	// id-type mapping when we have it.
@@ -408,19 +510,19 @@ func randomizationUnits(sg *statsig.Metric, opts Options) (units, warnings []str
 			units = append(units, "user")
 		default:
 			units = append(units, strings.ToLower(u))
-			warnings = append(warnings,
-				fmt.Sprintf("Statsig unitType %q may not match an LD context kind — verify in LD or use --unit-type-mapping", u))
+			warnings = append(warnings, codedWarning{WarnUnitTypeUnmapped,
+				fmt.Sprintf("Statsig unitType %q may not match an LD context kind — verify in LD or use --unit-type-mapping", u)})
 		}
 	}
 
 	if fromSource && len(units) > 0 {
-		warnings = append(warnings,
-			fmt.Sprintf("metric has no unitTypes of its own; used the metric source's analysis unit(s) %v (from its id-type mapping)", unitTypes))
+		warnings = append(warnings, codedWarning{WarnAnalysisUnitFromSource,
+			fmt.Sprintf("metric has no unitTypes of its own; used the metric source's analysis unit(s) %v (from its id-type mapping)", unitTypes)})
 	}
 	if len(units) == 0 {
 		units = []string{"user"}
-		warnings = append(warnings,
-			"no Statsig unitTypes on the metric and none resolvable from its source — defaulted the LD randomization unit to \"user\"; pass --unit-type-mapping or check the metric source's id-type mapping if that's wrong")
+		warnings = append(warnings, codedWarning{WarnAnalysisUnitDefaulted,
+			"no Statsig unitTypes on the metric and none resolvable from its source — defaulted the LD randomization unit to \"user\"; pass --unit-type-mapping or check the metric source's id-type mapping if that's wrong"})
 	}
 	return units, warnings
 }
@@ -463,7 +565,7 @@ func winsorPercentiles(result *Result, wn *statsig.WarehouseNative, isNumeric bo
 		return nil, nil
 	}
 	if !isNumeric && unitAgg == "average" {
-		result.addLossy("winsorization (low=%s, high=%s) not applied — LaunchDarkly does not support winsorization on occurrence metrics",
+		result.addLossy(WarnWinsorizationNotApplied, "winsorization (low=%s, high=%s) not applied — LaunchDarkly does not support winsorization on occurrence metrics",
 			fmtOptFloat(wn.WinsorizationLow), fmtOptFloat(wn.WinsorizationHigh))
 		return nil, nil
 	}
@@ -489,13 +591,13 @@ func warnUnsupportedWarehouseFeatures(result *Result, wn *statsig.WarehouseNativ
 		return
 	}
 	if wn.Cap != nil {
-		result.addLossy("per-unit capping (cap=%v) is not supported in LaunchDarkly", *wn.Cap)
+		result.addLossy(WarnPerUnitCapDropped, "per-unit capping (cap=%v) is not supported in LaunchDarkly", *wn.Cap)
 	}
 	if wn.UseLogTransform != nil && *wn.UseLogTransform {
-		result.addLossy("log transform is not supported in LaunchDarkly — metric values will not be log-transformed")
+		result.addLossy(WarnLogTransformDropped, "log transform is not supported in LaunchDarkly — metric values will not be log-transformed")
 	}
 	if wn.ValueThreshold != nil {
-		result.addLossy("value threshold (%v) is not supported in LaunchDarkly — the metric will not apply it", *wn.ValueThreshold)
+		result.addLossy(WarnValueThresholdDropped, "value threshold (%v) is not supported in LaunchDarkly — the metric will not apply it", *wn.ValueThreshold)
 	}
 
 	var dropped []string
@@ -512,8 +614,8 @@ func warnUnsupportedWarehouseFeatures(result *Result, wn *statsig.WarehouseNativ
 		dropped = append(dropped, "metric bake days")
 	}
 	if len(dropped) > 0 {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("Statsig warehouse-native analysis features not carried over to LaunchDarkly (metric definition is unaffected): %s", strings.Join(dropped, ", ")))
+		result.addWarning(WarnAnalysisFeaturesDropped,
+			"Statsig warehouse-native analysis features not carried over to LaunchDarkly (metric definition is unaffected): %s", strings.Join(dropped, ", "))
 	}
 }
 
@@ -546,7 +648,7 @@ func applyCustomWindow(result *Result, sg *statsig.Metric) {
 		result.LDMetric.WindowStartOffset = &s
 		result.LDMetric.WindowEndOffset = &e
 	} else {
-		result.addLossy("custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
+		result.addLossy(WarnWindowNoDataSource, "custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
 			*start, *end)
 	}
 }
@@ -617,8 +719,8 @@ func termSpecFor(typ string) (termSpec, error) {
 // LD term shape, reusing the simple-metric mapping via termSpecFor. Statsig
 // ratio events use count / count_distinct / value / metadata aggregations.
 // Returns any lossy-conversion warnings alongside the spec.
-func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []string, error) {
-	var warnings []string
+func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []codedWarning, error) {
+	var warnings []codedWarning
 	switch ev.Type {
 	case "count_distinct":
 		// A named column → count(distinct <column>), which LaunchDarkly supports
@@ -635,8 +737,8 @@ func ratioTermSpec(ev statsig.MetricEvent) (termSpec, []string, error) {
 		spec, _ := termSpecFor("event_user")
 		return spec, nil, nil
 	case "metadata":
-		warnings = append(warnings,
-			fmt.Sprintf("Statsig aggregates metadata field %q — LaunchDarkly will aggregate the track() metricValue; ensure events send the same value in metricValue", ev.MetadataKey))
+		warnings = append(warnings, codedWarning{WarnMetadataAggregation,
+			fmt.Sprintf("Statsig aggregates metadata field %q — LaunchDarkly will aggregate the track() metricValue; ensure events send the same value in metricValue", ev.MetadataKey)})
 		spec, err := termSpecFor("sum")
 		return spec, warnings, err
 	case "count", "":
@@ -714,26 +816,15 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ratio metric %q denominator: %w", sg.Name, err)
 	}
-	for _, w := range numWarn {
-		result.Warnings = append(result.Warnings, "numerator: "+w)
-	}
-	for _, w := range denWarn {
-		result.Warnings = append(result.Warnings, "denominator: "+w)
-	}
+	result.addCoded("numerator: ", numWarn...)
+	result.addCoded("denominator: ", denWarn...)
 
 	if numEv.Type == "daily_participation" || denEv.Type == "daily_participation" {
-		result.addLossy("Statsig daily_participation ratio term approximated as binary in LaunchDarkly — the per-day rate is lost")
+		result.addLossy(WarnDailyParticipationRatio, "Statsig daily_participation ratio term approximated as binary in LaunchDarkly — the per-day rate is lost")
 	}
 
-	// Event filter criteria are not carried over (parity with the simple path).
-	if len(numEv.Criteria) > 0 {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("DATA LOSS: %d numerator event filter criteria will NOT be applied — the LD metric matches all %q events. Manual filter setup required in LD.", len(numEv.Criteria), numEv.Name))
-	}
-	if len(denEv.Criteria) > 0 {
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("DATA LOSS: %d denominator event filter criteria will NOT be applied — the LD metric matches all %q events. Manual filter setup required in LD.", len(denEv.Criteria), denEv.Name))
-	}
+	// Per-term filter criteria are resolved further down, once each term's data
+	// source is known. See convertTermCriteria.
 
 	ldKey := SanitizeKey(sg.ID)
 	if ldKey == "" {
@@ -741,8 +832,8 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	if len(ldKey) > maxLDKeyLength {
 		ldKey = ldKey[:maxLDKeyLength]
-		result.Warnings = append(result.Warnings,
-			fmt.Sprintf("LD metric key truncated to %d characters (original Statsig ID was very long)", maxLDKeyLength))
+		result.addWarning(WarnKeyTruncated,
+			"LD metric key truncated to %d characters (original Statsig ID was very long)", maxLDKeyLength)
 	}
 
 	successCriteria := "HigherThanBaseline"
@@ -751,7 +842,7 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 
 	randUnits, ruWarnings := randomizationUnits(sg, opts)
-	result.Warnings = append(result.Warnings, ruWarnings...)
+	result.addCoded("", ruWarnings...)
 
 	desc := sg.Description
 	if desc == "" {
@@ -816,7 +907,7 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	if numDS != "" {
 		result.LDMetric.DataSource = &launchdarkly.DataSource{Key: numDS}
 	} else {
-		result.Warnings = append(result.Warnings,
+		result.addWarning(WarnRatioNoDataSource,
 			"LaunchDarkly ratio metrics require a warehouse data source for the numerator — none resolved; pass --ld-data-source <key> (or --source-mapping) or LD will reject creation (HTTP 400)")
 	}
 
@@ -826,6 +917,18 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	if denDS != "" && result.LDMetric.Denominator != nil {
 		result.LDMetric.Denominator.DataSource = &launchdarkly.DataSource{Key: denDS}
+	}
+
+	// ---------------------------------------------------------------
+	// Per-term metric filters. Each term carries its own criteria and its own data
+	// source, so each is converted independently: one term can get its filter
+	// while the other stays lossy.
+	// ---------------------------------------------------------------
+	result.LDMetric.Filters = convertTermCriteria(
+		result, "numerator", numEv.Criteria, sg.IsWarehouseNative(), numDS != "")
+	if result.LDMetric.Denominator != nil {
+		result.LDMetric.Denominator.Filters = convertTermCriteria(
+			result, "denominator", denEv.Criteria, sg.IsWarehouseNative(), denDS != "")
 	}
 
 	// Custom rollup window applies to the whole ratio metric; resolve after the

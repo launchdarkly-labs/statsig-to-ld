@@ -49,12 +49,22 @@ type MetricEvent struct {
 	Criteria    []Criterion `json:"criteria"`
 }
 
-// Criterion represents a filter condition on a metric event.
+// Criterion represents a filter condition on a metric event. Field contract
+// confirmed against Statsig's own marshaling model, CriteriaAPIModel in
+// statsig-io/terraform-provider-statsig internal/resource_metric/metric_model.go.
+//
+// Values is always a string array, even for numeric and boolean comparisons, so
+// values must be coerced per condition before being handed to LaunchDarkly.
 type Criterion struct {
 	Type      string   `json:"type"`
 	Column    string   `json:"column"`
 	Condition string   `json:"condition"`
 	Values    []string `json:"values"`
+
+	// NullVacuousOverride changes how Statsig treats nulls when evaluating the
+	// criterion. LaunchDarkly has no equivalent, so its presence makes a criterion
+	// unconvertible rather than being silently ignored.
+	NullVacuousOverride *bool `json:"nullVacuousOverride,omitempty"`
 }
 
 // WarehouseNative holds Statsig warehouse-native metric config. For these

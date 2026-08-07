@@ -32,7 +32,52 @@ type MetricPost struct {
 	// metrics (non-numeric average).
 	WinsorLowerPercentile *float32 `json:"winsorLowerPercentile,omitempty"`
 	WinsorUpperPercentile *float32 `json:"winsorUpperPercentile,omitempty"`
+
+	// Filters narrows which events the numerator counts. On a warehouse-native
+	// metric these filter warehouse columns.
+	Filters *EventFilter `json:"filters,omitempty"`
 }
+
+// EventFilter is a node in a LaunchDarkly metric filter tree: either a group
+// combining child nodes, or a leaf clause narrowing on one attribute.
+//
+// Constraints LaunchDarkly enforces on save, which the converter must respect:
+//   - Warehouse-native metrics accept only eventProperty leaves. A contextAttribute
+//     anywhere in the tree, including nested in a group, is rejected.
+//   - Group nodes must not set Attribute, ContextKind, or Negate.
+//   - Maximum nesting depth 3 and maximum 10 leaf clauses.
+//   - "exists" takes no values; any other operator needs at least one. The
+//     comparison operators additionally require exactly one and forbid Negate.
+type EventFilter struct {
+	// Type is one of group, eventProperty, or contextAttribute.
+	Type string `json:"type"`
+	// Attribute is the event property name, or on a warehouse-native metric the
+	// warehouse column name. Unset on group nodes.
+	Attribute string `json:"attribute,omitempty"`
+	// Op is the group combinator (and / or) or the leaf operator (in, contains,
+	// startsWith, endsWith, lessThan, lessThanOrEqual, greaterThan,
+	// greaterThanOrEqual, before, after, exists).
+	Op string `json:"op"`
+	// Values holds child EventFilter nodes on a group, or scalar strings, numbers,
+	// and booleans on a leaf. Always serialized, since LaunchDarkly treats a
+	// missing values field as invalid. Empty for the "exists" operator.
+	Values []any `json:"values"`
+	// ContextKind is required on contextAttribute leaves and unset otherwise.
+	ContextKind string `json:"contextKind,omitempty"`
+	// Negate inverts the operator: "in" becomes "not in", and on "exists" it turns
+	// a has-a-value check into a has-no-value check.
+	Negate bool `json:"negate"`
+}
+
+// Filter node types and group combinators.
+const (
+	EventFilterTypeGroup         = "group"
+	EventFilterTypeEventProperty = "eventProperty"
+	EventFilterTypeContextAttr   = "contextAttribute"
+
+	EventFilterGroupOpAnd = "and"
+	EventFilterGroupOpOr  = "or"
+)
 
 // DenominatorPost configures the denominator term of a ratio metric.
 // The numerator's equivalents are top-level fields on MetricPost.
@@ -44,6 +89,9 @@ type DenominatorPost struct {
 	// DataSource is the denominator's warehouse data source, independent of the
 	// numerator's (top-level) DataSource. Omit for SDK-hosted (cloud) ratios.
 	DataSource *DataSource `json:"dataSource,omitempty"`
+	// Filters narrows which events the denominator counts, independently of the
+	// numerator's filter.
+	Filters *EventFilter `json:"filters,omitempty"`
 }
 
 // EventDefault configures the default event value for missing units.
