@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied, and if not, `blocked_by` plus the responsible `blocked_condition`). The CSV output gains the flat
   equivalents plus `filters_applied` / `filters_blocked`. `AGENTS.md` has `jq` recipes for all of them.
 
+### Changed
+
+- `metrics convert`: a Statsig warehouse-native `count_distinct` metric that counts a column now converts to a real
+  LaunchDarkly `count_distinct` metric instead of being approximated as a binary one. LaunchDarkly has since added
+  support for the aggregation on simple (non-ratio) metrics, so the approximation is no longer necessary and these
+  metrics are no longer lossy. The counted column travels in `unitAggregationField`, and the metric is numeric
+  because the per-unit value is a distinct count. Two cases are unchanged: counting distinct **units** (no column)
+  still converts to a binary metric, which expresses exactly the same thing, and a ratio metric's terms still stay
+  non-numeric. A data source is still required, since LaunchDarkly accepts the aggregation only on warehouse-native
+  metrics; without one the metric falls back to the binary approximation and stays lossy.
+
 ### Fixed
 
 - `metrics convert`: a skipped-lossy metric recorded only its lossy reasons, discarding every advisory warning on

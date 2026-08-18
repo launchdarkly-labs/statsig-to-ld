@@ -261,18 +261,29 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("Statsig metric %q has no metricEvents or lineage events — cannot determine LD eventKey", sg.Name)
 	}
 
-	// LaunchDarkly supports unitAggregationType=count_distinct ONLY on ratio
-	// metrics (live-confirmed: HTTP 400 "count_distinct is only supported for
-	// ratio metrics"). A non-ratio count_distinct maps to a binary metric —
-	// faithful when it counts distinct units (no column), lossy when it counts
-	// distinct values of a column (that per-value count can't be expressed).
+	// LaunchDarkly accepts unitAggregationType=count_distinct on a simple
+	// (non-ratio) metric, but only when two things hold: a warehouse data source
+	// is bound, and unitAggregationField names the column to count. Such a metric
+	// is numeric — the per-unit value is a distinct count, and a binary
+	// distribution over per-unit counts would give a negative total variance, so
+	// LD forces isNumeric=true. (Ratio terms are the exception and stay
+	// non-numeric; convertRatio handles those.)
+	//
+	// Without both, fall back to a binary metric: faithful when counting distinct
+	// units (no column, which LD's binary metric already expresses exactly), lossy
+	// when a column's distinct-value count has to be dropped.
 	if unitAgg == "count_distinct" {
-		hadColumn := unitAggField != ""
-		isNumeric = false
-		unitAgg = "average"
-		unitAggField = ""
-		if hadColumn {
-			result.addLossy(WarnCountDistinctApproximate, "LaunchDarkly supports count_distinct only on ratio metrics; this non-ratio metric is approximated as a binary metric, losing the distinct-value count")
+		hasColumn := unitAggField != ""
+		hasDataSource := resolveDataSource(sg.NumeratorSourceName(), opts) != ""
+		if hasColumn && hasDataSource {
+			isNumeric = true
+		} else {
+			isNumeric = false
+			unitAgg = "average"
+			unitAggField = ""
+			if hasColumn {
+				result.addLossy(WarnCountDistinctApproximate, "LaunchDarkly accepts count_distinct only on warehouse-native metrics; with no data source bound this is approximated as a binary metric, losing the distinct-value count — bind one with --ld-data-source or --source-mapping to convert it exactly")
+			}
 		}
 	}
 
