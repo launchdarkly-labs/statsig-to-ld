@@ -261,17 +261,6 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("Statsig metric %q has no metricEvents or lineage events — cannot determine LD eventKey", sg.Name)
 	}
 
-	// LaunchDarkly accepts unitAggregationType=count_distinct on a simple
-	// (non-ratio) metric, but only when two things hold: a warehouse data source
-	// is bound, and unitAggregationField names the column to count. Such a metric
-	// is numeric — the per-unit value is a distinct count, and a binary
-	// distribution over per-unit counts would give a negative total variance, so
-	// LD forces isNumeric=true. (Ratio terms are the exception and stay
-	// non-numeric; convertRatio handles those.)
-	//
-	// Without both, fall back to a binary metric: faithful when counting distinct
-	// units (no column, which LD's binary metric already expresses exactly), lossy
-	// when a column's distinct-value count has to be dropped.
 	if unitAgg == "count_distinct" {
 		hasColumn := unitAggField != ""
 		hasDataSource := resolveDataSource(sg.NumeratorSourceName(), opts) != ""
