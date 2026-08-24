@@ -188,6 +188,7 @@ Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` â
 | `event_count_custom` | custom | Supported |
 | `sum` | custom (isNumeric) | Supported |
 | `mean` | custom (isNumeric, average) | Supported |
+| `count_distinct` | custom (isNumeric, count_distinct) | Supported on warehouse-native metrics with a bound data source. Counting distinct units (no column) converts to a binary metric instead. |
 | `event_user` | custom | Supported |
 | `event_user_window` | custom | Supported |
 | `ratio` | custom + denominator | Supported â€” requires a warehouse data source (`--ld-data-source` / `--source-mapping`) |
@@ -403,6 +404,7 @@ Some Statsig features can't be reproduced faithfully in LaunchDarkly. A metric w
 | Winsorization | numeric or count metric (mapped to LD `winsorLowerPercentile`/`winsorUpperPercentile`) | occurrence metric (non-numeric average), where LD can't apply it |
 | Custom rollup window | a warehouse data source is bound (mapped to LD window offsets via `--ld-data-source`) | no data source is bound (LD windows require a snowflake source) |
 | Metric filter criteria | a warehouse-native metric with a bound data source and every criterion mappable (see below) | a cloud metric, no data source bound, or any criterion unmappable |
+| Count distinct on a column (warehouse-native) | a data source is bound (mapped to LD `unitAggregationType: count_distinct` with the column in `unitAggregationField`) | no data source is bound, since LD accepts the aggregation only on warehouse-native metrics; it falls back to a binary metric and the distinct-value count is lost |
 
 ### Metric filter criteria
 
