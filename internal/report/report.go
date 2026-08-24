@@ -29,9 +29,8 @@ type Report struct {
 	Timestamp string `json:"timestamp"`
 	DryRun    bool   `json:"dry_run"`
 
-	// Options records the settings that shaped this run. Without it, a returned
-	// report is ambiguous: zero widened metrics reads the same whether widening
-	// was off, the metric-source lookup failed, or no source had anything to add.
+	// Options records the settings that produced this run, so a report can be read
+	// without knowing which flags were passed.
 	Options *RunOptions `json:"options,omitempty"`
 
 	StatsigMetricsTotal int `json:"statsig_metrics_total"`
@@ -51,29 +50,21 @@ type Report struct {
 	Metrics []MetricEntry `json:"metrics"`
 }
 
-// RunOptions is the conversion-affecting configuration of a run, recorded so a
-// report can be interpreted without knowing which flags produced it.
+// RunOptions is the conversion-affecting configuration of a run.
 type RunOptions struct {
-	// ConvertLossy reports whether lossy metrics were converted rather than skipped.
-	ConvertLossy bool `json:"convert_lossy"`
-	// WidenAnalysisUnits reports whether source id types were added to each
-	// metric's analysis units.
-	WidenAnalysisUnits bool `json:"widen_analysis_units"`
-	// ExtraAnalysisUnits are the context kinds added to every metric.
-	ExtraAnalysisUnits []string `json:"extra_analysis_units,omitempty"`
-	// LDDataSource is the fallback data source key, empty if none was passed.
-	LDDataSource string `json:"ld_data_source,omitempty"`
-	// SourceMappingEntries is how many Statsig-source-to-LD-data-source entries
-	// were supplied. Distinguishes "no mapping" from "a mapping that missed".
-	SourceMappingEntries int `json:"source_mapping_entries"`
-	// UnitTypeMappingEntries is how many unit-type overrides were supplied.
-	UnitTypeMappingEntries int `json:"unit_type_mapping_entries"`
-	// MetricSourcesFetched reports whether Statsig metric sources were read. False
-	// means analysis units could not be resolved from a source, which otherwise
-	// looks identical to no source having units to contribute.
+	ConvertLossy           bool     `json:"convert_lossy"`
+	WidenAnalysisUnits     bool     `json:"widen_analysis_units"`
+	ExtraAnalysisUnits     []string `json:"extra_analysis_units,omitempty"`
+	LDDataSource           string   `json:"ld_data_source,omitempty"`
+	SourceMappingEntries   int      `json:"source_mapping_entries"`
+	UnitTypeMappingEntries int      `json:"unit_type_mapping_entries"`
+
+	// MetricSourcesFetched is false when the Statsig metric sources could not be
+	// read, which otherwise looks identical to no source having units to add.
 	MetricSourcesFetched bool `json:"metric_sources_fetched"`
-	// RegisteredAnalysisUnits lists the analysis units the LD project accepts,
-	// nil when the lookup did not run. Nil means no analysis unit was verified.
+
+	// RegisteredAnalysisUnits is nil when the lookup did not run, meaning no unit
+	// was verified against the project.
 	RegisteredAnalysisUnits []string `json:"registered_analysis_units"`
 }
 

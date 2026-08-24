@@ -388,9 +388,8 @@ func actionableHint(statusCode int, errMsg string) string {
 	case 400:
 		if m := unitNotFoundRe.FindStringSubmatch(errMsg); m != nil {
 			unit := m[1]
-			// A context kind alone is not enough: it also has to be registered as a
-			// randomization unit in the project's experimentation settings, which is
-			// configured separately from the context kind itself.
+			// Creating the context kind is not enough on its own: it also has to be
+			// enabled for experiments, which is configured separately.
 			return fmt.Sprintf(`re-run with --unit-type-mapping <file> where <file> is a JSON file containing {%q: "user"}, or make %q usable by creating it as a context kind under Project Settings → Contexts AND enabling it for experiments under the project's experimentation settings`, unit, unit)
 		}
 	case 401:

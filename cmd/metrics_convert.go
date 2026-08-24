@@ -268,9 +268,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		ExtraAnalysisUnits: parseCommaSeparated(flagExtraUnits),
 	}
 
-	// Built whenever credentials allow, including on a dry run: the analysis-unit
-	// lookup below is read-only, and a dry run is exactly where you want to learn
-	// that a unit is unregistered, before a wet run fails per metric.
+	// Built on a dry run too: the analysis-unit lookup below is read-only.
 	var ldClient *launchdarkly.Client
 	if flagLDKey != "" && flagLDProject != "" {
 		ldClient = launchdarkly.NewClient(flagLDKey, flagLDProject, flagLDURL)
@@ -280,9 +278,8 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "DRY RUN — preview only, no metrics will be created in LaunchDarkly.")
 	}
 
-	// LD only accepts analysis units already registered as randomization units on
-	// the project, so resolve that set once. Best-effort: without it the converter
-	// filters nothing and an unregistered unit surfaces as a failed create.
+	// LD rejects any analysis unit not registered on the project, so resolve the
+	// accepted set once.
 	registeredUnits, registeredKnown := fetchRegisteredAnalysisUnits(ctx, ldClient)
 	convOpts.RegisteredAnalysisUnits = registeredUnits
 	if !registeredKnown {
@@ -492,7 +489,7 @@ func annotateStatsigAuthErr(err error) error {
 	return err
 }
 
-// sortedKeys returns a set's keys in a stable order, or nil for a nil set so the
+// sortedKeys returns a set's keys in a stable order, nil for a nil set so the
 // report can distinguish "none registered" from "not checked".
 func sortedKeys(set map[string]bool) []string {
 	if set == nil {
@@ -506,11 +503,9 @@ func sortedKeys(set map[string]bool) []string {
 	return keys
 }
 
-// fetchRegisteredAnalysisUnits resolves the context kinds registered as
-// randomization units on the LD project. The second return says whether the
-// answer is known: on false the converter must not filter anything, because
-// narrowing a metric's analysis units on a failed lookup would change what it
-// can be analysed by for a reason that has nothing to do with the metric.
+// fetchRegisteredAnalysisUnits resolves the analysis units the LD project
+// accepts. The second return is false when the answer is unknown, in which case
+// the converter must not filter.
 func fetchRegisteredAnalysisUnits(ctx context.Context, ldClient *launchdarkly.Client) (map[string]bool, bool) {
 	if ldClient == nil {
 		return nil, false

@@ -13,9 +13,8 @@ const whnSumWithUnits = `{
   "unitTypes":["userID","companyID"],
   "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout","valueColumn":"price_usd"}}`
 
-// LaunchDarkly rejects a metric whose analysis units are not registered as
-// randomization units on the project. Dropping the unregistered ones creates a
-// usable metric; keeping them means no metric at all.
+// LD rejects a metric naming an unregistered analysis unit, so dropping the unit
+// is what makes the metric creatable.
 func TestAnalysisUnits_DropsUnregisteredUnits(t *testing.T) {
 	res := mustConvert(t, whnSumWithUnits, Options{
 		LDDataSource:            "ds",
@@ -29,14 +28,12 @@ func TestAnalysisUnits_DropsUnregisteredUnits(t *testing.T) {
 	if !slices.Contains(res.WarningCodes, WarnAnalysisUnitNotRegistered) {
 		t.Errorf("WarningCodes = %v, want %s", res.WarningCodes, WarnAnalysisUnitNotRegistered)
 	}
-	// Dropping units must not skip the metric.
 	if res.IsLossy() {
 		t.Errorf("dropping an unregistered unit should be advisory, not lossy: %v", res.LossyReasons)
 	}
 }
 
-// An unknown registered set (no LD key, or the lookup failed) must not filter
-// anything: silently narrowing on missing information is worse than a 400.
+// An unknown registered set must not filter anything.
 func TestAnalysisUnits_UnknownRegisteredSetFiltersNothing(t *testing.T) {
 	res := mustConvert(t, whnSumWithUnits, Options{LDDataSource: "ds"})
 	if got := res.LDMetric.AnalysisUnits; !slices.Equal(got, []string{"user", "companyid"}) {
@@ -45,8 +42,7 @@ func TestAnalysisUnits_UnknownRegisteredSetFiltersNothing(t *testing.T) {
 	assertNoWarning(t, res.Warnings, "not registered")
 }
 
-// Extras were appended after the empty-list check, so passing them silently
-// replaced the "user" fallback and suppressed its warning.
+// Extras supplement the "user" fallback rather than standing in for it.
 func TestAnalysisUnits_ExtrasDoNotSuppressTheUserDefault(t *testing.T) {
 	raw := `{
 	  "type":"user_warehouse","name":"NoUnits","id":"NoUnits::user_warehouse","directionality":"increase",
@@ -59,9 +55,8 @@ func TestAnalysisUnits_ExtrasDoNotSuppressTheUserDefault(t *testing.T) {
 	assertHasWarning(t, res.Warnings, "defaulted the LD analysis unit")
 }
 
-// Widening is documented as inert for cloud metrics. The only guard was in the
-// command layer, so a cloud metric carrying a top-level metricSourceName was
-// widened anyway on a mixed run.
+// A cloud metric has no warehouse source to widen from, even when it carries a
+// top-level metricSourceName and the run loaded warehouse sources.
 func TestAnalysisUnits_CloudMetricIsNeverWidened(t *testing.T) {
 	raw := `{
 	  "type":"event_count_custom","name":"CloudCount","id":"CloudCount::event_count_custom",

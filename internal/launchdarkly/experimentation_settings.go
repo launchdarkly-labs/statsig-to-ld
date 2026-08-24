@@ -18,13 +18,9 @@ type experimentationSettingsResponse struct {
 }
 
 // ListRegisteredAnalysisUnits returns the context kinds registered as
-// randomization units in the project's experimentation settings.
-//
-// These are the only values LaunchDarkly accepts in a metric's analysisUnits: a
-// create naming anything else is rejected with
-// `Randomization unit "x" not found in project settings [...]`. The list is not
-// derived from the project's context kinds, it is configured separately, so a
-// context kind can exist and still be absent here.
+// randomization units on the project. These are the only values LaunchDarkly
+// accepts in a metric's analysisUnits. They are configured separately from the
+// project's context kinds, so a kind can exist without being registered here.
 func (c *Client) ListRegisteredAnalysisUnits(ctx context.Context) ([]string, error) {
 	reqURL, err := url.JoinPath(c.apiBase, "api/v2/projects", c.projectKey, "experimentation-settings")
 	if err != nil {

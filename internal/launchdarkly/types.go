@@ -22,9 +22,8 @@ type MetricPost struct {
 	DataSource           *DataSource      `json:"dataSource,omitempty"`
 	Denominator          *DenominatorPost `json:"denominator,omitempty"`
 
-	// AnalysisUnits is the set of context kinds an experiment may analyze this
-	// metric by, one picked per metric. Supersedes the deprecated
-	// `randomizationUnits` field, which held the same list.
+	// AnalysisUnits supersedes the deprecated randomizationUnits field, which held
+	// the same list.
 	AnalysisUnits []string `json:"analysisUnits,omitempty"`
 
 	// Measurement window offsets, in milliseconds. LD only accepts these on

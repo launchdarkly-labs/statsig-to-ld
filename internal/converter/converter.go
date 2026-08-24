@@ -46,23 +46,17 @@ type Options struct {
 	// to its source's unit types here before defaulting to "user".
 	SourceUnitTypes map[string][]string
 
-	// WidenAnalysisUnits unions a metric's own unitTypes with the id types its
-	// metric source declares, rather than letting its own unitTypes win outright.
-	// A warehouse-native metric's units come from its source: Statsig supports a
-	// metric at several units of analysis as long as the source maps those id
-	// types. Inert for cloud metrics, which carry their own unitTypes and have no
-	// warehouse metric source to widen from.
+	// WidenAnalysisUnits adds the id types a metric's warehouse source declares to
+	// the metric's own unitTypes, instead of using the source only as a fallback.
 	WidenAnalysisUnits bool
 
 	// ExtraAnalysisUnits are LD context kinds added to every converted metric,
 	// for units with no Statsig counterpart the converter can see.
 	ExtraAnalysisUnits []string
 
-	// RegisteredAnalysisUnits are the context kinds registered as randomization
-	// units on the target LD project, which are the only values LD accepts in a
-	// metric's analysisUnits. An analysis unit outside this set is dropped, since
-	// naming it fails the create outright. Nil means unknown (no LD key, or the
-	// lookup failed) and nothing is filtered.
+	// RegisteredAnalysisUnits are the only analysis units the target LD project
+	// accepts. Units outside the set are dropped. Nil means unknown and filters
+	// nothing.
 	RegisteredAnalysisUnits map[string]bool
 }
 
@@ -497,10 +491,8 @@ func lowerKeyMapping(m map[string]string) map[string]string {
 	return out
 }
 
-// analysisUnits builds the list of context kinds an experiment may analyze a
-// metric by, picking one per metric at experiment creation. Contributions, in
-// order: the metric's own unitTypes, the id types its metric source declares
-// (a fallback unless Options.WidenAnalysisUnits), then
+// analysisUnits builds the context kinds an experiment may analyze a metric by,
+// from its own unitTypes, its warehouse source's id types, and
 // Options.ExtraAnalysisUnits. Duplicates drop out, first occurrence wins.
 func analysisUnits(sg *statsig.Metric, opts Options) (units []string, warnings []codedWarning) {
 	fromSource := sourceAnalysisUnits(sg, opts)
@@ -525,9 +517,8 @@ func analysisUnits(sg *statsig.Metric, opts Options) (units []string, warnings [
 			fmt.Sprintf("analysis units widened from %v to %v using the metric source's id-type mapping; pass --widen-analysis-units=false to keep only the metric's own unit types", own, units)})
 	}
 
-	// Already LD context kinds, so they bypass the unit-type mapping. Appended
-	// before the empty-list check below, so passing extras cannot quietly stand in
-	// for the "user" fallback and swallow its warning.
+	// Already LD context kinds, so they bypass the unit-type mapping. Applied after
+	// the default below, so they supplement the fallback rather than replace it.
 	extras := appendUnique(nil, opts.ExtraAnalysisUnits...)
 
 	if len(units) == 0 {
@@ -545,16 +536,12 @@ func analysisUnits(sg *statsig.Metric, opts Options) (units []string, warnings [
 	return units, warnings
 }
 
-// sourceAnalysisUnits returns the Statsig unit types a metric's warehouse
-// source declares.
+// sourceAnalysisUnits returns the unit types a metric's warehouse source
+// declares. Cloud metrics contribute nothing: NumeratorSourceName falls back to
+// a top-level metricSourceName, which is not a warehouse source.
 //
-// Gated on the metric being warehouse-native. Cloud metrics carry their own
-// unitTypes and have no warehouse source, but NumeratorSourceName falls back to
-// a top-level metricSourceName, so without this check a cloud metric on a run
-// that also loaded warehouse sources would pick units up from one.
-//
-// For a ratio, only units BOTH sources can identify are usable: an analysis unit
-// the denominator cannot resolve gives a term with nothing to divide by.
+// A ratio contributes only units both its sources declare, since the
+// denominator needs the same unit to divide by.
 func sourceAnalysisUnits(sg *statsig.Metric, opts Options) []string {
 	if !sg.IsWarehouseNative() {
 		return nil
@@ -577,8 +564,7 @@ func sourceAnalysisUnits(sg *statsig.Metric, opts Options) []string {
 	}
 	denUnits, ok := opts.SourceUnitTypes[denSrc]
 	if !ok {
-		// Denominator source unknown, so an intersection cannot be computed.
-		// Contribute nothing rather than assume the numerator's units carry.
+		// No intersection can be computed against an unknown source.
 		return nil
 	}
 	var shared []string
@@ -590,11 +576,8 @@ func sourceAnalysisUnits(sg *statsig.Metric, opts Options) []string {
 	return shared
 }
 
-// retainRegisteredUnits drops analysis units the LaunchDarkly project has not
-// registered as randomization units, since a create naming one is rejected.
-// A nil registered set means unknown (no LaunchDarkly key, or the lookup
-// failed); nothing is filtered then, because narrowing on absent information
-// would quietly change what a metric can be analysed by.
+// retainRegisteredUnits drops units the LD project has not registered, since a
+// create naming one is rejected. A nil set means unknown and filters nothing.
 func retainRegisteredUnits(units []string, registered map[string]bool) (kept, dropped []string) {
 	if registered == nil {
 		return units, nil
