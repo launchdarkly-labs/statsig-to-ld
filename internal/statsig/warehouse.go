@@ -68,12 +68,8 @@ func (c *Client) GetWarehouseConnection(ctx context.Context) map[string]any {
 	return data
 }
 
-// ListMetricSources fetches every metric source from Statsig, following
-// pagination. Statsig caps a page at pageSize, so the single unpaged request
-// this used to make silently truncated any account with more sources than that:
-// the run reported a suspiciously round number and every source past the first
-// page went missing from the export, the preview, and the generated
-// source-mapping. Returns raw maps because the warehouse command exports fields
+// ListMetricSources fetches paginated metric sources from Statsig.
+// Returns raw maps because the warehouse command exports fields
 // the typed model does not cover; ListAllMetricSources is the typed equivalent.
 func (c *Client) ListMetricSources(ctx context.Context) ([]map[string]any, error) {
 	var sources []map[string]any
@@ -93,11 +89,6 @@ func (c *Client) ListMetricSources(ctx context.Context) ([]map[string]any, error
 		if len(items) < pageSize {
 			return sources, nil
 		}
-		// An empty nextPage ends it only when the response actually carried a
-		// pagination block. Reading an absent block as "no next page" would
-		// truncate at the first page again, which is the bug this replaced.
-		// Keeping it for a present block stops a server that ignores ?page from
-		// handing back the same page until maxPages.
 		if next, ok := nextPageOf(data); ok && next == "" {
 			return sources, nil
 		}
