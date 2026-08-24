@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
 	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
@@ -67,13 +68,44 @@ func (c *Client) GetWarehouseConnection(ctx context.Context) map[string]any {
 	return data
 }
 
-// ListMetricSources fetches all metric sources from Statsig.
+// ListMetricSources fetches every metric source from Statsig, following
+// pagination. Statsig caps a page at pageSize, so the single unpaged request
+// this used to make silently truncated any account with more sources than that:
+// the run reported a suspiciously round number and every source past the first
+// page went missing from the export, the preview, and the generated
+// source-mapping. Returns raw maps because the warehouse command exports fields
+// the typed model does not cover; ListAllMetricSources is the typed equivalent.
 func (c *Client) ListMetricSources(ctx context.Context) ([]map[string]any, error) {
-	data, err := c.getRaw(ctx, "/metrics/metric_source/list", nil)
-	if err != nil {
-		return nil, err
+	var sources []map[string]any
+	for page := 1; page <= maxPages; page++ {
+		data, err := c.getRaw(ctx, "/metrics/metric_source/list", map[string]string{
+			"limit": strconv.Itoa(pageSize),
+			"page":  strconv.Itoa(page),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		items := extractRawItems(data)
+		sources = append(sources, items...)
+
+		// Stop on a short page as well as an absent nextPage: either one means
+		// this was the last page, and trusting only nextPage would loop forever
+		// against a response that omits it.
+		if len(items) < pageSize || nextPageOf(data) == "" {
+			return sources, nil
+		}
 	}
-	return extractRawItems(data), nil
+	return sources, fmt.Errorf("Statsig metric sources pagination exceeded %d pages", maxPages)
+}
+
+// nextPageOf reads pagination.nextPage out of a raw response body.
+func nextPageOf(data map[string]any) string {
+	p := j.GetMap(data, "pagination")
+	if p == nil {
+		return ""
+	}
+	return j.GetStr(p, "nextPage")
 }
 
 // GetMetricSource fetches a single metric source by name.

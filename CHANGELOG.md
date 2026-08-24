@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `warehouse`: the command read only the first page of Statsig metric sources, so any account with more than 100
+  silently lost the rest. The count looked plausible, and the missing sources were absent from the export, from the
+  "data sources that would be created" preview, and from the generated `source-mapping.json`. A metric whose source
+  fell off the end then resolves to no data source in `metrics convert`, which quietly means its filters stay lossy,
+  its measurement window is dropped, and a ratio fails outright. `ListMetricSources` now follows pagination, matching
+  what `metrics convert` already did.
+
+- `warehouse`: the warehouse type was reported as a detection when it was often a guess, and the guess was
+  unreliable. When Statsig does not expose its warehouse connection config, the type was inferred by substring
+  matching metric source SQL against tokens including `DELTA`, `::`, and a bare backtick. `DELTA` matches any
+  identifier containing "delta", `::` is a cast in several dialects as well as the separator in Statsig's own metric
+  IDs, and a backtick is ordinary quoting, so a run could confidently report the wrong warehouse. The answer also
+  depended on which source Statsig happened to return first. Three changes:
+  - New `--warehouse-type` flag (`snowflake`, `bigquery`, `databricks`, `redshift`) takes precedence over everything.
+  - The ambiguous tokens are gone, and the remaining markers are checked across every source rather than stopping at
+    the first match. Disagreement between sources now yields no guess instead of an arbitrary winner.
+  - The type's provenance is tracked and shown. Nothing is created from an unconfirmed guess, because the type
+    selects the LaunchDarkly integration key and getting it wrong binds every data source to the wrong warehouse.
+    The dry-run report labels a guess as a guess.
+
+- `warehouse`: the warehouse-type prompt looped forever on EOF, so a non-interactive run that needed to confirm the
+  type would spin instead of failing. It now returns an error naming `--warehouse-type`, and it validates the menu
+  selection properly rather than accepting anything that string-compares between "1" and "4".
+
 ### Added
 
 - `metrics convert`: Statsig filter criteria on warehouse-native metrics now convert to LaunchDarkly metric filters

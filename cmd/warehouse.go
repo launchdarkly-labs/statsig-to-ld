@@ -28,6 +28,7 @@ var (
 	whFlagLDURL             string
 	whFlagLDProject         string
 	whFlagLDEnvironment     string
+	whFlagWarehouseType     string
 	whFlagDryRun            bool
 	whFlagResume            bool
 	whFlagOnly              string
@@ -95,6 +96,7 @@ func init() {
 	warehouseCmd.Flags().StringVar(&whFlagLDURL, "ld-url", "", "LaunchDarkly API base URL")
 	warehouseCmd.Flags().StringVar(&whFlagLDProject, "ld-project", "", "LaunchDarkly project key (required)")
 	warehouseCmd.Flags().StringVar(&whFlagLDEnvironment, "ld-environment", "", "LaunchDarkly environment key (required)")
+	warehouseCmd.Flags().StringVar(&whFlagWarehouseType, "warehouse-type", "", "Warehouse type: snowflake, bigquery, databricks, or redshift. Set this when Statsig does not expose its warehouse connection, rather than letting the command guess from SQL")
 	warehouseCmd.Flags().BoolVar(&whFlagDryRun, "dry-run", false, "Export and preview data source mapping without writing to LD")
 	warehouseCmd.Flags().BoolVar(&whFlagResume, "resume", false, "Resume from migration_state.json")
 	warehouseCmd.Flags().StringVar(&whFlagOnly, "only", "", "Run only 'warehouse' (Phase 2) or 'data-sources' (Phase 3)")
@@ -400,7 +402,10 @@ func (e *migrationEngine) phase2WarehouseSetup() error {
 		return nil
 	}
 
-	detected := warehouse.DetectWarehouseType(e.whConnections, e.metricSources)
+	detected, typeSource, err := warehouse.ResolveWarehouseType(whFlagWarehouseType, e.whConnections, e.metricSources)
+	if err != nil {
+		return err
+	}
 
 	e.whPrefilled["_env_id"] = e.environmentID
 	e.whPrefilled["_project_id"] = e.projectID
@@ -417,10 +422,16 @@ func (e *migrationEngine) phase2WarehouseSetup() error {
 		return nil
 	}
 
-	// Only prompt for warehouse type if we actually need to create something
+	// The warehouse type picks the LaunchDarkly integration key, so creating
+	// anything on an unconfirmed guess would bind every data source to the wrong
+	// warehouse. Confirm it first unless it came from the flag or from Statsig's
+	// own connection config.
 	whType := detected
-	if whType == "" || (!exportExists && !expExists) {
-		whType = warehouse.PromptWarehouseType(e.reader, detected)
+	if !typeSource.IsConfident() {
+		whType, err = warehouse.PromptWarehouseType(e.reader, detected)
+		if err != nil {
+			return err
+		}
 	}
 
 	if !exportExists {
@@ -657,11 +668,20 @@ func (e *migrationEngine) printDryRunReport() {
 	fmt.Fprintln(os.Stderr, "  DRY RUN -- No changes were made to LaunchDarkly")
 	fmt.Fprintf(os.Stderr, "%s\n\n", strings.Repeat("=", 60))
 
-	detected := warehouse.DetectWarehouseType(e.whConnections, e.metricSources)
-	if detected == "" {
-		detected = "unknown"
+	// Report where the type came from. A guess read as a finding is how a run
+	// ends up reporting a warehouse the customer does not use.
+	detected, typeSource, err := warehouse.ResolveWarehouseType(whFlagWarehouseType, e.whConnections, e.metricSources)
+	if err != nil {
+		detected = ""
 	}
-	fmt.Fprintf(os.Stderr, "  Detected warehouse type: %s\n", detected)
+	switch {
+	case detected == "":
+		fmt.Fprintf(os.Stderr, "  Warehouse type: unknown (pass --warehouse-type)\n")
+	case typeSource.IsConfident():
+		fmt.Fprintf(os.Stderr, "  Warehouse type: %s (from %s)\n", detected, typeSource)
+	default:
+		fmt.Fprintf(os.Stderr, "  Warehouse type: %s -- GUESS ONLY, %s. Confirm with --warehouse-type before a real run.\n", detected, typeSource)
+	}
 
 	fmt.Fprintf(os.Stderr, "\n  Metric data sources that would be created: %d\n", len(e.metricSources))
 	for _, source := range e.metricSources {
