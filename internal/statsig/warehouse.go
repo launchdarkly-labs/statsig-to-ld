@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
 	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
@@ -67,13 +68,43 @@ func (c *Client) GetWarehouseConnection(ctx context.Context) map[string]any {
 	return data
 }
 
-// ListMetricSources fetches all metric sources from Statsig.
+// ListMetricSources fetches paginated metric sources from Statsig.
+// Returns raw maps because the warehouse command exports fields
+// the typed model does not cover; ListAllMetricSources is the typed equivalent.
 func (c *Client) ListMetricSources(ctx context.Context) ([]map[string]any, error) {
-	data, err := c.getRaw(ctx, "/metrics/metric_source/list", nil)
-	if err != nil {
-		return nil, err
+	var sources []map[string]any
+	for page := 1; page <= maxPages; page++ {
+		data, err := c.getRaw(ctx, "/metrics/metric_source/list", map[string]string{
+			"limit": strconv.Itoa(pageSize),
+			"page":  strconv.Itoa(page),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		items := extractRawItems(data)
+		sources = append(sources, items...)
+
+		// A short page always ends the walk.
+		if len(items) < pageSize {
+			return sources, nil
+		}
+		if next, ok := nextPageOf(data); ok && next == "" {
+			return sources, nil
+		}
 	}
-	return extractRawItems(data), nil
+	return sources, fmt.Errorf("Statsig metric sources pagination exceeded %d pages", maxPages)
+}
+
+// nextPageOf reads pagination.nextPage out of a raw response body. The second
+// return distinguishes an absent pagination block from a present but empty
+// nextPage, which mean opposite things for whether to keep paging.
+func nextPageOf(data map[string]any) (string, bool) {
+	p := j.GetMap(data, "pagination")
+	if p == nil {
+		return "", false
+	}
+	return j.GetStr(p, "nextPage"), true
 }
 
 // GetMetricSource fetches a single metric source by name.

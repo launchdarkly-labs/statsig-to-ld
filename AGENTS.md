@@ -283,6 +283,7 @@ Widening changes only what an experiment may pick, never how a metric is measure
 | `event_count_custom` | custom | Supported |
 | `sum` | custom (numeric, sum) | Supported |
 | `mean` | custom (numeric, average) | Supported |
+| `count_distinct` | custom (numeric, count_distinct) | Supported on a warehouse-native metric with a bound data source: the counted column goes in `unitAggregationField` and the metric is numeric (the per-unit value is a distinct count). Counting distinct **units** (no column) converts to a binary metric, which expresses the same thing. Without a data source it falls back to binary and is lossy. Ratio terms are separate and stay non-numeric. |
 | `event_user` | custom (binary) | Supported. This is the participation family: an unset rollup is the daily-participation-**rate** default (lossy — see below); `max` (one-time) and `custom` (windowed) convert cleanly. |
 | `event_user_window` | custom | Supported |
 | `daily_participation` (unit count) | custom (binary) | Supported as a binary metric. Only the daily-participation-**rate** is lossy (LD has no fraction-of-days aggregation, so it's approximated as binary). The rate is the DEFAULT: unset `rollupTimeWindow`, `daily` (warehouse-native), or `daily_participation_rate` (cloud). Explicit `max` (one-time) and `custom` (windowed) rollups convert exactly. |

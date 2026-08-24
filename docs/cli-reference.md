@@ -215,6 +215,7 @@ Statsig also lets you hand-build a ratio whose denominator is a count-distinct o
 | `event_count_custom` | custom | Supported |
 | `sum` | custom (isNumeric) | Supported |
 | `mean` | custom (isNumeric, average) | Supported |
+| `count_distinct` | custom (isNumeric, count_distinct) | Supported on warehouse-native metrics with a bound data source. Counting distinct units (no column) converts to a binary metric instead. |
 | `event_user` | custom | Supported |
 | `event_user_window` | custom | Supported |
 | `ratio` | custom + denominator | Supported — requires a warehouse data source (`--ld-data-source` / `--source-mapping`) |
@@ -390,6 +391,7 @@ statsig-to-ld warehouse \
 | `--ld-url` | US Cloud | LaunchDarkly API base URL (for EU/FedRAMP) |
 | `--ld-project` | — | LaunchDarkly project key (required) |
 | `--ld-environment` | — | LaunchDarkly environment key (required) |
+| `--warehouse-type` | — | `snowflake`, `bigquery`, `databricks`, or `redshift`. Set this when Statsig does not expose its warehouse connection config. Without it the command falls back to guessing from metric source SQL, and it will not create anything on a guess. |
 | `--dry-run` | `false` | Preview data source mapping without writing to LD (still writes `source-mapping.json` so you can review it) |
 | `--resume` | `false` | Resume from `migration_state.json` |
 | `--only` | — | Run only `warehouse` (Phase 2) or `data-sources` (Phase 3) |
@@ -430,6 +432,7 @@ Some Statsig features can't be reproduced faithfully in LaunchDarkly. A metric w
 | Winsorization | numeric or count metric (mapped to LD `winsorLowerPercentile`/`winsorUpperPercentile`) | occurrence metric (non-numeric average), where LD can't apply it |
 | Custom rollup window | a warehouse data source is bound (mapped to LD window offsets via `--ld-data-source`) | no data source is bound (LD windows require a snowflake source) |
 | Metric filter criteria | a warehouse-native metric with a bound data source and every criterion mappable (see below) | a cloud metric, no data source bound, or any criterion unmappable |
+| Count distinct on a column (warehouse-native) | a data source is bound (mapped to LD `unitAggregationType: count_distinct` with the column in `unitAggregationField`) | no data source is bound, since LD accepts the aggregation only on warehouse-native metrics; it falls back to a binary metric and the distinct-value count is lost |
 
 ### Metric filter criteria
 
