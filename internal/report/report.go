@@ -26,15 +26,20 @@ const (
 type Report struct {
 	mu sync.Mutex
 
-	Timestamp           string `json:"timestamp"`
-	DryRun              bool   `json:"dry_run"`
-	StatsigMetricsTotal int    `json:"statsig_metrics_total"`
-	Converted           int    `json:"converted"`
-	ConvertedWithWarn   int    `json:"converted_with_warnings"`
-	SkippedExisting     int    `json:"skipped_existing"`
-	SkippedIncompatible int    `json:"skipped_incompatible"`
-	SkippedLossy        int    `json:"skipped_lossy"`
-	Failed              int    `json:"failed"`
+	Timestamp string `json:"timestamp"`
+	DryRun    bool   `json:"dry_run"`
+
+	// Options records the settings that produced this run, so a report can be read
+	// without knowing which flags were passed.
+	Options *RunOptions `json:"options,omitempty"`
+
+	StatsigMetricsTotal int `json:"statsig_metrics_total"`
+	Converted           int `json:"converted"`
+	ConvertedWithWarn   int `json:"converted_with_warnings"`
+	SkippedExisting     int `json:"skipped_existing"`
+	SkippedIncompatible int `json:"skipped_incompatible"`
+	SkippedLossy        int `json:"skipped_lossy"`
+	Failed              int `json:"failed"`
 
 	// ByType breaks the same outcome counts down per effective Statsig metric
 	// type (e.g. "sum", "ratio", "percentile"), so a reader can see which types
@@ -43,6 +48,24 @@ type Report struct {
 	ByType map[string]*TypeBreakdown `json:"by_type"`
 
 	Metrics []MetricEntry `json:"metrics"`
+}
+
+// RunOptions is the conversion-affecting configuration of a run.
+type RunOptions struct {
+	ConvertLossy           bool     `json:"convert_lossy"`
+	WidenAnalysisUnits     bool     `json:"widen_analysis_units"`
+	ExtraAnalysisUnits     []string `json:"extra_analysis_units,omitempty"`
+	LDDataSource           string   `json:"ld_data_source,omitempty"`
+	SourceMappingEntries   int      `json:"source_mapping_entries"`
+	UnitTypeMappingEntries int      `json:"unit_type_mapping_entries"`
+
+	// MetricSourcesFetched is false when the Statsig metric sources could not be
+	// read, which otherwise looks identical to no source having units to add.
+	MetricSourcesFetched bool `json:"metric_sources_fetched"`
+
+	// RegisteredAnalysisUnits is nil when the lookup did not run, meaning no unit
+	// was verified against the project.
+	RegisteredAnalysisUnits []string `json:"registered_analysis_units"`
 }
 
 // TypeBreakdown tallies conversion outcomes for a single Statsig metric type.
@@ -95,8 +118,8 @@ type Diagnostics struct {
 	// is worth being able to count directly.
 	LDDataSource string `json:"ld_data_source,omitempty"`
 
-	// AnalysisUnits is the resolved LaunchDarkly analysis (randomization) units.
-	AnalysisUnits []string `json:"randomization_units,omitempty"`
+	// AnalysisUnits is the resolved set of LaunchDarkly analysis units.
+	AnalysisUnits []string `json:"analysis_units,omitempty"`
 
 	// StatsigRollupTimeWindow is the metric's effective Statsig rollup window. It
 	// distinguishes a daily-participation rate (lossy) from a one-time or windowed
@@ -288,7 +311,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 	// spreadsheet reader wants anyway.
 	header := []string{
 		"statsig_name", "statsig_type", "statsig_id", "status", "ld_key", "ld_project", "warnings", "reason",
-		"warning_codes", "lossy_codes", "ld_data_source", "randomization_units",
+		"warning_codes", "lossy_codes", "ld_data_source", "analysis_units",
 		"statsig_rollup_time_window", "statsig_source_name", "filters_applied", "filters_blocked",
 	}
 	if err := cw.Write(header); err != nil {

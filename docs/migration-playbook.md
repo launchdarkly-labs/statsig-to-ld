@@ -90,6 +90,8 @@ The CLI handles flag definitions and targeting; it does **not** set up LD experi
 
 Statsig **holdouts** (long-running A/B groups that exclude users from other experiments) have no direct LD equivalent. You can approximate them with an LD flag + segment, but the design is up to you.
 
+**Clustered experiments** — randomize by company, measure per user — carry over as a metric setting plus an experiment setting, and the CLI only does the metric half. In Statsig you configure this as a normalized metric when adding the metric to an experiment. LaunchDarkly is the same shape: pick the analysis unit per metric when you create the experiment, from the list of context kinds that metric allows. `metrics convert` builds that list, so the work left in LD is choosing the unit on each experiment. See [Analysis units](cli-reference.md#analysis-units-clustered-experiments) for the flags, and check each converted metric's list before you rely on it — a unit missing from the list can't be selected on the experiment.
+
 ### 6. Per-environment SDK key migration
 
 The CLI creates LD environments (auto-create on by default), but it doesn't fetch the new envs' SDK keys or update your application's runtime configuration. You'll need to grab the keys from the LD UI and wire them into wherever your app reads SDK config (env vars, secret manager, deployment config).

@@ -181,6 +181,33 @@ statsig-to-ld metrics convert --all --ld-project my-project \
 
 Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` → `companyid`) and a warning is emitted.
 
+#### Analysis units (clustered experiments)
+
+A Snowflake warehouse native experiment can analyze a metric using a context kind that is different from the experiment randomization unit. For example, the experiment can randomize by company but analyze a metric per user. Statsig calls this a clustered experiment while LaunchDarkly calls it [clustered analysis](https://launchdarkly.com/docs/home/experimentation/randomization#clustered-analysis). Both features are configured in the same way: the metric declares which context kinds it can be analyzed by, and the experiment picks one of them to use for analysis.
+
+The LaunchDarkly metric field `analysisUnits` specifies the context kinds that generate the metric event. A converted metric can only be analyzed per user if `user` is in this list, so the job at conversion time is to carry over every unit the Statsig metric could be measured by — not just the one it happened to randomize on.
+
+LaunchDarkly [documents the prerequisites](https://launchdarkly.com/docs/home/metrics/components) for using clustered analysis: warehouse native experiments on Snowflake using the frequentist methodology, an analysis unit finer-grained than the randomization unit, and each analysis unit context belonging to exactly one randomization unit context. None of that is checked here, and a coarser unit can still be selected — LaunchDarkly surfaces the problem on the experiment results page rather than blocking the choice. A wide list is cheap; it is not a substitute for picking the right unit per experiment.
+
+Where that list comes from differs by Statsig product. Warehouse native metrics take their units from the metric source — Statsig's docs note a metric works at several units of analysis "as long as the metric source has a mapping for both ID types" — so the source's id-type mapping is the fuller set. Statsig Cloud metrics carry their own `unitTypes` and have no such source, so they are unaffected by widening.
+
+Two flags build the list:
+
+```bash
+statsig-to-ld metrics convert --all --ld-project my-project \
+  --source-mapping source-mapping.json \
+  --extra-analysis-units request
+```
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--widen-analysis-units` | `false` | Adds every id type a metric's Statsig source declares, not just the unit types on the metric itself. Off by default: most warehouse-native sources map more than one id type, and every unit added has to be registered on the LaunchDarkly project or the metric is rejected. Turn it on when you want each metric analyzable by every unit its source can identify. Inert for cloud metrics and for ratio terms whose two sources do not share a unit. |
+| `--extra-analysis-units` | — | Comma-separated LD context kinds added to every metric, for units that exist in LD but have no Statsig counterpart. Additive — it does not replace the derived units. These are LD context kinds, so `--unit-type-mapping` does not apply to them. |
+
+Widening only affects what an experiment is *allowed* to pick; it does not change how any metric is measured. The converter reports each metric whose list it widened. It adds every id type the source declares, coarser ones included, on the assumption that any unit the source can identify is one some experiment might want.
+
+Statsig also lets you hand-build a ratio whose denominator is a count-distinct of the analysis unit, as an alternative to normalizing. Those convert as LaunchDarkly ratio metrics, unchanged by any of the above.
+
 #### Metric type conversion
 
 | Statsig type | LD kind | Status |

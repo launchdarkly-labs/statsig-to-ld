@@ -16,12 +16,15 @@ type MetricPost struct {
 	UnitAggregationType  string           `json:"unitAggregationType,omitempty"`
 	UnitAggregationField string           `json:"unitAggregationField,omitempty"`
 	AnalysisType         string           `json:"analysisType,omitempty"`
-	RandomizationUnits   []string         `json:"randomizationUnits,omitempty"`
 	Unit                 string           `json:"unit,omitempty"`
 	Tags                 []string         `json:"tags,omitempty"`
 	EventDefault         *EventDefault    `json:"eventDefault,omitempty"`
 	DataSource           *DataSource      `json:"dataSource,omitempty"`
 	Denominator          *DenominatorPost `json:"denominator,omitempty"`
+
+	// AnalysisUnits supersedes the deprecated randomizationUnits field, which held
+	// the same list.
+	AnalysisUnits []string `json:"analysisUnits,omitempty"`
 
 	// Measurement window offsets, in milliseconds. LD only accepts these on
 	// metrics backed by a snowflake-experimentation data source.

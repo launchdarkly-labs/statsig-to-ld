@@ -7,7 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `metrics convert`: analysis units are now checked against the target LaunchDarkly project before anything is
+  created. LaunchDarkly only accepts a unit that is registered as a randomization unit on the project, so a metric
+  naming anything else is rejected outright. The command reads the project's experimentation settings once and drops
+  unregistered units with a warning (code `analysis_unit_not_registered`) rather than letting the create fail. The
+  lookup is read-only, so it also runs on a `--dry-run` when `--ld-key` and `--ld-project` are supplied, which is
+  where you want to find out. Without credentials, or if the lookup fails, nothing is filtered: narrowing a metric's
+  analysis units because a lookup failed would be a worse outcome than the rejection it avoids.
+
+- `metrics convert`: the migration report gained an `options` block recording the settings that shaped the run
+  (`convert_lossy`, `widen_analysis_units`, `extra_analysis_units`, `ld_data_source`, `source_mapping_entries`,
+  `unit_type_mapping_entries`, `metric_sources_fetched`, `registered_analysis_units`). A returned report was
+  previously ambiguous: zero widened metrics read the same whether widening was off, the metric-source lookup
+  failed, or no source had anything to add.
+
+### Changed
+
+- `metrics convert`: `--widen-analysis-units` now defaults to **off**. Real data settled it: in a customer's
+  warehouse export, 60 of 100 metric sources map two or more id types and one maps nine, so widening is not a
+  marginal change, and every unit it adds has to be registered on the LaunchDarkly project. Clustered analysis is
+  also gated on the LaunchDarkly side, so a widened list does nothing until that is enabled. Pass
+  `--widen-analysis-units` to opt in.
+
 ### Fixed
+
+- `metrics convert`: `--extra-analysis-units` was applied after the fallback that defaults a metric with no
+  resolvable unit to `user`, so passing it silently replaced that fallback and suppressed its warning. Extras are
+  now added alongside the fallback instead of standing in for it.
+
+- `metrics convert`: widening is documented as inert for Statsig Cloud metrics, but the only guard was in the
+  command layer. A cloud metric carrying a top-level `metricSourceName` was widened anyway on a run that had also
+  loaded warehouse sources. The converter now requires the metric to be warehouse-native.
+
+- `metrics convert`: a warehouse-native ratio was widened using only its numerator's source, so it could claim an
+  analysis unit its denominator has no column for. Widening a ratio now adds only units both sources declare, and
+  adds nothing when the denominator's source is unknown.
+
+- `metrics convert`: the hint shown when LaunchDarkly rejects an unregistered unit said to add it as a context kind,
+  which is necessary but not sufficient. It now also says to enable the kind for experiments, which is configured
+  separately.
 
 - `warehouse`: the command read only the first page of Statsig metric sources, so any account with more than 100
   silently lost the rest. The count looked plausible, and the missing sources were absent from the export, from the
@@ -44,11 +84,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `metrics convert`: the migration report now carries machine-readable diagnostics per metric, so a run can be
   analysed without pattern-matching warning text. New fields: `warning_codes` (parallel to `warnings`),
-  `lossy_reasons` and `lossy_codes`, `ld_data_source`, `randomization_units`, `statsig_rollup_time_window`,
+  `lossy_reasons` and `lossy_codes`, `ld_data_source`, `analysis_units`, `statsig_rollup_time_window`,
   `statsig_source_name`, and `filters` (one entry per metric term with its criteria count, whether a filter was
   applied, and if not, `blocked_by` plus the responsible `blocked_condition`). The CSV output gains the flat
   equivalents plus `filters_applied` / `filters_blocked`. `AGENTS.md` has `jq` recipes for all of them.
 
+- `metrics convert`: support for experiments that analyze a metric by a different unit than they randomize on —
+  Statsig's clustered experiments. Converted metrics carry the full set of units they can be analyzed by, so the
+  unit can be selected per metric when the experiment is created. `--widen-analysis-units` (default on) adds the id
+  types a metric's Statsig source declares; `--extra-analysis-units` adds LD context kinds directly.
+
+### Changed
+
+- `metrics convert`: metric payloads now use LaunchDarkly's `analysisUnits` field instead of the deprecated
+  `randomizationUnits`. Same list, current name. The migration report's matching field and CSV column are
+  `analysis_units` for the same reason.
 ### Changed
 
 - `metrics convert`: a Statsig warehouse-native `count_distinct` metric that counts a column now converts to a real

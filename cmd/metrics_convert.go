@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +69,8 @@ var (
 	flagLDDataSource    string
 	flagSourceMapping   string
 	flagUnitTypeMapping string
+	flagExtraUnits      string
+	flagWidenUnits      bool
 	flagOutput          string
 	flagFormat          string
 	flagDefaultUnit     string
@@ -102,6 +105,9 @@ func init() {
 	convertCmd.Flags().StringVar(&flagLDDataSource, "ld-data-source", "", "LD data source for warehouse-native and ratio metrics")
 	convertCmd.Flags().StringVar(&flagSourceMapping, "source-mapping", "", "JSON file mapping Statsig sources to LD data sources")
 	convertCmd.Flags().StringVar(&flagUnitTypeMapping, "unit-type-mapping", "", "JSON file mapping unit types to LD context kinds")
+
+	convertCmd.Flags().StringVar(&flagExtraUnits, "extra-analysis-units", "", "Extra LD context kinds added to every metric's analysis units (comma-separated, additive)")
+	convertCmd.Flags().BoolVar(&flagWidenUnits, "widen-analysis-units", false, "Add every id type a metric's Statsig source declares to its analysis units, not just the unit types on the metric. Off by default: it widens most warehouse-native metrics, and each added unit must be registered on the LD project")
 
 	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Migration report path")
 	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
@@ -254,19 +260,32 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	includeTypes := parseCommaSeparated(flagIncludeTypes)
 
 	convOpts := converter.Options{
-		LDDataSource:    flagLDDataSource,
-		SourceMapping:   sourceMapping,
-		DefaultUnit:     flagDefaultUnit,
-		UnitTypeMapping: unitTypeMapping,
+		LDDataSource:       flagLDDataSource,
+		SourceMapping:      sourceMapping,
+		DefaultUnit:        flagDefaultUnit,
+		UnitTypeMapping:    unitTypeMapping,
+		WidenAnalysisUnits: flagWidenUnits,
+		ExtraAnalysisUnits: parseCommaSeparated(flagExtraUnits),
 	}
 
+	// Built on a dry run too: the analysis-unit lookup below is read-only.
 	var ldClient *launchdarkly.Client
-	if !flagDryRun {
+	if flagLDKey != "" && flagLDProject != "" {
 		ldClient = launchdarkly.NewClient(flagLDKey, flagLDProject, flagLDURL)
 	}
 
 	if flagDryRun {
 		fmt.Fprintln(os.Stderr, "DRY RUN — preview only, no metrics will be created in LaunchDarkly.")
+	}
+
+	// LD rejects any analysis unit not registered on the project, so resolve the
+	// accepted set once.
+	registeredUnits, registeredKnown := fetchRegisteredAnalysisUnits(ctx, ldClient)
+	convOpts.RegisteredAnalysisUnits = registeredUnits
+	if !registeredKnown {
+		if ldClient == nil {
+			log.Printf("NOTE: no LaunchDarkly credentials, so analysis units cannot be checked against the project. Pass --ld-key and --ld-project to have them verified.")
+		}
 	}
 
 	// Fetch metrics
@@ -300,13 +319,11 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		log.Printf("Filtered %d → %d metrics (tags=%v, types=%v)", before, len(metrics), includeTags, includeTypes)
 	}
 
-	// Warehouse-native metrics often omit unitTypes; their analysis unit lives on
-	// the metric source. When any such metric is present, fetch the source
-	// configs once and map each source to its declared unit types so the
-	// converter resolves the real unit instead of defaulting to "user".
-	// Best-effort: if the lookup fails, conversion proceeds with the default.
-	if needsSourceUnitTypes(metrics) {
-		log.Printf("Some warehouse-native metrics have no unitTypes; fetching metric sources to resolve their analysis unit...")
+	// A metric source's id-type mapping names the units its metrics can be
+	// analyzed by. Fetch the source configs once when any metric needs them.
+	// Best-effort: if the lookup fails, conversion proceeds without it.
+	if needsSourceUnitTypes(metrics, convOpts) {
+		log.Printf("Fetching Statsig metric sources to resolve analysis units...")
 		sources, srcErr := sgClient.ListAllMetricSources(ctx)
 		if srcErr != nil {
 			log.Printf("WARNING: could not fetch Statsig metric sources (%v); warehouse-native metrics without unitTypes will default to the \"user\" analysis unit", srcErr)
@@ -322,6 +339,16 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	// Convert and optionally create
 	rpt := report.New()
 	rpt.DryRun = flagDryRun
+	rpt.Options = &report.RunOptions{
+		ConvertLossy:            flagConvertLossy,
+		WidenAnalysisUnits:      flagWidenUnits,
+		ExtraAnalysisUnits:      convOpts.ExtraAnalysisUnits,
+		LDDataSource:            flagLDDataSource,
+		SourceMappingEntries:    len(sourceMapping),
+		UnitTypeMappingEntries:  len(unitTypeMapping),
+		MetricSourcesFetched:    len(convOpts.SourceUnitTypes) > 0,
+		RegisteredAnalysisUnits: sortedKeys(convOpts.RegisteredAnalysisUnits),
+	}
 	total := len(metrics)
 	var needsDataSource int64 // converted WHN/ratio metrics with no data source bound
 
@@ -462,12 +489,49 @@ func annotateStatsigAuthErr(err error) error {
 	return err
 }
 
-// needsSourceUnitTypes reports whether any metric is warehouse-native with no
-// unitTypes of its own — the case where the analysis unit must be resolved from
-// the metric source's id-type mapping.
-func needsSourceUnitTypes(metrics []statsig.Metric) bool {
+// sortedKeys returns a set's keys in a stable order, nil for a nil set so the
+// report can distinguish "none registered" from "not checked".
+func sortedKeys(set map[string]bool) []string {
+	if set == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// fetchRegisteredAnalysisUnits resolves the analysis units the LD project
+// accepts. The second return is false when the answer is unknown, in which case
+// the converter must not filter.
+func fetchRegisteredAnalysisUnits(ctx context.Context, ldClient *launchdarkly.Client) (map[string]bool, bool) {
+	if ldClient == nil {
+		return nil, false
+	}
+	units, err := ldClient.ListRegisteredAnalysisUnits(ctx)
+	if err != nil {
+		log.Printf("WARNING: could not read the LaunchDarkly project's experimentation settings (%v); analysis units will not be checked, so an unregistered one will fail at create time", err)
+		return nil, false
+	}
+	registered := make(map[string]bool, len(units))
+	for _, u := range units {
+		registered[u] = true
+	}
+	log.Printf("LaunchDarkly project accepts %d analysis unit(s): %s", len(units), strings.Join(units, ", "))
+	return registered, true
+}
+
+// needsSourceUnitTypes reports whether any metric's analysis units depend on
+// the metric sources' id-type mappings.
+func needsSourceUnitTypes(metrics []statsig.Metric, opts converter.Options) bool {
 	for i := range metrics {
-		if len(metrics[i].UnitTypes) == 0 && metrics[i].IsWarehouseNative() {
+		m := &metrics[i]
+		if !m.IsWarehouseNative() {
+			continue
+		}
+		if len(m.UnitTypes) == 0 || opts.WidenAnalysisUnits {
 			return true
 		}
 	}
@@ -737,7 +801,7 @@ func buildDiagnostics(sg statsig.Metric, result *converter.Result) report.Diagno
 		WarningCodes:            result.WarningCodes,
 		LossyReasons:            result.LossyReasons,
 		LossyCodes:              result.LossyCodes,
-		AnalysisUnits:           result.LDMetric.RandomizationUnits,
+		AnalysisUnits:           result.LDMetric.AnalysisUnits,
 		StatsigRollupTimeWindow: sg.EffectiveRollupTimeWindow(),
 		StatsigSourceName:       sg.NumeratorSourceName(),
 	}

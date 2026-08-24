@@ -33,6 +33,7 @@ func TestConvertCmd_FlagsBound(t *testing.T) {
 		"statsig-key", "statsig-url",
 		"ld-key", "ld-url", "ld-project",
 		"ld-data-source", "source-mapping", "unit-type-mapping",
+		"extra-analysis-units", "widen-analysis-units",
 		"output", "format", "default-unit",
 		"include-tags", "include-types", "concurrency", "verbose",
 	}
@@ -142,11 +143,11 @@ func TestTargetingImportCmd_FlagsBound(t *testing.T) {
 // TestParseAcceptDataLoss exercises the --accept-data-loss value parser.
 func TestParseAcceptDataLoss(t *testing.T) {
 	cases := []struct {
-		name      string
-		in        string
-		wantAll   bool
-		wantSet   []string
-		wantErr   bool
+		name    string
+		in      string
+		wantAll bool
+		wantSet []string
+		wantErr bool
 	}{
 		{"empty = strict", "", false, nil, false},
 		{"all keyword", "all", true, nil, false},
