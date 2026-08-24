@@ -183,7 +183,7 @@ Without this mapping, non-`userID` unit types are lowercased (e.g. `companyID` �
 
 #### Analysis units (clustered experiments)
 
-An experiment can measure a metric by a different unit than it randomizes on — randomize by company, analyze per user. Statsig calls this a clustered experiment; LaunchDarkly calls it clustered analysis. Both configure it the same way: the metric declares which units it can be analyzed by, and the experiment picks one of them.
+A Snowflake warehouse native experiment can analyze a metric using a context kind that is different from the experiment randomization unit. For example, the experiment can randomize by company but analyze a metric per user. Statsig calls this a clustered experiment while LaunchDarkly calls it [clustered analysis](https://launchdarkly.com/docs/home/experimentation/randomization#clustered-analysis). Both features are configured in the same way: the metric declares which context kinds it can be analyzed by, and the experiment picks one of them to use for analysis.
 
 The LD metric field is `analysisUnits`. A converted metric can only be analyzed per user if `user` is in its list, so the job at conversion time is to carry over every unit the Statsig metric could be measured by — not just the one it happened to randomize on.
 
