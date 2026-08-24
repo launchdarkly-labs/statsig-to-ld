@@ -272,7 +272,7 @@ Warehouse-native metrics often carry no `unitTypes` on the metric itself; the an
 
 An LD metric carries `analysisUnits`: the context kinds an experiment may analyze it by, one chosen per metric when the experiment is created. That is how LaunchDarkly runs the experiment Statsig calls clustered — randomize by company, analyze per user. The list is what the converter controls; the choice itself is made later, in the experiment.
 
-- `--widen-analysis-units` (default on) adds the id types a metric's source declares to that metric's list, instead of stopping at the unit types on the metric. Warehouse-native metrics take their units from the source, so that mapping is the fuller set; cloud metrics have no such source and are unaffected. `=false` restores the narrower behavior.
+- `--widen-analysis-units` (default **off**) adds the id types a metric's source declares to that metric's list, instead of stopping at the unit types on the metric. Warehouse-native metrics take their units from the source, so that mapping is the fuller set; cloud metrics have no such source and are unaffected. It is off by default because most sources map several id types and each added unit must be registered on the LD project. For a ratio, only units both the numerator and denominator sources declare are added.
 - `--extra-analysis-units user,request` adds LD context kinds directly, for units with no Statsig counterpart. Additive, not a replacement. Not subject to `--unit-type-mapping` — these are LD context kinds already.
 Widening changes only what an experiment may pick, never how a metric is measured. Statsig ratio metrics whose denominator is a count-distinct convert as LD ratio metrics; nothing here rewrites them.
 

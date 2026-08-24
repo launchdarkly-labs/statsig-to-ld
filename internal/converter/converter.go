@@ -57,6 +57,13 @@ type Options struct {
 	// ExtraAnalysisUnits are LD context kinds added to every converted metric,
 	// for units with no Statsig counterpart the converter can see.
 	ExtraAnalysisUnits []string
+
+	// RegisteredAnalysisUnits are the context kinds registered as randomization
+	// units on the target LD project, which are the only values LD accepts in a
+	// metric's analysisUnits. An analysis unit outside this set is dropped, since
+	// naming it fails the create outright. Nil means unknown (no LD key, or the
+	// lookup failed) and nothing is filtered.
+	RegisteredAnalysisUnits map[string]bool
 }
 
 // Warning codes are stable identifiers for the diagnostics the converter emits.
@@ -66,26 +73,27 @@ type Options struct {
 // survive the redaction customers apply before sharing a report, where free text
 // often does not.
 const (
-	WarnDailyParticipationRate   = "daily_participation_rate_approximated"
-	WarnNoValueColumn            = "whn_no_value_column"
-	WarnCountDistinctApproximate = "count_distinct_approximated"
-	WarnMultipleMetricEvents     = "multiple_metric_events"
-	WarnCountDistinctEvent       = "count_distinct_event_metric"
-	WarnMetadataAggregation      = "metadata_aggregation"
-	WarnKeyTruncated             = "ld_key_truncated"
-	WarnNoDataSourceForSource    = "no_data_source_for_source"
-	WarnUnitTypeUnmapped         = "unit_type_unmapped"
-	WarnAnalysisUnitFromSource   = "analysis_unit_from_source"
-	WarnAnalysisUnitDefaulted    = "analysis_unit_defaulted"
-	WarnAnalysisUnitsWidened     = "analysis_units_widened"
-	WarnWinsorizationNotApplied  = "winsorization_not_applied"
-	WarnPerUnitCapDropped        = "per_unit_cap_dropped"
-	WarnLogTransformDropped      = "log_transform_dropped"
-	WarnValueThresholdDropped    = "value_threshold_dropped"
-	WarnAnalysisFeaturesDropped  = "whn_analysis_features_dropped"
-	WarnWindowNoDataSource       = "window_no_data_source"
-	WarnDailyParticipationRatio  = "daily_participation_ratio_term"
-	WarnRatioNoDataSource        = "ratio_no_data_source"
+	WarnDailyParticipationRate    = "daily_participation_rate_approximated"
+	WarnNoValueColumn             = "whn_no_value_column"
+	WarnCountDistinctApproximate  = "count_distinct_approximated"
+	WarnMultipleMetricEvents      = "multiple_metric_events"
+	WarnCountDistinctEvent        = "count_distinct_event_metric"
+	WarnMetadataAggregation       = "metadata_aggregation"
+	WarnKeyTruncated              = "ld_key_truncated"
+	WarnNoDataSourceForSource     = "no_data_source_for_source"
+	WarnUnitTypeUnmapped          = "unit_type_unmapped"
+	WarnAnalysisUnitFromSource    = "analysis_unit_from_source"
+	WarnAnalysisUnitDefaulted     = "analysis_unit_defaulted"
+	WarnAnalysisUnitsWidened      = "analysis_units_widened"
+	WarnAnalysisUnitNotRegistered = "analysis_unit_not_registered"
+	WarnWinsorizationNotApplied   = "winsorization_not_applied"
+	WarnPerUnitCapDropped         = "per_unit_cap_dropped"
+	WarnLogTransformDropped       = "log_transform_dropped"
+	WarnValueThresholdDropped     = "value_threshold_dropped"
+	WarnAnalysisFeaturesDropped   = "whn_analysis_features_dropped"
+	WarnWindowNoDataSource        = "window_no_data_source"
+	WarnDailyParticipationRatio   = "daily_participation_ratio_term"
+	WarnRatioNoDataSource         = "ratio_no_data_source"
 
 	// Filter conversion.
 	WarnFilterApplied            = "filter_applied"
@@ -495,10 +503,7 @@ func lowerKeyMapping(m map[string]string) map[string]string {
 // (a fallback unless Options.WidenAnalysisUnits), then
 // Options.ExtraAnalysisUnits. Duplicates drop out, first occurrence wins.
 func analysisUnits(sg *statsig.Metric, opts Options) (units []string, warnings []codedWarning) {
-	var fromSource []string
-	if src := sg.NumeratorSourceName(); src != "" {
-		fromSource = opts.SourceUnitTypes[src]
-	}
+	fromSource := sourceAnalysisUnits(sg, opts)
 
 	own, ownWarnings := mapUnitTypes(sg.UnitTypes, opts)
 	units, warnings = own, ownWarnings
@@ -520,15 +525,88 @@ func analysisUnits(sg *statsig.Metric, opts Options) (units []string, warnings [
 			fmt.Sprintf("analysis units widened from %v to %v using the metric source's id-type mapping; pass --widen-analysis-units=false to keep only the metric's own unit types", own, units)})
 	}
 
-	// Already LD context kinds, so they bypass the unit-type mapping.
-	units = appendUnique(units, opts.ExtraAnalysisUnits...)
+	// Already LD context kinds, so they bypass the unit-type mapping. Appended
+	// before the empty-list check below, so passing extras cannot quietly stand in
+	// for the "user" fallback and swallow its warning.
+	extras := appendUnique(nil, opts.ExtraAnalysisUnits...)
 
 	if len(units) == 0 {
 		units = []string{"user"}
 		warnings = append(warnings, codedWarning{WarnAnalysisUnitDefaulted,
 			"no Statsig unitTypes on the metric and none resolvable from its source — defaulted the LD analysis unit to \"user\"; pass --unit-type-mapping or check the metric source's id-type mapping if that's wrong"})
 	}
+	units = appendUnique(units, extras...)
+
+	units, unregistered := retainRegisteredUnits(units, opts.RegisteredAnalysisUnits)
+	if len(unregistered) > 0 {
+		warnings = append(warnings, codedWarning{WarnAnalysisUnitNotRegistered,
+			fmt.Sprintf("analysis unit(s) %v are not registered as randomization units on the LaunchDarkly project, so a metric naming them is rejected; dropped them and kept %v. Register them under the project's experimentation settings, or map them with --unit-type-mapping", unregistered, units)})
+	}
 	return units, warnings
+}
+
+// sourceAnalysisUnits returns the Statsig unit types a metric's warehouse
+// source declares.
+//
+// Gated on the metric being warehouse-native. Cloud metrics carry their own
+// unitTypes and have no warehouse source, but NumeratorSourceName falls back to
+// a top-level metricSourceName, so without this check a cloud metric on a run
+// that also loaded warehouse sources would pick units up from one.
+//
+// For a ratio, only units BOTH sources can identify are usable: an analysis unit
+// the denominator cannot resolve gives a term with nothing to divide by.
+func sourceAnalysisUnits(sg *statsig.Metric, opts Options) []string {
+	if !sg.IsWarehouseNative() {
+		return nil
+	}
+	src := sg.NumeratorSourceName()
+	if src == "" {
+		return nil
+	}
+	fromSource := opts.SourceUnitTypes[src]
+	if len(fromSource) == 0 {
+		return nil
+	}
+
+	if sg.EffectiveType() != "ratio" || sg.WarehouseNative == nil {
+		return fromSource
+	}
+	denSrc := sg.WarehouseNative.DenominatorMetricSourceName
+	if denSrc == "" || denSrc == src {
+		return fromSource
+	}
+	denUnits, ok := opts.SourceUnitTypes[denSrc]
+	if !ok {
+		// Denominator source unknown, so an intersection cannot be computed.
+		// Contribute nothing rather than assume the numerator's units carry.
+		return nil
+	}
+	var shared []string
+	for _, u := range fromSource {
+		if slices.Contains(denUnits, u) {
+			shared = append(shared, u)
+		}
+	}
+	return shared
+}
+
+// retainRegisteredUnits drops analysis units the LaunchDarkly project has not
+// registered as randomization units, since a create naming one is rejected.
+// A nil registered set means unknown (no LaunchDarkly key, or the lookup
+// failed); nothing is filtered then, because narrowing on absent information
+// would quietly change what a metric can be analysed by.
+func retainRegisteredUnits(units []string, registered map[string]bool) (kept, dropped []string) {
+	if registered == nil {
+		return units, nil
+	}
+	for _, u := range units {
+		if registered[u] {
+			kept = append(kept, u)
+		} else {
+			dropped = append(dropped, u)
+		}
+	}
+	return kept, dropped
 }
 
 // mapUnitTypes converts Statsig unit types to LD context kinds, preserving

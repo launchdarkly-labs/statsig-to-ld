@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -106,7 +107,7 @@ func init() {
 	convertCmd.Flags().StringVar(&flagUnitTypeMapping, "unit-type-mapping", "", "JSON file mapping unit types to LD context kinds")
 
 	convertCmd.Flags().StringVar(&flagExtraUnits, "extra-analysis-units", "", "Extra LD context kinds added to every metric's analysis units (comma-separated, additive)")
-	convertCmd.Flags().BoolVar(&flagWidenUnits, "widen-analysis-units", true, "Add the id types a metric's Statsig source declares to its analysis units")
+	convertCmd.Flags().BoolVar(&flagWidenUnits, "widen-analysis-units", false, "Add every id type a metric's Statsig source declares to its analysis units, not just the unit types on the metric. Off by default: it widens most warehouse-native metrics, and each added unit must be registered on the LD project")
 
 	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Migration report path")
 	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
@@ -267,13 +268,27 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		ExtraAnalysisUnits: parseCommaSeparated(flagExtraUnits),
 	}
 
+	// Built whenever credentials allow, including on a dry run: the analysis-unit
+	// lookup below is read-only, and a dry run is exactly where you want to learn
+	// that a unit is unregistered, before a wet run fails per metric.
 	var ldClient *launchdarkly.Client
-	if !flagDryRun {
+	if flagLDKey != "" && flagLDProject != "" {
 		ldClient = launchdarkly.NewClient(flagLDKey, flagLDProject, flagLDURL)
 	}
 
 	if flagDryRun {
 		fmt.Fprintln(os.Stderr, "DRY RUN — preview only, no metrics will be created in LaunchDarkly.")
+	}
+
+	// LD only accepts analysis units already registered as randomization units on
+	// the project, so resolve that set once. Best-effort: without it the converter
+	// filters nothing and an unregistered unit surfaces as a failed create.
+	registeredUnits, registeredKnown := fetchRegisteredAnalysisUnits(ctx, ldClient)
+	convOpts.RegisteredAnalysisUnits = registeredUnits
+	if !registeredKnown {
+		if ldClient == nil {
+			log.Printf("NOTE: no LaunchDarkly credentials, so analysis units cannot be checked against the project. Pass --ld-key and --ld-project to have them verified.")
+		}
 	}
 
 	// Fetch metrics
@@ -327,6 +342,16 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	// Convert and optionally create
 	rpt := report.New()
 	rpt.DryRun = flagDryRun
+	rpt.Options = &report.RunOptions{
+		ConvertLossy:            flagConvertLossy,
+		WidenAnalysisUnits:      flagWidenUnits,
+		ExtraAnalysisUnits:      convOpts.ExtraAnalysisUnits,
+		LDDataSource:            flagLDDataSource,
+		SourceMappingEntries:    len(sourceMapping),
+		UnitTypeMappingEntries:  len(unitTypeMapping),
+		MetricSourcesFetched:    len(convOpts.SourceUnitTypes) > 0,
+		RegisteredAnalysisUnits: sortedKeys(convOpts.RegisteredAnalysisUnits),
+	}
 	total := len(metrics)
 	var needsDataSource int64 // converted WHN/ratio metrics with no data source bound
 
@@ -465,6 +490,42 @@ func annotateStatsigAuthErr(err error) error {
 		return fmt.Errorf("%w\n  hint: this looks like an authentication failure — check that your Statsig Console API key (console-…) is valid and active", err)
 	}
 	return err
+}
+
+// sortedKeys returns a set's keys in a stable order, or nil for a nil set so the
+// report can distinguish "none registered" from "not checked".
+func sortedKeys(set map[string]bool) []string {
+	if set == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// fetchRegisteredAnalysisUnits resolves the context kinds registered as
+// randomization units on the LD project. The second return says whether the
+// answer is known: on false the converter must not filter anything, because
+// narrowing a metric's analysis units on a failed lookup would change what it
+// can be analysed by for a reason that has nothing to do with the metric.
+func fetchRegisteredAnalysisUnits(ctx context.Context, ldClient *launchdarkly.Client) (map[string]bool, bool) {
+	if ldClient == nil {
+		return nil, false
+	}
+	units, err := ldClient.ListRegisteredAnalysisUnits(ctx)
+	if err != nil {
+		log.Printf("WARNING: could not read the LaunchDarkly project's experimentation settings (%v); analysis units will not be checked, so an unregistered one will fail at create time", err)
+		return nil, false
+	}
+	registered := make(map[string]bool, len(units))
+	for _, u := range units {
+		registered[u] = true
+	}
+	log.Printf("LaunchDarkly project accepts %d analysis unit(s): %s", len(units), strings.Join(units, ", "))
+	return registered, true
 }
 
 // needsSourceUnitTypes reports whether any metric's analysis units depend on

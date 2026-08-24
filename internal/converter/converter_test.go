@@ -254,7 +254,7 @@ func TestConvert_LongKeyTruncated(t *testing.T) {
 	assertHasWarning(t, result.Warnings, "truncated")
 }
 
-// --- Randomization units ---
+// --- Analysis units ---
 
 func TestConvert_AnalysisUnits(t *testing.T) {
 	sg := baseMetric("event_count_custom")

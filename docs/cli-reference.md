@@ -201,7 +201,7 @@ statsig-to-ld metrics convert --all --ld-project my-project \
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--widen-analysis-units` | `true` | Adds the id types a metric's Statsig source declares, not just the unit types on the metric itself. Warehouse-native metrics take their units from the source, so this is where the full set lives. Pass `=false` to keep only the metric's own unit types. |
+| `--widen-analysis-units` | `false` | Adds every id type a metric's Statsig source declares, not just the unit types on the metric itself. Off by default: most warehouse-native sources map more than one id type, and every unit added has to be registered on the LaunchDarkly project or the metric is rejected. Turn it on when you want each metric analyzable by every unit its source can identify. Inert for cloud metrics and for ratio terms whose two sources do not share a unit. |
 | `--extra-analysis-units` | — | Comma-separated LD context kinds added to every metric, for units that exist in LD but have no Statsig counterpart. Additive — it does not replace the derived units. These are LD context kinds, so `--unit-type-mapping` does not apply to them. |
 
 Widening only affects what an experiment is *allowed* to pick; it does not change how any metric is measured. The converter reports each metric whose list it widened. It adds every id type the source declares, coarser ones included, on the assumption that any unit the source can identify is one some experiment might want.
