@@ -364,6 +364,7 @@ statsig-to-ld warehouse \
 | `--ld-url` | US Cloud | LaunchDarkly API base URL (for EU/FedRAMP) |
 | `--ld-project` | — | LaunchDarkly project key (required) |
 | `--ld-environment` | — | LaunchDarkly environment key (required) |
+| `--warehouse-type` | — | `snowflake`, `bigquery`, `databricks`, or `redshift`. Set this when Statsig does not expose its warehouse connection config. Without it the command falls back to guessing from metric source SQL, and it will not create anything on a guess. |
 | `--dry-run` | `false` | Preview data source mapping without writing to LD (still writes `source-mapping.json` so you can review it) |
 | `--resume` | `false` | Resume from `migration_state.json` |
 | `--only` | — | Run only `warehouse` (Phase 2) or `data-sources` (Phase 3) |

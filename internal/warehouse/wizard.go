@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,33 +31,48 @@ func PromptWithDefault(reader *bufio.Reader, prompt, defaultVal string) string {
 	return line
 }
 
-// PromptWarehouseType prompts the user to select a warehouse type.
-func PromptWarehouseType(reader *bufio.Reader, detected string) string {
+// PromptWarehouseType asks the user to confirm or pick a warehouse type. It
+// returns an error rather than looping when input runs out, so a non-interactive
+// run fails with something actionable instead of spinning on EOF forever.
+func PromptWarehouseType(reader *bufio.Reader, suggestion string) (string, error) {
 	fmt.Fprintln(os.Stderr)
-	if detected != "" {
-		output.Info(fmt.Sprintf("Detected warehouse type: %s", detected))
-		fmt.Fprintf(os.Stderr, "  ? Use %s? [Y/n]: ", detected)
-		line, _ := reader.ReadString('\n')
+	if suggestion != "" {
+		output.Info(fmt.Sprintf("Best guess at the warehouse type: %s (not confirmed)", suggestion))
+		fmt.Fprintf(os.Stderr, "  ? Use %s? [Y/n]: ", suggestion)
+		line, err := reader.ReadString('\n')
+		if err != nil && line == "" {
+			return "", errNoWarehouseTypeInput
+		}
 		line = strings.TrimSpace(strings.ToLower(line))
 		if line == "" || line == "y" || line == "yes" {
-			return detected
+			return suggestion, nil
 		}
 	}
-	types := []string{"snowflake", "bigquery", "databricks", "redshift"}
 	fmt.Fprintln(os.Stderr, "  Available warehouse types:")
-	for i, t := range types {
+	for i, t := range SupportedWarehouseTypes {
 		fmt.Fprintf(os.Stderr, "    %d. %s\n", i+1, t)
 	}
-	for {
-		fmt.Fprint(os.Stderr, "  ? Select warehouse type [1-4]: ")
-		line, _ := reader.ReadString('\n')
-		line = strings.TrimSpace(line)
-		if line >= "1" && line <= "4" {
-			return types[line[0]-'1']
+	for attempt := 0; attempt < 5; attempt++ {
+		fmt.Fprintf(os.Stderr, "  ? Select warehouse type [1-%d]: ", len(SupportedWarehouseTypes))
+		line, err := reader.ReadString('\n')
+		if err != nil && strings.TrimSpace(line) == "" {
+			return "", errNoWarehouseTypeInput
+		}
+		choice, convErr := strconv.Atoi(strings.TrimSpace(line))
+		if convErr == nil && choice >= 1 && choice <= len(SupportedWarehouseTypes) {
+			return SupportedWarehouseTypes[choice-1], nil
 		}
 		fmt.Fprintln(os.Stderr, "  Invalid choice, try again.")
 	}
+	return "", errNoWarehouseTypeInput
 }
+
+// errNoWarehouseTypeInput is returned when the warehouse type cannot be
+// confirmed interactively. The message names the flag because that is the only
+// way to answer in a non-interactive run.
+var errNoWarehouseTypeInput = errors.New(
+	"could not determine the warehouse type: pass --warehouse-type (" +
+		strings.Join(SupportedWarehouseTypes, ", ") + ")")
 
 // WaitForEnter pauses until the user presses Enter.
 func WaitForEnter(reader *bufio.Reader, prompt string) {
