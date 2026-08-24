@@ -149,17 +149,34 @@ func (s WarehouseTypeSource) String() string {
 	}
 }
 
+// ValidateWarehouseType checks a user-supplied warehouse type. An empty string
+// means unset and is valid. Call this once at startup: validating only where the
+// value happens to be read lets a typo pass unnoticed on a run that skips that
+// path.
+func ValidateWarehouseType(flag string) error {
+	if flag == "" {
+		return nil
+	}
+	if !slices.Contains(SupportedWarehouseTypes, normalizeWarehouseType(flag)) {
+		return fmt.Errorf("unsupported warehouse type %q: must be one of %s",
+			flag, strings.Join(SupportedWarehouseTypes, ", "))
+	}
+	return nil
+}
+
+func normalizeWarehouseType(flag string) string {
+	return strings.ToLower(strings.TrimSpace(flag))
+}
+
 // ResolveWarehouseType determines the warehouse type and reports how it was
 // determined. Order: an explicit --warehouse-type, then Statsig's warehouse
 // connection config, then a guess from metric source SQL.
 func ResolveWarehouseType(flag string, whConnections map[string]any, metricSources []map[string]any) (string, WarehouseTypeSource, error) {
 	if flag != "" {
-		typ := strings.ToLower(strings.TrimSpace(flag))
-		if !slices.Contains(SupportedWarehouseTypes, typ) {
-			return "", WarehouseTypeUnknown, fmt.Errorf("unsupported warehouse type %q: must be one of %s",
-				flag, strings.Join(SupportedWarehouseTypes, ", "))
+		if err := ValidateWarehouseType(flag); err != nil {
+			return "", WarehouseTypeUnknown, err
 		}
-		return typ, WarehouseTypeFromFlag, nil
+		return normalizeWarehouseType(flag), WarehouseTypeFromFlag, nil
 	}
 	if whConnections != nil {
 		if wt := ExtractFromWHConnections(whConnections)["warehouse_type"]; wt != "" {

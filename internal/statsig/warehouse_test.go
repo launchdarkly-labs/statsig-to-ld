@@ -53,6 +53,38 @@ func TestListMetricSources_FollowsPagination(t *testing.T) {
 	}
 }
 
+// A full page with no pagination block at all must still advance. Treating a
+// missing nextPage as "done" would reproduce the original truncation for any
+// response shape that omits pagination.
+func TestListMetricSources_FullPageWithoutPaginationBlockAdvances(t *testing.T) {
+	requests := 0
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var items []map[string]any
+		if requests == 1 {
+			for i := 0; i < pageSize; i++ {
+				items = append(items, map[string]any{"name": fmt.Sprintf("source-%d", i)})
+			}
+		} else {
+			items = []map[string]any{{"name": "last"}}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// No "pagination" key.
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": items})
+	})
+
+	sources, err := client.ListMetricSources(context.Background())
+	if err != nil {
+		t.Fatalf("ListMetricSources: %v", err)
+	}
+	if len(sources) != pageSize+1 {
+		t.Errorf("got %d sources, want %d (a full page must not stop the walk)", len(sources), pageSize+1)
+	}
+	if requests != 2 {
+		t.Errorf("made %d requests, want 2", requests)
+	}
+}
+
 // A single short page must not trigger a second request.
 func TestListMetricSources_StopsOnShortPage(t *testing.T) {
 	requests := 0

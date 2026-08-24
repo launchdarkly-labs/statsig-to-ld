@@ -89,23 +89,31 @@ func (c *Client) ListMetricSources(ctx context.Context) ([]map[string]any, error
 		items := extractRawItems(data)
 		sources = append(sources, items...)
 
-		// Stop on a short page as well as an absent nextPage: either one means
-		// this was the last page, and trusting only nextPage would loop forever
-		// against a response that omits it.
-		if len(items) < pageSize || nextPageOf(data) == "" {
+		// A short page always ends the walk.
+		if len(items) < pageSize {
+			return sources, nil
+		}
+		// An empty nextPage ends it only when the response actually carried a
+		// pagination block. Reading an absent block as "no next page" would
+		// truncate at the first page again, which is the bug this replaced.
+		// Keeping it for a present block stops a server that ignores ?page from
+		// handing back the same page until maxPages.
+		if next, ok := nextPageOf(data); ok && next == "" {
 			return sources, nil
 		}
 	}
 	return sources, fmt.Errorf("Statsig metric sources pagination exceeded %d pages", maxPages)
 }
 
-// nextPageOf reads pagination.nextPage out of a raw response body.
-func nextPageOf(data map[string]any) string {
+// nextPageOf reads pagination.nextPage out of a raw response body. The second
+// return distinguishes an absent pagination block from a present but empty
+// nextPage, which mean opposite things for whether to keep paging.
+func nextPageOf(data map[string]any) (string, bool) {
 	p := j.GetMap(data, "pagination")
 	if p == nil {
-		return ""
+		return "", false
 	}
-	return j.GetStr(p, "nextPage")
+	return j.GetStr(p, "nextPage"), true
 }
 
 // GetMetricSource fetches a single metric source by name.

@@ -84,6 +84,24 @@ func TestResolveWarehouseType_RejectsUnknownFlag(t *testing.T) {
 	}
 }
 
+// A bad --warehouse-type must be caught before any work starts. Validating it
+// only where it happens to be read means a typo is silently ignored on any run
+// that skips that path, such as --only data-sources.
+func TestValidateWarehouseType(t *testing.T) {
+	if err := ValidateWarehouseType(""); err != nil {
+		t.Errorf("empty value means unset and must be allowed: %v", err)
+	}
+	if err := ValidateWarehouseType("SnowFlake"); err != nil {
+		t.Errorf("case and padding should be tolerated: %v", err)
+	}
+	if err := ValidateWarehouseType("  redshift  "); err != nil {
+		t.Errorf("padding should be tolerated: %v", err)
+	}
+	if err := ValidateWarehouseType("postgres"); err == nil {
+		t.Error("expected an error for an unsupported warehouse type")
+	}
+}
+
 // A SQL-derived answer is a guess and must be labelled as one, so callers can
 // refuse to create resources on it.
 func TestResolveWarehouseType_SQLGuessIsNotConfident(t *testing.T) {

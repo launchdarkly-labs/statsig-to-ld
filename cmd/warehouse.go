@@ -167,6 +167,11 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 	if whFlagStatsigExportFile == "" && whFlagStatsigKey == "" {
 		return fmt.Errorf("either --statsig-key or --statsig-export-file is required")
 	}
+	// Check the warehouse type up front. Only some paths read it, so validating
+	// it where it is used would let a typo through on the others.
+	if err := warehouse.ValidateWarehouseType(whFlagWarehouseType); err != nil {
+		return err
+	}
 	if !whFlagDryRun {
 		if whFlagLDKey == "" {
 			return fmt.Errorf("--ld-key is required (or set LD_API_KEY)")
@@ -410,10 +415,14 @@ func (e *migrationEngine) phase2WarehouseSetup() error {
 	e.whPrefilled["_env_id"] = e.environmentID
 	e.whPrefilled["_project_id"] = e.projectID
 
-	// Check data export first — no prompt needed
+	// These run before the type is confirmed so an already-configured project is
+	// not prompted at all. Safe today because neither check can act on a wrong
+	// guess: checkExperimentationExists scans every warehouse type regardless of
+	// this argument, and checkDataExportExists only uses it for a fallback probe
+	// gated on a host that is populated from the Statsig connection config, which
+	// is precisely the case where the type is already confident. If either check
+	// starts genuinely depending on the type, confirm it before this point.
 	exportExists := e.checkDataExportExists(detected)
-
-	// Check experimentation — no prompt needed
 	expExists := e.checkExperimentationExists(detected)
 
 	if exportExists && expExists {
@@ -669,11 +678,9 @@ func (e *migrationEngine) printDryRunReport() {
 	fmt.Fprintf(os.Stderr, "%s\n\n", strings.Repeat("=", 60))
 
 	// Report where the type came from. A guess read as a finding is how a run
-	// ends up reporting a warehouse the customer does not use.
-	detected, typeSource, err := warehouse.ResolveWarehouseType(whFlagWarehouseType, e.whConnections, e.metricSources)
-	if err != nil {
-		detected = ""
-	}
+	// ends up reporting a warehouse the customer does not use. The only error
+	// here is an invalid --warehouse-type, already rejected at startup.
+	detected, typeSource, _ := warehouse.ResolveWarehouseType(whFlagWarehouseType, e.whConnections, e.metricSources)
 	switch {
 	case detected == "":
 		fmt.Fprintf(os.Stderr, "  Warehouse type: unknown (pass --warehouse-type)\n")
