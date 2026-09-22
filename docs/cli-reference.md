@@ -431,6 +431,9 @@ Some Statsig features can't be reproduced faithfully in LaunchDarkly. A metric w
 |---|---|---|
 | Winsorization | numeric or count metric (mapped to LD `winsorLowerPercentile`/`winsorUpperPercentile`) | occurrence metric (non-numeric average), where LD can't apply it |
 | Custom rollup window | a warehouse data source is bound (mapped to LD window offsets via `--ld-data-source`) | no data source is bound (LD windows require a snowflake source) |
+
+Statsig counts its window days inclusively, so days 0-6 is 7 days of data. LaunchDarkly's window is a duration from first exposure, so the converter maps a Statsig end day of N to an offset of N+1 days. A Statsig 0-6 window becomes LD offsets 0 to 7 days.
+
 | Metric filter criteria | a warehouse-native metric with a bound data source and every criterion mappable (see below) | a cloud metric, no data source bound, or any criterion unmappable |
 | Count distinct on a column (warehouse-native) | a data source is bound (mapped to LD `unitAggregationType: count_distinct` with the column in `unitAggregationField`) | no data source is bound, since LD accepts the aggregation only on warehouse-native metrics; it falls back to a binary metric and the distinct-value count is lost |
 

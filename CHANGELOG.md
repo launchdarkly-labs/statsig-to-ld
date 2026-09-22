@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `metrics convert`: a custom rollup window converted with its end day one day short. Statsig counts window days
+  inclusively (days 0-6 is 7 days of data), while LaunchDarkly's window is a duration from first exposure, so a
+  Statsig end day of N must map to an offset of N+1 days. The converter multiplied the end day straight through, so
+  a Statsig 0-6 window became a 6-day LaunchDarkly window instead of 7. End offsets are now one day longer; start
+  offsets are unchanged.
+
 - `metrics convert`: `--extra-analysis-units` was applied after the fallback that defaults a metric with no
   resolvable unit to `user`, so passing it silently replaced that fallback and suppressed its warning. Extras are
   now added alongside the fallback instead of standing in for it.

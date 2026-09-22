@@ -759,12 +759,17 @@ func applyCustomWindow(result *Result, sg *statsig.Metric) {
 	}
 	if result.LDMetric.DataSource != nil {
 		s := int64(*start * millisPerDay)
-		e := int64(*end * millisPerDay)
+		// Statsig's end day is inclusive, so day N runs through the end of that
+		// day: its docs put "day 1 to day 6" at "24 hours until 168 hours after
+		// exposure", and a 0-6 window at 7 days of data. LaunchDarkly's offset is a
+		// duration from first exposure, so Statsig's end day N is N+1 days here.
+		// The start bound needs no adjustment; Statsig start day N is already N*24h.
+		e := int64((*end + 1) * millisPerDay)
 		result.LDMetric.WindowStartOffset = &s
 		result.LDMetric.WindowEndOffset = &e
 	} else {
-		result.addLossy(WarnWindowNoDataSource, "custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
-			*start, *end)
+		result.addLossy(WarnWindowNoDataSource, "custom rollup window (Statsig days %v-%v, which is %v day(s) of data) needs a warehouse (snowflake) data source in LaunchDarkly, so it was not applied; pass --ld-data-source to enable it",
+			*start, *end, *end-*start+1)
 	}
 }
 
