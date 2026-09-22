@@ -102,7 +102,7 @@ func TestConvert_WHN_DailyParticipation_WindowInsideWarehouseNative(t *testing.T
 		t.Fatal("custom window inside warehouseNative should be applied when a data source is bound")
 	}
 	if want := int64(6 * millisPerDay); *res.LDMetric.WindowEndOffset != want {
-		t.Errorf("WindowEndOffset = %d, want %d (Statsig end day 5 inclusive = 6 days)", *res.LDMetric.WindowEndOffset, want)
+		t.Errorf("WindowEndOffset = %d, want %d (6 days)", *res.LDMetric.WindowEndOffset, want)
 	}
 }
 
