@@ -759,12 +759,12 @@ func applyCustomWindow(result *Result, sg *statsig.Metric) {
 	}
 	if result.LDMetric.DataSource != nil {
 		s := int64(*start * millisPerDay)
-		e := int64(*end * millisPerDay)
+		e := int64((*end + 1) * millisPerDay)
 		result.LDMetric.WindowStartOffset = &s
 		result.LDMetric.WindowEndOffset = &e
 	} else {
-		result.addLossy(WarnWindowNoDataSource, "custom rollup window (days %v–%v) needs a warehouse (snowflake) data source in LaunchDarkly — not applied; pass --ld-data-source to enable it",
-			*start, *end)
+		result.addLossy(WarnWindowNoDataSource, "custom rollup window (Statsig days %v-%v, which is %v day(s) of data) needs a warehouse (snowflake) data source in LaunchDarkly, so it was not applied; pass --ld-data-source to enable it",
+			*start, *end, *end-*start+1)
 	}
 }
 

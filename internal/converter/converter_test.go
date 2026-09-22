@@ -576,9 +576,7 @@ func TestConvert_WarningLogTransform(t *testing.T) {
 }
 
 func TestConvert_WindowWithDataSource(t *testing.T) {
-	// A custom rollup window (days) maps to LD window offsets (milliseconds)
-	// when a data source is bound — LD requires a snowflake source for windows.
-	// 0–3 days → 0 .. 259_200_000 ms.
+	// Windows need a bound data source. Statsig days 0-3 inclusive = 4 days.
 	sg := baseMetric("event_user")
 	sg.RollupTimeWindow = "custom"
 	sg.CustomRollUpStart = float64Ptr(0)
@@ -590,8 +588,8 @@ func TestConvert_WindowWithDataSource(t *testing.T) {
 	if result.LDMetric.WindowStartOffset == nil || *result.LDMetric.WindowStartOffset != 0 {
 		t.Errorf("WindowStartOffset = %v, want 0", result.LDMetric.WindowStartOffset)
 	}
-	if result.LDMetric.WindowEndOffset == nil || *result.LDMetric.WindowEndOffset != 259_200_000 {
-		t.Errorf("WindowEndOffset = %v, want 259200000 (3 days in ms)", result.LDMetric.WindowEndOffset)
+	if want := int64(4 * millisPerDay); result.LDMetric.WindowEndOffset == nil || *result.LDMetric.WindowEndOffset != want {
+		t.Errorf("WindowEndOffset = %v, want %d (4 days)", result.LDMetric.WindowEndOffset, want)
 	}
 	for _, w := range result.Warnings {
 		if strings.Contains(strings.ToLower(w), "window") {
@@ -1229,12 +1227,12 @@ func TestConvertRatio_WinsorizationAndWindow(t *testing.T) {
 	if ld.WinsorUpperPercentile == nil || *ld.WinsorUpperPercentile != 99 {
 		t.Errorf("WinsorUpperPercentile = %v, want 99", ld.WinsorUpperPercentile)
 	}
-	// Window offsets set because a data source is bound (days → ms).
+	// Statsig days 0-7 inclusive = 8 days.
 	if ld.WindowStartOffset == nil || *ld.WindowStartOffset != 0 {
 		t.Errorf("WindowStartOffset = %v, want 0", ld.WindowStartOffset)
 	}
-	if ld.WindowEndOffset == nil || *ld.WindowEndOffset != int64(7*millisPerDay) {
-		t.Errorf("WindowEndOffset = %v, want %d", ld.WindowEndOffset, int64(7*millisPerDay))
+	if want := int64(8 * millisPerDay); ld.WindowEndOffset == nil || *ld.WindowEndOffset != want {
+		t.Errorf("WindowEndOffset = %v, want %d (8 days)", ld.WindowEndOffset, want)
 	}
 }
 
