@@ -71,6 +71,7 @@ var (
 	flagUnitTypeMapping string
 	flagExtraUnits      string
 	flagWidenUnits      bool
+	flagLDMaintainer    string
 	flagOutput          string
 	flagFormat          string
 	flagDefaultUnit     string
@@ -108,6 +109,8 @@ func init() {
 
 	convertCmd.Flags().StringVar(&flagExtraUnits, "extra-analysis-units", "", "Extra LD context kinds added to every metric's analysis units (comma-separated, additive)")
 	convertCmd.Flags().BoolVar(&flagWidenUnits, "widen-analysis-units", false, "Add every id type a metric's Statsig source declares to its analysis units, not just the unit types on the metric. Off by default: it widens most warehouse-native metrics, and each added unit must be registered on the LD project")
+
+	convertCmd.Flags().StringVar(&flagLDMaintainer, "ld-maintainer", "", "Maintainer for created metrics: an email, a 24-character member ID, or \"none\" to create them with no maintainer. Defaults to the member who owns the API token")
 
 	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Migration report path")
 	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
@@ -150,6 +153,9 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	}
 	if flagAll && flagMetric != "" {
 		return fmt.Errorf("--metric and --all are mutually exclusive")
+	}
+	if err := launchdarkly.ValidateMaintainerFlag(flagLDMaintainer); err != nil {
+		return err
 	}
 	if !willConvert && !flagList && flagDumpRaw == "" {
 		return fmt.Errorf("either --metric <name> or --all is required (or --list to see the available metric names, or --dump-raw <file> to export raw definitions)")
@@ -276,6 +282,21 @@ func runConvert(cmd *cobra.Command, args []string) error {
 
 	if flagDryRun {
 		fmt.Fprintln(os.Stderr, "DRY RUN — preview only, no metrics will be created in LaunchDarkly.")
+	}
+
+	// Resolved once per run. Fatal on failure: a metric with no maintainer is
+	// flagged as incomplete in the LaunchDarkly UI, so creating hundreds of them
+	// silently is worse than stopping. Skipped entirely without credentials,
+	// which is the documented `--dry-run` with no LD key.
+	if ldClient != nil {
+		maintainer, err := ldClient.ResolveMaintainer(ctx, flagLDMaintainer)
+		if err != nil {
+			return err
+		}
+		convOpts.MaintainerID = maintainer.MemberID
+		logMaintainer(maintainer, "metrics")
+	} else if flagLDMaintainer != "" {
+		log.Printf("NOTE: --ld-maintainer needs --ld-key and --ld-project to resolve, so it was ignored.")
 	}
 
 	// LD rejects any analysis unit not registered on the project, so resolve the

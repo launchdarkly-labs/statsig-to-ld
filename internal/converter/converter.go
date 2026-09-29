@@ -54,6 +54,10 @@ type Options struct {
 	// for units with no Statsig counterpart the converter can see.
 	ExtraAnalysisUnits []string
 
+	// MaintainerID is the LD member set as maintainer on every created metric.
+	// Empty omits the field, which leaves the metric unmaintained.
+	MaintainerID string
+
 	// RegisteredAnalysisUnits are the only analysis units the target LD project
 	// accepts. Units outside the set are dropped. Nil means unknown and filters
 	// nothing.
@@ -423,6 +427,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	result.LDMetric = launchdarkly.MetricPost{
 		Key:                  ldKey,
 		Kind:                 "custom",
+		MaintainerID:         opts.MaintainerID,
 		Name:                 sg.Name,
 		Description:          desc,
 		EventKey:             eventKey,
@@ -992,6 +997,7 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	result.LDMetric = launchdarkly.MetricPost{
 		Key:                  ldKey,
 		Kind:                 "custom",
+		MaintainerID:         opts.MaintainerID,
 		Name:                 sg.Name,
 		Description:          desc,
 		EventKey:             numEv.Name,

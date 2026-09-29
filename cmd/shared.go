@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"syscall"
 
 	"golang.org/x/term"
+
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
 )
 
 // promptForKey prompts the user to enter an API key with echo disabled,
@@ -38,4 +41,20 @@ func parseCommaSeparated(s string) []string {
 		}
 	}
 	return result
+}
+
+// logMaintainer states the resolved maintainer once per run, so it is never a
+// surprise which member ends up owning what the run creates.
+func logMaintainer(m launchdarkly.Maintainer, resourceLabel string) {
+	if m.OptedOut {
+		log.Printf("Maintainer: NONE. The %s created by this run will have no maintainer, "+
+			"which LaunchDarkly's UI flags as incomplete until someone is assigned.", resourceLabel)
+		return
+	}
+	who := m.MemberID
+	if m.Email != "" {
+		who = m.Email
+	}
+	log.Printf("Maintainer: %s (%s). Every %s created by this run will be assigned to this member.",
+		who, m.Source, resourceLabel)
 }
