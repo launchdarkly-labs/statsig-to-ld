@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `metrics convert` and `warehouse`: `--ld-maintainer` sets the maintainer on every created metric and metric data
+  source. LaunchDarkly fills this in automatically from the token's member, but only for a personal token: a
+  service token is not tied to a member, so resources it created were left unmaintained and the LaunchDarkly UI
+  flagged them as incomplete. The CLI now resolves a maintainer once per run and sets it explicitly, so both token
+  kinds produce the same result. The flag takes an email, a 24-character member ID, or `none` to create resources
+  with no maintainer; omitted, it uses the member who owns the API token. Resolution failure stops the run before
+  anything is created rather than quietly leaving hundreds of resources unmaintained, and the error names the flag
+  as the fix. The resolved maintainer is printed once at the start of the run.
+
+
+### Added
+
 - `metrics convert`: analysis units are now checked against the target LaunchDarkly project before anything is
   created. LaunchDarkly only accepts a unit that is registered as a randomization unit on the project, so a metric
   naming anything else is rejected outright. The command reads the project's experimentation settings once and drops

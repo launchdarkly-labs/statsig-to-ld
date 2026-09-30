@@ -29,6 +29,7 @@ var (
 	whFlagLDProject         string
 	whFlagLDEnvironment     string
 	whFlagWarehouseType     string
+	whFlagLDMaintainer      string
 	whFlagDryRun            bool
 	whFlagResume            bool
 	whFlagOnly              string
@@ -97,6 +98,7 @@ func init() {
 	warehouseCmd.Flags().StringVar(&whFlagLDProject, "ld-project", "", "LaunchDarkly project key (required)")
 	warehouseCmd.Flags().StringVar(&whFlagLDEnvironment, "ld-environment", "", "LaunchDarkly environment key (required)")
 	warehouseCmd.Flags().StringVar(&whFlagWarehouseType, "warehouse-type", "", "Warehouse type: snowflake, bigquery, databricks, or redshift. Set this when Statsig does not expose its warehouse connection, rather than letting the command guess from SQL")
+	warehouseCmd.Flags().StringVar(&whFlagLDMaintainer, "ld-maintainer", "", "Maintainer for created data sources: an email, a 24-character member ID, or \"none\" to create them with no maintainer. Defaults to the member who owns the API token")
 	warehouseCmd.Flags().BoolVar(&whFlagDryRun, "dry-run", false, "Export and preview data source mapping without writing to LD")
 	warehouseCmd.Flags().BoolVar(&whFlagResume, "resume", false, "Resume from migration_state.json")
 	warehouseCmd.Flags().StringVar(&whFlagOnly, "only", "", "Run only 'warehouse' (Phase 2) or 'data-sources' (Phase 3)")
@@ -138,6 +140,7 @@ type migrationEngine struct {
 	dryRun         bool
 	only           string
 	overwrite      bool
+	maintainerID   string
 	verbose        bool
 
 	whConnections map[string]any
@@ -170,6 +173,9 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 	// Check the warehouse type up front. Only some paths read it, so validating
 	// it where it is used would let a typo through on the others.
 	if err := warehouse.ValidateWarehouseType(whFlagWarehouseType); err != nil {
+		return err
+	}
+	if err := launchdarkly.ValidateMaintainerFlag(whFlagLDMaintainer); err != nil {
 		return err
 	}
 	if !whFlagDryRun {
@@ -244,6 +250,15 @@ func (e *migrationEngine) run() error {
 	if err := e.preflightCheck(); err != nil {
 		return err
 	}
+
+	// Fatal on failure: LD flags an unmaintained data source as incomplete, so
+	// stopping beats creating a hundred of them.
+	maintainer, err := e.ld.ResolveMaintainer(e.ctx, whFlagLDMaintainer)
+	if err != nil {
+		return err
+	}
+	e.maintainerID = maintainer.MemberID
+	logMaintainer(maintainer, "data source")
 
 	// Phase 2 — set up warehouse integrations
 	if e.only != "data-sources" {
@@ -615,7 +630,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() {
 
 	total := len(e.metricSources)
 	for i, source := range e.metricSources {
-		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey)
+		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, e.maintainerID)
 		key := jsonutil.GetStr(body, "key")
 		name := jsonutil.GetStr(body, "name")
 

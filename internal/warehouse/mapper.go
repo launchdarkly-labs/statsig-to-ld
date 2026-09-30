@@ -60,7 +60,8 @@ func SanitizeTags(tags []string) []string {
 }
 
 // MapMetricSourceToDataSource converts a Statsig metric source to an LD data source request body.
-func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey string) map[string]any {
+// An empty maintainerID omits the field.
+func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey, maintainerID string) map[string]any {
 	name := j.GetStr(source, "name")
 	if name == "" {
 		name = "unnamed-source"
@@ -81,6 +82,10 @@ func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey s
 		"integrationKey": integrationKey,
 		"environmentKey": envKey,
 		"tags":           SanitizeTags(rawTags),
+	}
+
+	if maintainerID != "" {
+		body["maintainerId"] = maintainerID
 	}
 
 	if desc := j.GetStr(source, "description"); desc != "" {

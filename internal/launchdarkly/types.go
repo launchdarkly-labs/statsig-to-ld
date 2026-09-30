@@ -8,6 +8,7 @@ package launchdarkly
 type MetricPost struct {
 	Key                  string           `json:"key"`
 	Kind                 string           `json:"kind"`
+	MaintainerID         string           `json:"maintainerId,omitempty"`
 	Name                 string           `json:"name,omitempty"`
 	Description          string           `json:"description,omitempty"`
 	EventKey             string           `json:"eventKey,omitempty"`
