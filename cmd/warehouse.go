@@ -258,7 +258,7 @@ func (e *migrationEngine) run() error {
 		return err
 	}
 	e.maintainerID = maintainer.MemberID
-	logMaintainer(maintainer, "data sources")
+	logMaintainer(maintainer, "data source")
 
 	// Phase 2 — set up warehouse integrations
 	if e.only != "data-sources" {

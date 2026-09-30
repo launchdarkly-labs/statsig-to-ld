@@ -125,7 +125,7 @@ func (c *Client) GetCallerIdentity(ctx context.Context) (CallerIdentity, error) 
 	if err != nil {
 		return CallerIdentity{}, fmt.Errorf("building caller-identity URL: %w", err)
 	}
-	body, err := c.getJSON(ctx, reqURL, "reading the LD caller identity")
+	body, _, err := c.getJSON(ctx, reqURL, "reading the LD caller identity")
 	if err != nil {
 		return CallerIdentity{}, err
 	}
@@ -146,8 +146,11 @@ func (c *Client) getMember(ctx context.Context, memberID string) (member, error)
 	if err != nil {
 		return member{}, fmt.Errorf("building member URL: %w", err)
 	}
-	body, err := c.getJSON(ctx, reqURL, "reading the LD account member")
+	body, status, err := c.getJSON(ctx, reqURL, "reading the LD account member")
 	if err != nil {
+		if status == http.StatusNotFound {
+			return member{}, fmt.Errorf("no member %q exists on this LaunchDarkly account", memberID)
+		}
 		return member{}, err
 	}
 	var m member
@@ -169,7 +172,7 @@ func (c *Client) findMemberByEmail(ctx context.Context, email string) (member, e
 	}
 	reqURL := base + "?filter=" + url.QueryEscape("email:"+email) + "&limit=5"
 
-	body, err := c.getJSON(ctx, reqURL, "looking up the LD account member by email")
+	body, _, err := c.getJSON(ctx, reqURL, "looking up the LD account member by email")
 	if err != nil {
 		return member{}, fmt.Errorf("could not look up --ld-maintainer email %q: %w", email, err)
 	}
@@ -191,20 +194,22 @@ func (c *Client) findMemberByEmail(ctx context.Context, email string) (member, e
 	}
 }
 
-// getJSON performs an authenticated GET and returns the body on a 200.
-func (c *Client) getJSON(ctx context.Context, reqURL, action string) ([]byte, error) {
+// getJSON performs an authenticated GET. The status is returned alongside the
+// error so callers can handle a 404 themselves: apiError's hints are written for
+// project-scoped calls and misdescribe a member lookup.
+func (c *Client) getJSON(ctx context.Context, reqURL, action string) ([]byte, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request for %s: %w", action, err)
+		return nil, 0, fmt.Errorf("creating request for %s: %w", action, err)
 	}
 	c.setAuthHeaders(req)
 
 	body, statusCode, err := httputil.DoWithRetry(ctx, c.httpClient, req, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if statusCode != http.StatusOK {
-		return nil, c.apiError(action, statusCode, body)
+		return nil, statusCode, c.apiError(action, statusCode, body)
 	}
-	return body, nil
+	return body, statusCode, nil
 }

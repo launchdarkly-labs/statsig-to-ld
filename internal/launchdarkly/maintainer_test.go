@@ -101,6 +101,11 @@ func TestResolveMaintainer_ExplicitIDNotFound(t *testing.T) {
 	if !strings.Contains(err.Error(), testMemberID) {
 		t.Errorf("error should name the ID it could not find, got: %v", err)
 	}
+	// apiError's 404 hint talks about --ld-project, which has nothing to do with
+	// a member lookup.
+	if strings.Contains(err.Error(), "--ld-project") {
+		t.Errorf("a member 404 must not suggest checking --ld-project, got: %v", err)
+	}
 }
 
 func TestResolveMaintainer_EmailResolves(t *testing.T) {
