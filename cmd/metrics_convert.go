@@ -284,10 +284,9 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "DRY RUN — preview only, no metrics will be created in LaunchDarkly.")
 	}
 
-	// Resolved once per run. Fatal on failure: a metric with no maintainer is
-	// flagged as incomplete in the LaunchDarkly UI, so creating hundreds of them
-	// silently is worse than stopping. Skipped entirely without credentials,
-	// which is the documented `--dry-run` with no LD key.
+	// Fatal on failure: LD flags an unmaintained metric as incomplete, so stopping
+	// beats creating hundreds of them. Needs credentials, so a --dry-run with no
+	// LD key skips it.
 	if ldClient != nil {
 		maintainer, err := ldClient.ResolveMaintainer(ctx, flagLDMaintainer)
 		if err != nil {

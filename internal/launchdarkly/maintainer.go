@@ -16,8 +16,8 @@ import (
 // maintainer at all.
 const MaintainerNone = "none"
 
-// memberIDPattern matches a LaunchDarkly member ID: a 24-character hex string.
-// An email always contains "@", so the two flag forms cannot be confused.
+// A member ID is 24 hex chars and an email contains "@", so the two flag forms
+// are unambiguous.
 var memberIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{24}$`)
 
 // MaintainerSource records how a maintainer was decided, for reporting.
@@ -54,8 +54,8 @@ type Maintainer struct {
 	OptedOut bool
 }
 
-// ValidateMaintainerFlag checks a --ld-maintainer value's shape without calling
-// the API, so a malformed value is rejected before any work starts.
+// ValidateMaintainerFlag checks the value's shape without calling the API, so a
+// typo fails at startup.
 func ValidateMaintainerFlag(value string) error {
 	v := strings.TrimSpace(value)
 	if v == "" || strings.EqualFold(v, MaintainerNone) {
@@ -67,13 +67,10 @@ func ValidateMaintainerFlag(value string) error {
 	return fmt.Errorf("invalid --ld-maintainer value %q: expected an email address, a 24-character member ID, or %q", value, MaintainerNone)
 }
 
-// ResolveMaintainer decides which LaunchDarkly member maintains the resources a
-// run creates.
-//
-// With no flag value it uses the member on the API token, which LaunchDarkly
-// itself does for a personal token but not for a service token. Resolution
-// failure is fatal: creating hundreds of unmaintained resources silently is
-// worse than stopping, and --ld-maintainer is always available as the answer.
+// ResolveMaintainer decides which member maintains the resources a run creates.
+// With no flag value it uses the API token's member, which LD does itself for a
+// personal token but not for a service token. Returns an error rather than an
+// empty maintainer; callers treat that as fatal.
 func (c *Client) ResolveMaintainer(ctx context.Context, flagValue string) (Maintainer, error) {
 	v := strings.TrimSpace(flagValue)
 
@@ -163,9 +160,8 @@ func (c *Client) getMember(ctx context.Context, memberID string) (member, error)
 	return m, nil
 }
 
-// findMemberByEmail resolves an email to a member. LaunchDarkly's email filter
-// is an exact, case-sensitive match, so a near miss returns no members rather
-// than an error; the message below has to explain that.
+// findMemberByEmail resolves an email to a member. LD's email filter is an
+// exact, case-sensitive match, so a near miss returns no members at all.
 func (c *Client) findMemberByEmail(ctx context.Context, email string) (member, error) {
 	base, err := url.JoinPath(c.apiBase, "api/v2/members")
 	if err != nil {

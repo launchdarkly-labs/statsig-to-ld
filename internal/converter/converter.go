@@ -54,8 +54,8 @@ type Options struct {
 	// for units with no Statsig counterpart the converter can see.
 	ExtraAnalysisUnits []string
 
-	// MaintainerID is the LD member set as maintainer on every created metric.
-	// Empty omits the field, which leaves the metric unmaintained.
+	// MaintainerID is set as the maintainer on every created metric. Empty omits
+	// the field.
 	MaintainerID string
 
 	// RegisteredAnalysisUnits are the only analysis units the target LD project

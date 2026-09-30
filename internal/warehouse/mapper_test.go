@@ -52,8 +52,7 @@ func TestMapMetricSourceToDataSource_Maintainer(t *testing.T) {
 		t.Errorf("maintainerId = %v, want the configured member ID", body["maintainerId"])
 	}
 
-	// Empty means opted out, and LD rejects an empty-string maintainer, so the
-	// key must be absent rather than present-and-blank.
+	// LD rejects an empty-string maintainer, so the key must be absent.
 	bare := MapMetricSourceToDataSource(src, "e", "k", "")
 	if _, present := bare["maintainerId"]; present {
 		t.Errorf("maintainerId should be absent when unset, got %v", bare["maintainerId"])

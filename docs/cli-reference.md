@@ -211,9 +211,9 @@ Statsig also lets you hand-build a ratio whose denominator is a count-distinct o
 
 #### Maintainers
 
-Every LaunchDarkly metric and metric data source has a maintainer. LaunchDarkly fills it in automatically from the member who owns the API token, but only for a personal token. A **service token** is not tied to a member, so resources it creates are left with no maintainer, and LaunchDarkly's UI flags those as incomplete.
+With no `--ld-maintainer`, the CLI sets the maintainer to the member who owns the API token, for both personal and service tokens.
 
-The CLI closes that gap: it resolves a maintainer once per run and sets it on everything it creates, so a service token and a personal token produce the same result.
+This differs from calling the LaunchDarkly API directly, where the maintainer is resolved from the token's member only for a personal token. A service token has no member, so resources created with one get no maintainer.
 
 | `--ld-maintainer` value | Effect |
 |---|---|
@@ -222,9 +222,9 @@ The CLI closes that gap: it resolves a maintainer once per run and sets it on ev
 | a member ID, 24 hex characters | Used directly, after checking the member exists. |
 | `none` | Creates resources with **no maintainer**. They will show as incomplete in the LaunchDarkly UI until someone is assigned. |
 
-If a maintainer cannot be resolved the run **stops before creating anything**. That happens when the token's member has been removed from the account, or when the token cannot read its own identity. The error names `--ld-maintainer` as the fix. A maintainer is never silently skipped, because a few hundred unmaintained metrics are harder to notice and fix than an error at startup.
+If no maintainer can be resolved, the run stops before creating anything and the error points at `--ld-maintainer`. This happens when the token's member has left the account, or when the token cannot read its own identity. Use `--ld-maintainer none` if you want the resources created without one.
 
-The resolved maintainer is printed once at the start of the run, so it is always clear who will own what gets created.
+The resolved maintainer is printed once at the start of the run.
 
 Maintainer resolution needs LaunchDarkly credentials. A `--dry-run` with no `--ld-key` skips it, and says so.
 

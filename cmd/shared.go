@@ -43,8 +43,7 @@ func parseCommaSeparated(s string) []string {
 	return result
 }
 
-// logMaintainer states the resolved maintainer once per run, so it is never a
-// surprise which member ends up owning what the run creates.
+// logMaintainer reports which member will own what the run creates.
 func logMaintainer(m launchdarkly.Maintainer, resourceLabel string) {
 	if m.OptedOut {
 		log.Printf("Maintainer: NONE. The %s created by this run will have no maintainer, "+

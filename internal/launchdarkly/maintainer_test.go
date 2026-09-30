@@ -13,8 +13,7 @@ const (
 	testMemberEmail = "someone@example.com"
 )
 
-// maintainerServer answers the three endpoints maintainer resolution uses. Any
-// handler set to nil returns 404, so a test can prove a path is not consulted.
+// A nil handler returns 404, so a test can prove a path is not consulted.
 type maintainerServer struct {
 	callerIdentity http.HandlerFunc
 	memberByID     http.HandlerFunc
@@ -49,7 +48,7 @@ func jsonHandler(status int, body string) http.HandlerFunc {
 	}
 }
 
-// "none" is the explicit opt-out: no maintainer, and no API calls to resolve one.
+// "none" opts out: no maintainer, and no calls to resolve one.
 func TestResolveMaintainer_NoneOptsOut(t *testing.T) {
 	s := &maintainerServer{}
 	c := newMaintainerClient(t, s)
@@ -69,8 +68,7 @@ func TestResolveMaintainer_NoneOptsOut(t *testing.T) {
 	}
 }
 
-// An explicit member ID is validated against the project, so a typo fails before
-// any metric is created rather than on every create.
+// An explicit member ID is validated, so a typo fails before anything is created.
 func TestResolveMaintainer_ExplicitIDIsValidated(t *testing.T) {
 	s := &maintainerServer{
 		memberByID: jsonHandler(200, `{"_id":"`+testMemberID+`","email":"`+testMemberEmail+`"}`),
@@ -126,8 +124,7 @@ func TestResolveMaintainer_EmailResolves(t *testing.T) {
 	}
 }
 
-// LD's email filter is an exact, case-sensitive match, so a near-miss returns
-// zero members rather than an error. The message has to say that.
+// A near-miss email returns zero members, so the error has to mention case.
 func TestResolveMaintainer_EmailNoMatchMentionsCaseSensitivity(t *testing.T) {
 	s := &maintainerServer{membersFilter: jsonHandler(200, `{"items":[]}`)}
 	c := newMaintainerClient(t, s)
@@ -165,8 +162,7 @@ func TestResolveMaintainer_DefaultsToTokenMember(t *testing.T) {
 	}
 }
 
-// A service token can outlive the member who created it. That must stop the run
-// with an actionable message, not silently create unmaintained resources.
+// A service token can outlive the member who created it.
 func TestResolveMaintainer_TokenMemberGoneIsFatalAndSuggestsTheFlag(t *testing.T) {
 	s := &maintainerServer{
 		callerIdentity: jsonHandler(200, `{"memberId":"`+testMemberID+`","serviceToken":true}`),
@@ -196,7 +192,7 @@ func TestResolveMaintainer_CallerIdentityFailureSuggestsTheFlag(t *testing.T) {
 	}
 }
 
-// A token with no member at all (nothing to fall back on) is also fatal.
+// A token with no member at all.
 func TestResolveMaintainer_NoMemberOnTokenIsFatal(t *testing.T) {
 	s := &maintainerServer{
 		callerIdentity: jsonHandler(200, `{"serviceToken":true}`),

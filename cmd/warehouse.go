@@ -251,9 +251,8 @@ func (e *migrationEngine) run() error {
 		return err
 	}
 
-	// Resolved once, before anything is created. Fatal on failure: a data source
-	// with no maintainer is flagged as incomplete in the LaunchDarkly UI, so
-	// creating a hundred of them silently is worse than stopping.
+	// Fatal on failure: LD flags an unmaintained data source as incomplete, so
+	// stopping beats creating a hundred of them.
 	maintainer, err := e.ld.ResolveMaintainer(e.ctx, whFlagLDMaintainer)
 	if err != nil {
 		return err
