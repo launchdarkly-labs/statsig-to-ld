@@ -29,7 +29,7 @@ func TestFinalize_MixedStatuses(t *testing.T) {
 	r.AddConverted("m1", "sum", "m1::sum", "m1-sum", "proj", nil, Diagnostics{})
 	r.AddConverted("m2", "mean", "m2::mean", "m2-mean", "proj", []string{"unit TODO"}, Diagnostics{})
 	r.AddConverted("m3", "sum", "m3::sum", "m3-sum", "proj", []string{"warn1", "warn2"}, Diagnostics{})
-	r.AddSkippedExisting("m4", "sum", "m4::sum", "m4-sum", "proj")
+	r.AddSkippedExisting("m4", "sum", "m4::sum", "m4-sum", "proj", nil, nil)
 	r.AddSkippedIncompatible("m5", "ratio", "m5::ratio", "not supported")
 	r.AddSkippedIncompatible("m6", "funnel", "m6::funnel", "needs metric group")
 	r.AddFailed("m7", "sum", "m7::sum", "API error")

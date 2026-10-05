@@ -113,6 +113,10 @@ type Diagnostics struct {
 	LossyReasons []string `json:"lossy_reasons,omitempty"`
 	LossyCodes   []string `json:"lossy_codes,omitempty"`
 
+	// BlockingCodes are the codes of the warnings that kept a metric from being
+	// created even with --convert-lossy.
+	BlockingCodes []string `json:"blocking_codes,omitempty"`
+
 	// LDDataSource is the LaunchDarkly data source the metric resolved to, empty
 	// if none. This is the main thing gating filter and window conversion, so it
 	// is worth being able to count directly.
@@ -167,8 +171,10 @@ func (r *Report) AddConverted(name, typ, id, ldKey, ldProject string, warnings [
 	})
 }
 
-// AddSkippedExisting records a metric that already exists in LD. Thread-safe.
-func (r *Report) AddSkippedExisting(name, typ, id, ldKey, ldProject string) {
+// AddSkippedExisting records a metric that already exists in LD. warnings
+// (with warningCodes parallel to it) describe problems found with the existing
+// metric, if any. Thread-safe.
+func (r *Report) AddSkippedExisting(name, typ, id, ldKey, ldProject string, warnings, warningCodes []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Metrics = append(r.Metrics, MetricEntry{
@@ -178,6 +184,8 @@ func (r *Report) AddSkippedExisting(name, typ, id, ldKey, ldProject string) {
 		Status:      StatusSkippedExisting,
 		LDKey:       ldKey,
 		LDProject:   ldProject,
+		Warnings:    warnings,
+		Diagnostics: Diagnostics{WarningCodes: warningCodes},
 	})
 }
 
@@ -211,6 +219,23 @@ func (r *Report) AddSkippedLossy(name, typ, id string, warnings []string, diag D
 		StatsigID:   id,
 		Status:      StatusSkippedLossy,
 		Reason:      "lossy conversion — skipped; re-run with --convert-lossy to convert it anyway",
+		Warnings:    warnings,
+		Diagnostics: diag,
+	})
+}
+
+// AddSkippedBlocked records a metric that converted but must not be created,
+// whatever --convert-lossy says, because it would measure something materially
+// different from the Statsig metric. It counts as incompatible. Thread-safe.
+func (r *Report) AddSkippedBlocked(name, typ, id, reason string, warnings []string, diag Diagnostics) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Metrics = append(r.Metrics, MetricEntry{
+		StatsigName: name,
+		StatsigType: typ,
+		StatsigID:   id,
+		Status:      StatusSkippedIncompatible,
+		Reason:      reason,
 		Warnings:    warnings,
 		Diagnostics: diag,
 	})
