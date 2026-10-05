@@ -59,6 +59,13 @@ func SanitizeTags(tags []string) []string {
 	return result
 }
 
+// FallbackColumn is a column entry guessed from the Statsig mapping, used when
+// the warehouse preview is unavailable.
+type FallbackColumn struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
 // MapMetricSourceToDataSource converts a Statsig metric source to an LD data source request body.
 // An empty maintainerID omits the field.
 func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey, maintainerID string) map[string]any {
@@ -156,15 +163,11 @@ func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey, 
 	}
 
 	// Build fallback columns list (used when preview is unavailable)
-	type colDef struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-	}
 	seen := map[string]bool{}
-	var columns []colDef
+	var columns []FallbackColumn
 	addCol := func(name, colType string) {
 		if name != "" && !seen[name] {
-			columns = append(columns, colDef{Name: name, Type: colType})
+			columns = append(columns, FallbackColumn{Name: name, Type: colType})
 			seen[name] = true
 		}
 	}
@@ -194,12 +197,18 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
-	if ts := j.GetStr(preview, "timestampColumn"); ts != "" {
-		cm["timestampColumn"] = ts
-	} else if v, ok := cm["timestampColumn"].(string); ok {
+	// The timestamp column Statsig was configured with wins, in the case the
+	// warehouse returns it. The preview only guesses (the first timestamp-typed
+	// column), so its guess is used only when Statsig's column is not there.
+	tsMapped := false
+	if v, ok := cm["timestampColumn"].(string); ok {
 		if real, found := actual[strings.ToLower(v)]; found {
 			cm["timestampColumn"] = real
+			tsMapped = true
 		}
+	}
+	if ts := j.GetStr(preview, "timestampColumn"); ts != "" && !tsMapped {
+		cm["timestampColumn"] = ts
 	}
 
 	if kc := j.GetStr(preview, "keyColumn"); kc != "" {

@@ -183,13 +183,51 @@ func (c *Client) PreviewDataSource(ctx context.Context, integrationConfigID, sql
 	return body, nil
 }
 
-// ListMetricDataSources lists metric data sources for a project.
-func (c *Client) ListMetricDataSources(ctx context.Context) []map[string]any {
-	status, body, _ := c.requestJSON(ctx, "GET", fmt.Sprintf("/internal/projects/%s/metric-data-sources", c.projectKey), nil)
-	if status == 200 && body != nil {
-		return j.ExtractItemsList(body)
+// ListMetricDataSources lists the project's unarchived metric data sources.
+// Callers decide what exists and how metrics bind from this list, so a failed
+// request is an error rather than an empty list.
+func (c *Client) ListMetricDataSources(ctx context.Context) ([]map[string]any, error) {
+	status, body, err := c.requestJSON(ctx, "GET", fmt.Sprintf("/internal/projects/%s/metric-data-sources", c.projectKey), nil)
+	if err != nil {
+		return nil, fmt.Errorf("listing metric data sources: %w", err)
 	}
-	return nil
+	if status != 200 || body == nil {
+		return nil, fmt.Errorf("listing metric data sources: %d\n%s", status, j.ToJSON(body))
+	}
+	return j.ExtractItemsList(body), nil
+}
+
+// GetMetricDataSource fetches one metric data source. With expandMetrics the
+// response also lists the metrics bound to it (LaunchDarkly returns at most
+// ten, with the full count in metrics.totalCount).
+func (c *Client) GetMetricDataSource(ctx context.Context, key string, expandMetrics bool) (map[string]any, error) {
+	path := fmt.Sprintf("/internal/projects/%s/metric-data-sources/%s", c.projectKey, url.PathEscape(key))
+	if expandMetrics {
+		path += "?expand=metrics"
+	}
+	status, body, err := c.requestJSON(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("failed to get metric data source %s: %d\n%s", key, status, j.ToJSON(body))
+	}
+	return body, nil
+}
+
+// UpdateMetricDataSource applies a JSON Patch (RFC 6902) to a metric data
+// source. LaunchDarkly applies it to the data source's API representation and
+// re-validates the query and column mappings when either changes.
+func (c *Client) UpdateMetricDataSource(ctx context.Context, key string, ops []JSONPatchOp) (map[string]any, error) {
+	path := fmt.Sprintf("/internal/projects/%s/metric-data-sources/%s", c.projectKey, url.PathEscape(key))
+	status, body, err := c.requestJSON(ctx, "PATCH", path, ops)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("failed to update metric data source %s: %d\n%s", key, status, j.ToJSON(body))
+	}
+	return body, nil
 }
 
 // CreateMetricDataSource creates a metric data source.
@@ -230,6 +268,18 @@ func (c *Client) ListMetricsRaw(ctx context.Context) []map[string]any {
 		}
 	}
 	return all
+}
+
+// GetMetricRaw fetches one metric as a raw map.
+func (c *Client) GetMetricRaw(ctx context.Context, key string) (map[string]any, error) {
+	status, body, err := c.requestJSON(ctx, "GET", fmt.Sprintf("/api/v2/metrics/%s/%s", c.projectKey, url.PathEscape(key)), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("failed to get metric %s: %d\n%s", key, status, j.ToJSON(body))
+	}
+	return body, nil
 }
 
 // CreateMetricRaw creates a metric using a raw map payload.
