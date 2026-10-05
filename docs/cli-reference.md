@@ -158,6 +158,7 @@ Where `sources.json` is:
 |---|---|
 | `--ld-data-source` | Binds warehouse-native and ratio metrics to a LaunchDarkly data source. Effectively required for them: a ratio metric is **rejected** without one (HTTP 400), and other warehouse-native metrics are created unbound, collecting no data. Metric filters and measurement windows also only convert when a data source is bound. Use `--source-mapping` instead when different Statsig sources map to different LD data sources. |
 | `--source-mapping` | Takes precedence over `--ld-data-source` for any Statsig source name it lists. Unlisted sources fall back to `--ld-data-source`. |
+| `--assume-constant-event-key` | Off by default. When either flag above binds metrics to a data source, the command reads those data sources from LaunchDarkly to learn which of them project the [constant event key](#the-constant-event-key) and what their columns are called. Pass `--ld-key` and `--ld-project` for that, on a dry run too. This flag covers the data sources LaunchDarkly cannot report on, because there are no credentials or `warehouse` has not created them yet: they are treated as constant-key, which is what `warehouse` creates. Their column case cannot be checked, so each affected metric carries a `column_unverified` warning. A data source LaunchDarkly reports as not wrapped is never assumed. |
 | `--ld-maintainer` | Sets the maintainer on every created metric. Defaults to the member who owns the API token, which is what LaunchDarkly does for a personal token but not for a service token. Accepts an email, a 24-character member ID, or `none`. The run stops if it cannot resolve a maintainer, so pass a value rather than leaving metrics unmaintained. |
 | `--concurrency` | Defaults to 4, deliberately low to stay under LaunchDarkly's API rate limiter. Raise it if your project's limits allow; lower it if you start seeing 429s. |
 | `--convert-lossy` | Off by default. A lossy metric is one where converting would drop or approximate a Statsig feature, so it is recorded as `skipped_lossy` in the report with the reason, rather than being silently converted into something subtly different. Pass this to convert them anyway and accept the imperfect result. See "Statsig features not carried over" below. |
@@ -322,6 +323,8 @@ Finding the two names:
 - **Statsig metric source name** (the JSON keys) — each warehouse-native metric's `metricSourceName`, as returned by the Statsig metrics API / shown in the Statsig console. To enumerate every source at once, run `statsig-to-ld warehouse --dry-run`: it fetches the metric sources and writes each one's `name` to its export file without changing anything in LD.
 - **LD data source key** (the JSON values) — the key of the existing metric data source in LaunchDarkly.
 
+A data source built outside `warehouse` usually does not project the [constant event key](#the-constant-event-key), so metrics bound to it get legacy event keys (the value column or the source name), which match rows only if its key column holds those values. To fix one, edit its SQL in LaunchDarkly to `SELECT *, '<data-source-key>' AS LD_EVENT_KEY FROM (<existing SQL>) AS ld_src` (lower-case `ld_event_key` outside Snowflake) and set its event key column to that column, then run `metrics convert`.
+
 A warehouse-native metric whose source resolves through neither flag is still created, but **without** a data source binding (you'll see a `no LD data source specified` warning), and ratio metrics are rejected by LD at creation without one. Event-based (Statsig Cloud) metrics never need a data source, so a project with no warehouse-native metrics needs neither flag.
 
 ### How it works
@@ -330,9 +333,29 @@ Three phases:
 
 1. **Export** — Fetches the warehouse connection config and metric_sources from Statsig (or loads them from a previously-saved JSON export file).
 2. **Warehouse setup** — Sets up data export + experimentation integrations in LaunchDarkly via an interactive wizard (Snowflake, BigQuery, Databricks, Redshift). Auto-detects and skips integrations that already exist.
-3. **Data sources** — Creates LD metric data sources, using LD's preview API to discover real warehouse column schemas. Writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key it created.
+3. **Data sources** — Creates LD metric data sources, using LD's preview API to discover real warehouse column schemas. Each source's SQL is wrapped to project a [constant event key](#the-constant-event-key). Writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key it created.
 
 After Phase 3 completes, the next step is `statsig-to-ld metrics convert --source-mapping source-mapping.json` to migrate metric definitions bound to those data sources. The `warehouse` subcommand prints this hand-off command at the end of every successful run.
+
+### The constant event key
+
+LaunchDarkly requires an event key column on every warehouse data source, and every metric on it reads only the rows where that column equals the metric's event key. Statsig metric sources have no such column: a Statsig metric selects its rows with filter criteria. So `warehouse` adds one. Each data source's SQL is created as:
+
+```sql
+SELECT *, 'checkout-events' AS LD_EVENT_KEY FROM (
+<the Statsig source SQL, without a trailing semicolon>
+) AS ld_src
+```
+
+The literal is the data source's key, and `LD_EVENT_KEY` becomes its event key column. The column is upper case on Snowflake, which stores unquoted names that way, and `ld_event_key` on BigQuery, Databricks, and Redshift. If the source already has a column by that name, a numeric suffix is added. A Statsig table source is wrapped as `SELECT * FROM <table>`. The wrapped query is previewed in the warehouse before the data source is created, because LaunchDarkly validates the saved column list against exactly that query.
+
+`metrics convert` then reads each bound data source back from LaunchDarkly. When it projects the constant, every warehouse-native metric on it gets the data source key as its event key (a ratio's denominator gets its own data source's key), so the key column matches every row and the metric's filters do the selecting. Numeric terms send the Statsig value column as `valueColumn`. Value, count-distinct, and filter columns are rewritten to the case the data source stores them in, since LaunchDarkly matches column names exactly; a column the data source does not have makes the metric lossy.
+
+A source is failed, with the reason, instead of created when its SQL cannot be nested in a subquery: more than one statement, a Statsig date macro such as `{statsig_start_date}` (LaunchDarkly does not expand them; replace them with literal dates), or neither SQL nor a table. Macros mentioned only in comments or string literals do not count. `--dry-run` writes the bodies a real run would send, before the preview, to `data-source-bodies.json`, so the wrapped SQL can be run by hand in the warehouse first.
+
+**Data sources that already exist** are left alone. One that does not project the constant is skipped with a warning; rerun with `--overwrite` to update it in place. LaunchDarkly has no way to delete a metric data source, and its key stays taken even after archiving, so updating is the only fix. `--overwrite` replaces the data source's SQL and column mappings with the ones a create would send; its name, tags, and maintainer are unchanged. Metrics already bound to an updated data source keep their old event keys, which no longer match its key column: the run names the ones it finds (LaunchDarkly lists up to ten per data source), and `metrics convert`, which skips metrics that exist, names any it meets. Change their event key to the data source key in LaunchDarkly, or delete them and run `metrics convert` again.
+
+Pass `--constant-event-key=false` to create data sources from the Statsig SQL unchanged. The event key column is then guessed from Statsig's custom field names, and creation fails when there is no guess.
 
 ### Quick start
 
@@ -374,7 +397,7 @@ statsig-to-ld warehouse \
 
 ### Resuming a failed run
 
-If integration setup or data source creation fails partway through, use `--resume` to pick up where it left off. Progress is checkpointed to `migration_state.json`.
+If integration setup or data source creation fails partway through, use `--resume` to pick up where it left off. Progress is checkpointed to `migration_state.json`. Data sources it records as done are still checked against LaunchDarkly, so one without the constant event key is flagged, or updated with `--overwrite`.
 
 ```bash
 statsig-to-ld warehouse \
@@ -416,7 +439,8 @@ statsig-to-ld warehouse \
 | `--dry-run` | `false` | Preview data source mapping without writing to LD (still writes `source-mapping.json` so you can review it) |
 | `--resume` | `false` | Resume from `migration_state.json` |
 | `--only` | — | Run only `warehouse` (Phase 2) or `data-sources` (Phase 3) |
-| `--overwrite` | `false` | Overwrite existing entities in LD |
+| `--overwrite` | `false` | Update existing LD metric data sources in place: their SQL and column mappings are replaced with what a create would send. Without it, existing data sources are skipped. See [The constant event key](#the-constant-event-key). |
+| `--constant-event-key` | `true` | Wrap each source's SQL to project the data source key as a constant event key column and use it as the key column. `--constant-event-key=false` sends the Statsig SQL unchanged. |
 | `--verbose` | `false` | Show detailed API request/response info |
 | `--no-color` | `false` | Disable colored terminal output |
 
@@ -481,6 +505,8 @@ Statsig combines multiple criteria on one term with AND, and multiple values wit
 `is_true` and `is_false` assume the column really holds a boolean. A warehouse filter compares the column's text form, and a boolean column renders as `true`/`false`, so the match lines up. A column that stores `1`/`0` or `"TRUE"` instead will not match, and the filter selects no rows.
 
 **All or nothing per term.** If any criterion on a term is unmappable, no filter is emitted for that term and the metric stays lossy. Because criteria are AND-ed, applying only the mappable subset would *widen* what the metric matches, producing a metric that looks converted but silently counts more rows than the original. The warning lists every dropped criterion so it can be rebuilt by hand.
+
+**On a constant-key data source the metric is not created at all**, even with `--convert-lossy`. There the event key matches every row, so the filter is the only thing selecting rows, and a metric without it would count the whole data source. The report records it as `skipped_incompatible` with blocking code `constant_event_key_unfiltered` and the dropped criteria. Create it by hand in LaunchDarkly with the filter.
 
 > **Requirements.** Filters must be enabled for the target LaunchDarkly project, and they currently compute only on **Snowflake**-backed data sources. A filter saved against another warehouse type persists but fails when results are computed. Filters also need a bound data source: without one LaunchDarkly treats the metric as SDK-hosted, where the same clause would mean a JSON payload lookup rather than a warehouse column, so those criteria are reported as lossy instead.
 
