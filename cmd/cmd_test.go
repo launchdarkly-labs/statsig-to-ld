@@ -33,7 +33,7 @@ func TestConvertCmd_FlagsBound(t *testing.T) {
 		"statsig-key", "statsig-url",
 		"ld-key", "ld-url", "ld-project",
 		"ld-data-source", "source-mapping", "unit-type-mapping",
-		"extra-analysis-units", "widen-analysis-units",
+		"extra-analysis-units", "widen-analysis-units", "ld-maintainer",
 		"output", "format", "default-unit",
 		"include-tags", "include-types", "concurrency", "verbose",
 	}

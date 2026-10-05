@@ -158,6 +158,7 @@ Where `sources.json` is:
 |---|---|
 | `--ld-data-source` | Binds warehouse-native and ratio metrics to a LaunchDarkly data source. Effectively required for them: a ratio metric is **rejected** without one (HTTP 400), and other warehouse-native metrics are created unbound, collecting no data. Metric filters and measurement windows also only convert when a data source is bound. Use `--source-mapping` instead when different Statsig sources map to different LD data sources. |
 | `--source-mapping` | Takes precedence over `--ld-data-source` for any Statsig source name it lists. Unlisted sources fall back to `--ld-data-source`. |
+| `--ld-maintainer` | Sets the maintainer on every created metric. Defaults to the member who owns the API token, which is what LaunchDarkly does for a personal token but not for a service token. Accepts an email, a 24-character member ID, or `none`. The run stops if it cannot resolve a maintainer, so pass a value rather than leaving metrics unmaintained. |
 | `--concurrency` | Defaults to 4, deliberately low to stay under LaunchDarkly's API rate limiter. Raise it if your project's limits allow; lower it if you start seeing 429s. |
 | `--convert-lossy` | Off by default. A lossy metric is one where converting would drop or approximate a Statsig feature, so it is recorded as `skipped_lossy` in the report with the reason, rather than being silently converted into something subtly different. Pass this to convert them anyway and accept the imperfect result. See "Statsig features not carried over" below. |
 | `--dump-raw` | Writes every Statsig metric's raw JSON verbatim, all fields, then continues the run. Needs only the Statsig key. The fastest way to see what Statsig actually returned for a metric that converted oddly. See "Debugging a conversion" below. |
@@ -207,6 +208,25 @@ statsig-to-ld metrics convert --all --ld-project my-project \
 Widening only affects what an experiment is *allowed* to pick; it does not change how any metric is measured. The converter reports each metric whose list it widened. It adds every id type the source declares, coarser ones included, on the assumption that any unit the source can identify is one some experiment might want.
 
 Statsig also lets you hand-build a ratio whose denominator is a count-distinct of the analysis unit, as an alternative to normalizing. Those convert as LaunchDarkly ratio metrics, unchanged by any of the above.
+
+#### Maintainers
+
+With no `--ld-maintainer`, the CLI sets the maintainer to the member who owns the API token, for both personal and service tokens.
+
+This differs from calling the LaunchDarkly API directly, where the maintainer is resolved from the token's member only for a personal token. A service token has no member, so resources created with one get no maintainer.
+
+| `--ld-maintainer` value | Effect |
+|---|---|
+| omitted (default) | Uses the member who owns the API token. Works for both token kinds. |
+| an email, `someone@example.com` | Looks the member up by email. LaunchDarkly matches the address **exactly, including case**, so a near miss fails rather than guessing. |
+| a member ID, 24 hex characters | Used directly, after checking the member exists. |
+| `none` | Creates resources with **no maintainer**. They will show as incomplete in the LaunchDarkly UI until someone is assigned. |
+
+If no maintainer can be resolved, the run stops before creating anything and the error points at `--ld-maintainer`. This happens when the token's member has left the account, or when the token cannot read its own identity. Use `--ld-maintainer none` if you want the resources created without one.
+
+The resolved maintainer is printed once at the start of the run.
+
+Maintainer resolution needs LaunchDarkly credentials. A `--dry-run` with no `--ld-key` skips it, and says so.
 
 #### Metric type conversion
 
@@ -392,6 +412,7 @@ statsig-to-ld warehouse \
 | `--ld-project` | — | LaunchDarkly project key (required) |
 | `--ld-environment` | — | LaunchDarkly environment key (required) |
 | `--warehouse-type` | — | `snowflake`, `bigquery`, `databricks`, or `redshift`. Set this when Statsig does not expose its warehouse connection config. Without it the command falls back to guessing from metric source SQL, and it will not create anything on a guess. |
+| `--ld-maintainer` | — | Maintainer for created data sources: an email, a 24-character member ID, or `none`. Defaults to the member who owns the API token. See [Maintainers](#maintainers). |
 | `--dry-run` | `false` | Preview data source mapping without writing to LD (still writes `source-mapping.json` so you can review it) |
 | `--resume` | `false` | Resume from `migration_state.json` |
 | `--only` | — | Run only `warehouse` (Phase 2) or `data-sources` (Phase 3) |
