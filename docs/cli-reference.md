@@ -353,14 +353,22 @@ The literal is the data source's key, and `LD_EVENT_KEY` becomes its event key c
 
 A source is failed, with the reason, instead of created when its SQL cannot be nested in a subquery: more than one statement, a Statsig date macro such as `{statsig_start_date}` (LaunchDarkly does not expand them; replace them with literal dates), or neither SQL nor a table. Macros mentioned only in comments or string literals do not count. `--dry-run` writes the bodies a real run would send, before the preview, to `data-source-bodies.json`, so the wrapped SQL can be run by hand in the warehouse first.
 
-**Data sources that already exist** are left alone. One that does not project the constant is skipped with a warning; rerun with `--overwrite` to update it in place. LaunchDarkly has no way to delete a metric data source, and its key stays taken even after archiving, so updating is the only fix. `--overwrite` replaces the data source's SQL and column mappings with the ones a create would send; its name, tags, and maintainer are unchanged. Metrics already bound to an updated data source keep their old event keys, which no longer match its key column: the run names the ones it finds (LaunchDarkly lists up to ten per data source), and `metrics convert`, which skips metrics that exist, names any it meets. Change their event key to the data source key in LaunchDarkly, or delete them and run `metrics convert` again.
+**Data sources that already exist** are left alone unless `--overwrite` is set. LaunchDarkly has no way to delete a metric data source, and its key stays taken even after archiving, so updating in place is the only fix for one created without the constant.
+
+- **One that already projects the constant** is never rewritten, with or without `--overwrite` or a state file. If its Statsig SQL has changed since (ignoring whitespace), the run warns; edit the SQL in LaunchDarkly if the change matters. `--constant-event-key=false` never removes the constant from it either: metrics on it use the data source key as their event key and would match nothing.
+- **One that does not** is skipped with a warning. With `--overwrite`, its query is replaced with the wrapped Statsig SQL, its key column is pointed at the constant column, and its column list is replaced with the wrapped query's. Its timestamp, value, and context mappings are kept while the new query still returns those columns (matched case-insensitively); a mapping whose column is gone falls back to what a create would use, or is removed, and the run says which. Name, tags, and maintainer are unchanged.
+- **Bound metrics are checked first.** Before updating, the run reads the project's metrics once and finds those bound to the data source, through the numerator or a ratio's denominator. If any uses an event key other than the data source key, it would match no rows after the update, so the data source is not updated and the run fails it, listing them. Metrics created by older versions of this tool usually match nothing already. `--force-overwrite` updates it anyway and lists them again; change their event key to the data source key in LaunchDarkly, or delete them and run `metrics convert` again. If the metrics cannot be read, the data source is not updated. A data source built by hand whose key column holds real event names is the case this protects: leave it alone.
+- **Statsig sources whose names map to the same key** (for example `Checkout Events` and `checkout events`) all fail, naming each other, and none is created, updated, or written to `source-mapping.json`. Rename all but one in Statsig.
+
+`metrics convert` skips metrics that already exist, and names any it meets whose event key their constant-key data source never holds.
 
 Pass `--constant-event-key=false` to create data sources from the Statsig SQL unchanged. The event key column is then guessed from Statsig's custom field names, and creation fails when there is no guess.
 
 ### Quick start
 
 ```bash
-# 1. Preview (no LD changes)
+# 1. Preview (no LD changes). Add --ld-key and --ld-project to see which data
+#    sources would be created, updated, skipped, or refused.
 statsig-to-ld warehouse \
   --statsig-key console-YOUR_KEY \
   --dry-run
@@ -436,10 +444,11 @@ statsig-to-ld warehouse \
 | `--ld-environment` | — | LaunchDarkly environment key (required) |
 | `--warehouse-type` | — | `snowflake`, `bigquery`, `databricks`, or `redshift`. Set this when Statsig does not expose its warehouse connection config. Without it the command falls back to guessing from metric source SQL, and it will not create anything on a guess. |
 | `--ld-maintainer` | — | Maintainer for created data sources: an email, a 24-character member ID, or `none`. Defaults to the member who owns the API token. See [Maintainers](#maintainers). |
-| `--dry-run` | `false` | Preview data source mapping without writing to LD (still writes `source-mapping.json` so you can review it) |
+| `--dry-run` | `false` | Preview data source mapping without writing to LD (still writes `source-mapping.json` and, with the constant event key on, `data-source-bodies.json` so you can review them). With `--ld-key` and `--ld-project` it reads the project's data sources (and, for updates, its metrics) and lists each source as would create, update, skip, or refuse; without them it notes that existing data sources were not checked. |
 | `--resume` | `false` | Resume from `migration_state.json` |
 | `--only` | — | Run only `warehouse` (Phase 2) or `data-sources` (Phase 3) |
-| `--overwrite` | `false` | Update existing LD metric data sources in place: their SQL and column mappings are replaced with what a create would send. Without it, existing data sources are skipped. See [The constant event key](#the-constant-event-key). |
+| `--overwrite` | `false` | Update existing LD metric data sources that lack the constant event key in place: the query, key column, and column list change; timestamp, value, and context mappings are kept while the new query returns them. Refuses a data source whose bound metrics use other event keys. Data sources that already have the constant are never rewritten. Without it, existing data sources are skipped. See [The constant event key](#the-constant-event-key). |
+| `--force-overwrite` | `false` | Implies `--overwrite`, and also updates data sources whose bound metrics would match no rows afterwards, listing those metrics. Like `--convert-lossy` and `--accept-data-loss`, it opts into a known loss. |
 | `--constant-event-key` | `true` | Wrap each source's SQL to project the data source key as a constant event key column and use it as the key column. `--constant-event-key=false` sends the Statsig SQL unchanged. |
 | `--verbose` | `false` | Show detailed API request/response info |
 | `--no-color` | `false` | Disable colored terminal output |

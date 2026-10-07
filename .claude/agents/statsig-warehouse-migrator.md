@@ -133,10 +133,11 @@ The tool loads `migration_state.json` and skips already-created data sources / c
 | `--ld-url` | LD API base URL (for EU/FedRAMP) |
 | `--ld-project` | LaunchDarkly project key (required) |
 | `--ld-environment` | LaunchDarkly environment key (required) |
-| `--dry-run` | Preview without writing to LD; still writes `source-mapping.json` for review |
+| `--dry-run` | Preview without writing to LD; still writes `source-mapping.json` and `data-source-bodies.json` for review. With `--ld-key` and `--ld-project` it lists each source as would create / update / skip / refuse |
 | `--resume` | Resume from `migration_state.json` |
 | `--only` | Run only `warehouse` (Phase 2) or `data-sources` (Phase 3) |
-| `--overwrite` | Update existing LD data sources in place (SQL and column mappings) instead of skipping them |
+| `--overwrite` | Update existing LD data sources that lack the constant event key in place: query, key column, and column list; timestamp, value, and context mappings are kept while the new query returns them. Refuses a data source whose bound metrics use other event keys |
+| `--force-overwrite` | Implies `--overwrite`, and also updates data sources whose bound metrics would match no rows afterwards, listing them |
 | `--constant-event-key` | Default `true`. Wrap each source's SQL to project the data source key as a constant event key column; `=false` sends the Statsig SQL unchanged |
 | `--verbose` | Show detailed API info |
 | `--no-color` | Disable colored output |
@@ -175,7 +176,7 @@ For each Statsig metric source:
 3. Wraps the SQL as `SELECT *, '<data-source-key>' AS LD_EVENT_KEY FROM (<source SQL>) AS ld_src` (`ld_event_key` outside Snowflake), previews the wrapped query, and makes that column the event key column. LaunchDarkly requires an event key column and Statsig sources have none; with the constant, `metrics convert` can give every metric the data source key as its event key. See [The constant event key](../../docs/cli-reference.md#the-constant-event-key).
 4. Creates the LD data source with the wrapped query's column schema
 
-An existing data source is never recreated. One that already projects the constant is skipped. One that does not is skipped with a warning, unless `--overwrite` is set, in which case its SQL and column mappings are updated in place and the run names the metrics bound to it whose event key no longer matches. On `--resume`, sources recorded in `migration_state.json` are still checked against LD first. If LD's list of data sources cannot be read, Phase 3 stops before creating anything.
+An existing data source is never recreated. One that already projects the constant is skipped, with or without `--overwrite` or a state file (the run warns if its Statsig SQL has changed), and `--constant-event-key=false` never removes the constant from it. One that does not is skipped with a warning, unless `--overwrite` is set. Then the run first reads the project's metrics and, if any bound to the data source (numerator or ratio denominator) use an event key other than the data source key, fails the source and lists them, since they would match no rows after the update; `--force-overwrite` updates it anyway. Otherwise its query, key column, and column list are updated in place, keeping its timestamp, value, and context mappings while the new query returns them. If the metrics cannot be read, it is not updated. Statsig sources whose names map to the same key all fail and are left out of `source-mapping.json`. On `--resume`, sources recorded in `migration_state.json` are still checked against LD first. If LD's list of data sources cannot be read, Phase 3 stops before creating anything.
 
 After every data source is created, writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key. The subcommand then prints the recommended `metrics convert --source-mapping source-mapping.json` command for the user (or you) to run next.
 
@@ -212,7 +213,13 @@ This can happen when recreating a previously deleted data source. Try with a dif
 Expected and safe — 409 conflicts are treated as skips. The tool is idempotent. The data source still appears in `source-mapping.json` so the downstream `metrics convert` step can find it.
 
 ### "already exists without the constant event-key column"
-The data source was created before the constant event key (or by hand), so metrics converted against it get event keys that match none of its rows. Rerun with `--overwrite` to update it in place; LD has no way to delete a metric data source. Then fix the event keys of any metrics the run names (set them to the data source key).
+The data source was created before the constant event key (or by hand), so metrics converted against it get event keys that match none of its rows. If this tool created it, rerun with `--overwrite` to update it in place (LD has no way to delete a metric data source); preview first with `--dry-run --overwrite` and LD credentials. If it was built by hand and its key column holds real event names, leave it.
+
+### "not updated: N metric(s) bound to it use an event key other than ..."
+`--overwrite` refused the data source because those metrics would match no rows once its key column holds only the data source key. Metrics created by older versions of this tool usually match nothing already. Rerun with `--force-overwrite` to update it anyway, then set each listed metric's event key to the data source key.
+
+### "all map to the LaunchDarkly data source key"
+Two or more Statsig source names sanitize to the same key. None of them is created or written to `source-mapping.json`. Rename all but one in Statsig and rerun.
 
 ### "source SQL contains more than one statement" / "uses Statsig macros" / "neither SQL nor a table name"
 The source SQL cannot be nested in the wrapper. Make it a single `SELECT`, replace `{statsig_*}` date macros with literal dates (LD does not expand them), or give the Statsig source SQL or a table, then rerun. `--dry-run` writes the wrapped SQL to `data-source-bodies.json` so it can be checked in the warehouse first.
@@ -257,6 +264,6 @@ After every run, report to the user:
 ## Important Notes
 
 - **Internal API endpoints**: Data source CRUD uses `/internal/` LD endpoints. These accept API key auth but are not part of the public API and may change.
-- **Idempotent re-runs**: Existing entities are detected and skipped. Re-running is always safe. `--overwrite` is the only way an existing data source is changed.
+- **Idempotent re-runs**: Existing entities are detected and skipped. Re-running is always safe. `--overwrite` (or `--force-overwrite`) is the only way an existing data source is changed, and only one without the constant event key.
 - **State file**: `migration_state.json` tracks progress for `--resume`. Delete it to start fresh.
 - **`source-mapping.json` is the handoff contract**: every Statsig metric source name maps to one LD data source key. `metrics convert --source-mapping source-mapping.json` reads this exact file. Don't rename or edit it unless you know what you're doing.
