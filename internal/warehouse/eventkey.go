@@ -3,6 +3,7 @@ package warehouse
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
@@ -284,21 +285,96 @@ func PinConstantKeyColumn(cm map[string]any, column string, realColumns []map[st
 	}
 }
 
-// reConstantKeyWrapper matches the head of WrapWithConstantEventKey's output.
-// It tolerates the changes an editor or the LaunchDarkly UI can make to saved
-// SQL (CRLF line endings, re-indentation, keyword case, a quoted alias), so a
-// source that still projects the constant is not mistaken for one that does not.
-var reConstantKeyWrapper = regexp.MustCompile(`(?i)^\s*SELECT\s+\*\s*,\s*'((?:[^']|'')*)'\s+AS\s+"?([A-Za-z0-9_]+)"?\s+FROM\s*\(`)
+// reConstantKeyHead matches the head of WrapWithConstantEventKey's output, from
+// its first significant character. It tolerates the changes an editor or the
+// LaunchDarkly UI can make to saved SQL (CRLF line endings, re-indentation,
+// keyword case, a quoted alias), so a source that still projects the constant
+// is not mistaken for one that does not.
+var reConstantKeyHead = regexp.MustCompile("(?i)^SELECT\\s+\\*\\s*,\\s*'((?:[^']|'')*)'\\s+AS\\s+[\"`]?([A-Za-z0-9_]+)[\"`]?\\s+FROM\\s*\\(")
+
+// reConstantKeyTail matches what may follow the wrapper's closing parenthesis,
+// with comments already blanked: the derived-table alias and terminators.
+var reConstantKeyTail = regexp.MustCompile("(?i)^\\s*AS\\s+([\"`]?)" + constantEventKeyAlias + "([\"`]?)[\\s;]*$")
+
+// ConstantKeyWrapper is a data source query read back as the output of
+// WrapWithConstantEventKey.
+type ConstantKeyWrapper struct {
+	// EventKey is the projected literal.
+	EventKey string
+	// Column is the projected column's name as written in the SQL.
+	Column string
+	// Inner is the wrapped source SQL, trimmed.
+	Inner string
+}
+
+// ParseConstantKeyWrapper reads a data source query as the output of
+// WrapWithConstantEventKey. It accepts the query only when, after leading
+// whitespace and comments, the whole statement is
+// SELECT *, '<literal>' AS <column> FROM ( <inner> ) AS ld_src, followed by
+// nothing but whitespace, comments, or semicolons, and the "(" after FROM is
+// closed by the final ")". Parentheses inside strings, quoted identifiers, and
+// comments do not count. So a UNION of literal-tagged subqueries, which starts
+// the same way, is not read as one constant.
+func ParseConstantKeyWrapper(sqlQuery, whType string) (ConstantKeyWrapper, bool) {
+	scan, err := scanSQL(sqlQuery, whType)
+	if err != nil || len(scan.significant) == 0 {
+		return ConstantKeyWrapper{}, false
+	}
+	start := scan.significant[0]
+	head := reConstantKeyHead.FindStringSubmatchIndex(sqlQuery[start:])
+	if head == nil {
+		return ConstantKeyWrapper{}, false
+	}
+	// The "(" closing the head must be structural, not inside a string the
+	// head regex and the lexer read differently.
+	open := start + head[1] - 1
+	idx, found := slices.BinarySearch(scan.significant, open)
+	if !found {
+		return ConstantKeyWrapper{}, false
+	}
+	closing := -1
+	depth := 0
+	for _, pos := range scan.significant[idx:] {
+		switch sqlQuery[pos] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		if depth == 0 {
+			closing = pos
+			break
+		}
+	}
+	if closing < 0 {
+		return ConstantKeyWrapper{}, false
+	}
+	tail := reConstantKeyTail.FindStringSubmatch(scan.code[closing+1:])
+	if tail == nil || tail[1] != tail[2] {
+		return ConstantKeyWrapper{}, false
+	}
+	return ConstantKeyWrapper{
+		EventKey: strings.ReplaceAll(sqlQuery[start+head[2]:start+head[3]], "''", "'"),
+		Column:   sqlQuery[start+head[4] : start+head[5]],
+		Inner:    strings.TrimSpace(sqlQuery[open+1 : closing]),
+	}, true
+}
 
 // ParseConstantEventKey reports the event key a data source's SQL projects as a
-// constant, when the SQL was produced by WrapWithConstantEventKey and the data
-// source's key column is that projected column.
-func ParseConstantEventKey(sqlQuery, keyColumn string) (string, bool) {
-	m := reConstantKeyWrapper.FindStringSubmatch(sqlQuery)
-	if m == nil || !strings.EqualFold(m[2], strings.TrimSpace(keyColumn)) {
+// constant, when the SQL was produced by WrapWithConstantEventKey (see
+// ParseConstantKeyWrapper) and the data source's key column is that projected
+// column. whType selects the warehouse's comment and quoting rules.
+func ParseConstantEventKey(sqlQuery, keyColumn, whType string) (string, bool) {
+	w, ok := ParseConstantKeyWrapper(sqlQuery, whType)
+	if !ok || !strings.EqualFold(w.Column, strings.TrimSpace(keyColumn)) {
 		return "", false
 	}
-	return strings.ReplaceAll(m[1], "''", "'"), true
+	return w.EventKey, true
+}
+
+// SameSQL reports whether two queries are equal ignoring whitespace runs.
+func SameSQL(a, b string) bool {
+	return strings.Join(strings.Fields(a), " ") == strings.Join(strings.Fields(b), " ")
 }
 
 func uniqueStrings(in []string) []string {

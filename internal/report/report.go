@@ -66,6 +66,16 @@ type RunOptions struct {
 	// RegisteredAnalysisUnits is nil when the lookup did not run, meaning no unit
 	// was verified against the project.
 	RegisteredAnalysisUnits []string `json:"registered_analysis_units"`
+
+	// AssumeConstantEventKey records --assume-constant-event-key.
+	AssumeConstantEventKey bool `json:"assume_constant_event_key"`
+
+	// DataSourcesFetched is false when the LaunchDarkly data sources were not
+	// read (no binding, no credentials, or a failed dry-run read), so no event
+	// key or column came from LaunchDarkly. ConstantKeyDataSources counts those
+	// read back as projecting the constant event key, not ones assumed.
+	DataSourcesFetched     bool `json:"data_sources_fetched"`
+	ConstantKeyDataSources int  `json:"constant_key_data_sources"`
 }
 
 // TypeBreakdown tallies conversion outcomes for a single Statsig metric type.
@@ -338,6 +348,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 		"statsig_name", "statsig_type", "statsig_id", "status", "ld_key", "ld_project", "warnings", "reason",
 		"warning_codes", "lossy_codes", "ld_data_source", "analysis_units",
 		"statsig_rollup_time_window", "statsig_source_name", "filters_applied", "filters_blocked",
+		"blocking_codes",
 	}
 	if err := cw.Write(header); err != nil {
 		return err
@@ -356,7 +367,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 		row := []string{m.StatsigName, m.StatsigType, m.StatsigID, m.Status, m.LDKey, m.LDProject, warnings, m.Reason,
 			strings.Join(m.WarningCodes, " "), strings.Join(m.LossyCodes, " "), m.LDDataSource,
 			strings.Join(m.AnalysisUnits, " "), m.StatsigRollupTimeWindow, m.StatsigSourceName,
-			strconv.Itoa(applied), strconv.Itoa(blocked)}
+			strconv.Itoa(applied), strconv.Itoa(blocked), strings.Join(m.BlockingCodes, " ")}
 		if err := cw.Write(row); err != nil {
 			return err
 		}

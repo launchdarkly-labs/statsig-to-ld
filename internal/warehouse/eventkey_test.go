@@ -140,7 +140,7 @@ func TestWrapWithConstantEventKey_Shapes(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("got\n%s\nwant\n%s", got, tt.want)
 			}
-			if key, ok := ParseConstantEventKey(got, "ld_event_key"); !ok || key != "checkout-events" {
+			if key, ok := ParseConstantEventKey(got, "ld_event_key", "snowflake"); !ok || key != "checkout-events" {
 				t.Errorf("ParseConstantEventKey = %q, %v; want checkout-events, true", key, ok)
 			}
 		})
@@ -259,26 +259,56 @@ func TestParseConstantEventKey_ToleratesEditedSQL(t *testing.T) {
 		"quoted alias":       "SELECT *, 'k' AS \"LD_EVENT_KEY\" FROM (\nSELECT 1\n) AS ld_src",
 		"no space before (":  "SELECT *,'k' AS LD_EVENT_KEY FROM(SELECT 1) AS ld_src",
 		"trailing semicolon": "SELECT *, 'k' AS LD_EVENT_KEY FROM (\nSELECT 1\n) AS ld_src;\n",
+		"leading comment":    "-- migrated from Statsig\n/* do not edit */ SELECT *, 'k' AS LD_EVENT_KEY FROM (\nSELECT 1\n) AS ld_src",
+		"trailing comment":   "SELECT *, 'k' AS LD_EVENT_KEY FROM (\nSELECT 1\n) AS \"ld_src\" ; -- done",
+		"parens in strings":  "SELECT *, 'k' AS LD_EVENT_KEY FROM (\nSELECT ')' AS a, \"b)\" FROM t -- )\n) AS LD_SRC",
 	} {
-		if key, ok := ParseConstantEventKey(sql, "LD_EVENT_KEY"); !ok || key != "k" {
+		if key, ok := ParseConstantEventKey(sql, "LD_EVENT_KEY", "snowflake"); !ok || key != "k" {
 			t.Errorf("%s: got %q, %v; want k, true", name, key, ok)
 		}
 	}
-	if key, ok := ParseConstantEventKey("SELECT *, 'it''s' AS LD_EVENT_KEY FROM (SELECT 1) AS ld_src", "LD_EVENT_KEY"); !ok || key != "it's" {
+	if key, ok := ParseConstantEventKey("SELECT *, 'it''s' AS LD_EVENT_KEY FROM (SELECT 1) AS ld_src", "LD_EVENT_KEY", "snowflake"); !ok || key != "it's" {
 		t.Errorf("escaped quote: got %q, %v", key, ok)
 	}
 }
 
 func TestParseConstantEventKey_RejectsOtherSQL(t *testing.T) {
-	if _, ok := ParseConstantEventKey("SELECT *, 'add_to_cart' AS event_name, 1 AS event_value FROM t", "EVENT_NAME"); ok {
+	if _, ok := ParseConstantEventKey("SELECT *, 'add_to_cart' AS event_name, 1 AS event_value FROM t", "EVENT_NAME", "snowflake"); ok {
 		t.Error("a hand-written constant column is not the CLI wrapper")
 	}
 	wrapped := "SELECT *, 'k' AS LD_EVENT_KEY FROM (\nSELECT 1\n) AS ld_src"
-	if _, ok := ParseConstantEventKey(wrapped, "EVENT_KEY"); ok {
+	if _, ok := ParseConstantEventKey(wrapped, "EVENT_KEY", "snowflake"); ok {
 		t.Error("key column pointing elsewhere must not count as constant")
 	}
-	if _, ok := ParseConstantEventKey("SELECT * FROM t", "LD_EVENT_KEY"); ok {
+	if _, ok := ParseConstantEventKey("SELECT * FROM t", "LD_EVENT_KEY", "snowflake"); ok {
 		t.Error("plain SQL must not count as constant")
+	}
+	for name, sql := range map[string]string{
+		"union of tagged subqueries": "SELECT *, 'signup' AS EVENT_NAME FROM (SELECT user_id, ts FROM signups) AS a\nUNION ALL\nSELECT *, 'purchase' AS EVENT_NAME FROM (SELECT user_id, ts FROM purchases) AS b",
+		"union after ld_src":         "SELECT *, 'k' AS EVENT_NAME FROM (SELECT 1) AS ld_src UNION ALL SELECT *, 'j' AS EVENT_NAME FROM (SELECT 2) AS ld_src",
+		"where after ld_src":         "SELECT *, 'k' AS EVENT_NAME FROM (SELECT 1) AS ld_src WHERE 1 = 1",
+		"other alias":                "SELECT *, 'k' AS EVENT_NAME FROM (SELECT 1) AS src",
+		"unclosed":                   "SELECT *, 'k' AS EVENT_NAME FROM (SELECT 1",
+		"mismatched alias quotes":    "SELECT *, 'k' AS EVENT_NAME FROM (SELECT 1) AS \"ld_src",
+	} {
+		if key, ok := ParseConstantEventKey(sql, "EVENT_NAME", "snowflake"); ok {
+			t.Errorf("%s: read as constant %q", name, key)
+		}
+	}
+}
+
+func TestParseConstantKeyWrapper_InnerAndWarehouseComments(t *testing.T) {
+	w, ok := ParseConstantKeyWrapper("SELECT *, 'orders' AS LD_EVENT_KEY FROM (\n  SELECT * FROM t WHERE (a) = 1 -- (\n) AS ld_src", "snowflake")
+	if !ok || w.EventKey != "orders" || w.Column != "LD_EVENT_KEY" || w.Inner != "SELECT * FROM t WHERE (a) = 1 -- (" {
+		t.Errorf("got %+v, %v", w, ok)
+	}
+	// "#" starts a comment only on BigQuery.
+	sql := "# note\nSELECT *, 'k' AS ld_event_key FROM (SELECT 1) AS ld_src"
+	if _, ok := ParseConstantKeyWrapper(sql, "bigquery"); !ok {
+		t.Error("bigquery: leading # comment not skipped")
+	}
+	if _, ok := ParseConstantKeyWrapper(sql, "snowflake"); ok {
+		t.Error("snowflake: # is not a comment")
 	}
 }
 

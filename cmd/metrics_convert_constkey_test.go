@@ -35,18 +35,18 @@ func TestFetchDataSourceKeys_ListFailureStopsRealRun(t *testing.T) {
 	defer srv.Close()
 	ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
 
-	if _, _, err := fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "", false, false); err == nil || !strings.Contains(err.Error(), "403") {
+	if _, err := fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "", false, false); err == nil || !strings.Contains(err.Error(), "403") {
 		t.Fatalf("real run: err = %v, want the 403", err)
 	}
 
-	keys, _, err := fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "", false, true)
-	if err != nil || len(keys) != 0 {
-		t.Errorf("dry run: keys=%v err=%v, want a warning and no keys", keys, err)
+	info, err := fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "", false, true)
+	if err != nil || len(info.keys) != 0 || info.fetched {
+		t.Errorf("dry run: info=%+v err=%v, want a warning, no keys, and not fetched", info, err)
 	}
 
-	keys, _, err = fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "", true, true)
-	if err != nil || keys["checkout-events"] != "checkout-events" || keys["page-views"] != "page-views" {
-		t.Errorf("dry run with assume: keys=%v err=%v, want every mapped source assumed", keys, err)
+	info, err = fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "", true, true)
+	if err != nil || info.keys["checkout-events"] != "checkout-events" || info.keys["page-views"] != "page-views" || info.constant != 0 {
+		t.Errorf("dry run with assume: info=%+v err=%v, want every mapped source assumed and none counted as read", info, err)
 	}
 }
 
@@ -68,12 +68,13 @@ func TestFetchDataSourceKeys_ReadsLaunchDarklyAndAssumesOnlyMissingSources(t *te
 	defer srv.Close()
 	ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
 
-	keys, cols, err := fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "hand-built", false, false)
+	info, err := fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "hand-built", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 1 || keys["checkout-events"] != "checkout-events" {
-		t.Errorf("keys = %v, want only the wrapped checkout-events", keys)
+	keys, cols := info.keys, info.cols
+	if len(keys) != 1 || keys["checkout-events"] != "checkout-events" || !info.fetched || info.constant != 1 {
+		t.Errorf("info = %+v, want only the wrapped checkout-events, read from LaunchDarkly", info)
 	}
 	if !slices.Equal(cols["checkout-events"], []string{"TS", "ORDER_TOTAL", "LD_EVENT_KEY"}) || len(cols["hand-built"]) != 1 {
 		t.Errorf("cols = %v", cols)
@@ -81,10 +82,11 @@ func TestFetchDataSourceKeys_ReadsLaunchDarklyAndAssumesOnlyMissingSources(t *te
 
 	// page-views is mapped but not in LaunchDarkly yet; hand-built exists and is
 	// not wrapped, which LaunchDarkly reports, so the assumption leaves it alone.
-	keys, _, err = fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "hand-built", true, false)
+	info, err = fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "hand-built", true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+	keys = info.keys
 	if keys["page-views"] != "page-views" || keys["checkout-events"] != "checkout-events" {
 		t.Errorf("keys = %v, want page-views assumed", keys)
 	}
@@ -94,12 +96,51 @@ func TestFetchDataSourceKeys_ReadsLaunchDarklyAndAssumesOnlyMissingSources(t *te
 }
 
 func TestFetchDataSourceKeys_AssumeWithoutCredentials(t *testing.T) {
-	keys, cols, err := fetchDataSourceKeys(context.Background(), nil, checkoutMapping, "orders", true, true)
+	info, err := fetchDataSourceKeys(context.Background(), nil, checkoutMapping, "orders", true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 3 || len(cols) != 0 {
-		t.Errorf("keys=%v cols=%v, want all three mapped sources assumed with unknown columns", keys, cols)
+	if len(info.keys) != 3 || len(info.cols) != 0 || info.fetched {
+		t.Errorf("info = %+v, want all three mapped sources assumed with unknown columns", info)
+	}
+}
+
+// A hand-built data source that unions literal-tagged subqueries starts like
+// the wrapper but has a multi-valued key column. Read as constant-key, every
+// metric on it would get the first branch's literal and silently drop the
+// other branches' rows.
+func TestFetchDataSourceKeys_UnionOfTaggedSubqueriesIsNotConstantKey(t *testing.T) {
+	unionSQL := "SELECT *, 'signup' AS EVENT_NAME FROM (SELECT user_id, ts FROM signups) AS a\n" +
+		"UNION ALL\nSELECT *, 'purchase' AS EVENT_NAME FROM (SELECT user_id, ts FROM purchases) AS b"
+	list, _ := json.Marshal(map[string]any{"items": []any{map[string]any{
+		"key": "events", "sqlQuery": unionSQL, "integrationKey": "snowflake-experimentation",
+		"columnMappings": map[string]any{"keyColumn": "EVENT_NAME", "columns": []any{
+			map[string]any{"name": "USER_ID"}, map[string]any{"name": "TS"}, map[string]any{"name": "EVENT_NAME"}}},
+	}}})
+	srv := dataSourceListServer(t, http.StatusOK, string(list))
+	defer srv.Close()
+	ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
+	mapping := map[string]string{"Events": "events"}
+	info, err := fetchDataSourceKeys(context.Background(), ld, mapping, "", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.keys) != 0 {
+		t.Fatalf("constant keys = %v, want none", info.keys)
+	}
+
+	var sg statsig.Metric
+	raw := `{"type":"user_warehouse","name":"Purchases","id":"Purchases::user_warehouse","directionality":"increase",
+	  "warehouseNative":{"aggregation":"count","metricSourceName":"Events"}}`
+	if err := json.Unmarshal([]byte(raw), &sg); err != nil {
+		t.Fatal(err)
+	}
+	res, err := converter.Convert(&sg, converter.Options{SourceMapping: mapping, ConstantEventKeys: info.keys, DataSourceColumns: info.cols})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LDMetric.EventKey == "signup" {
+		t.Errorf("eventKey = %q, the first union branch's literal", res.LDMetric.EventKey)
 	}
 }
 
@@ -187,7 +228,7 @@ func TestProcessMetric_ExistingMetricWithLegacyEventKeyIsReported(t *testing.T) 
 			if len(rpt.Metrics) != 1 || rpt.Metrics[0].Status != report.StatusSkippedExisting {
 				t.Fatalf("report = %+v, want one skipped_existing entry", rpt.Metrics)
 			}
-			stale := staleExistingMetrics(rpt)
+			stale := existingMetricsWithCode(rpt, converter.WarnExistingEventKeyMismatch)
 			if tc.wantWarning {
 				if len(stale) != 1 || !strings.Contains(rpt.Metrics[0].Warnings[0], `"order_total"`) {
 					t.Errorf("stale=%v warnings=%v, want the metric named with its event key", stale, rpt.Metrics[0].Warnings)
@@ -196,5 +237,40 @@ func TestProcessMetric_ExistingMetricWithLegacyEventKeyIsReported(t *testing.T) 
 				t.Errorf("stale=%v warnings=%v, want none", stale, rpt.Metrics[0].Warnings)
 			}
 		})
+	}
+}
+
+// A read-back that fails is not a mismatch: it gets its own code and is not
+// listed among the metrics that match no rows.
+func TestProcessMetric_ExistingMetricReadBackFailureIsUnverified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"code":"forbidden"}`)
+	}))
+	defer srv.Close()
+
+	var m statsig.Metric
+	raw := `{"type":"user_warehouse","name":"Order Total","id":"Order Total::user_warehouse","directionality":"increase",
+	  "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout Events","valueColumn":"order_total"}}`
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	rpt := report.New()
+	ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
+	processMetric(context.Background(), m, constKeyConvOpts(), ld, rpt, "proj", false, 1, 1, new(int64))
+
+	if len(rpt.Metrics) != 1 || !slices.Equal(rpt.Metrics[0].WarningCodes, []string{converter.WarnExistingMetricUnverified}) {
+		t.Fatalf("report = %+v, want one entry coded %s", rpt.Metrics, converter.WarnExistingMetricUnverified)
+	}
+	if stale := existingMetricsWithCode(rpt, converter.WarnExistingEventKeyMismatch); len(stale) != 0 {
+		t.Errorf("unverified metric counted as a mismatch: %v", stale)
+	}
+	if unread := existingMetricsWithCode(rpt, converter.WarnExistingMetricUnverified); len(unread) != 1 {
+		t.Errorf("unverified = %v, want the metric", unread)
 	}
 }

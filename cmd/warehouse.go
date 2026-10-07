@@ -744,7 +744,8 @@ func (e *migrationEngine) warn(msg string) {
 // event key and uses it as its key column.
 func hasConstantEventKey(ds map[string]any) bool {
 	cm := jsonutil.GetMap(ds, "columnMappings")
-	_, ok := warehouse.ParseConstantEventKey(jsonutil.GetStr(ds, "sqlQuery"), jsonutil.GetStr(cm, "keyColumn"))
+	whType := warehouse.WarehouseTypeForIntegration(jsonutil.GetStr(ds, "integrationKey"))
+	_, ok := warehouse.ParseConstantEventKey(jsonutil.GetStr(ds, "sqlQuery"), jsonutil.GetStr(cm, "keyColumn"), whType)
 	return ok
 }
 
@@ -765,7 +766,8 @@ func (e *migrationEngine) updateDataSource(existing, body map[string]any, name s
 	e.report.DataSources.Updated++
 
 	cm := jsonutil.GetMap(body, "columnMappings")
-	if constKey, ok := warehouse.ParseConstantEventKey(jsonutil.GetStr(body, "sqlQuery"), jsonutil.GetStr(cm, "keyColumn")); ok {
+	whType := warehouse.WarehouseTypeForIntegration(jsonutil.GetStr(body, "integrationKey"))
+	if constKey, ok := warehouse.ParseConstantEventKey(jsonutil.GetStr(body, "sqlQuery"), jsonutil.GetStr(cm, "keyColumn"), whType); ok {
 		e.warnStaleMetrics(key, constKey)
 	}
 }

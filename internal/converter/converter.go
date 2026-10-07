@@ -111,6 +111,11 @@ const (
 	WarnCloudMetricConstantKey    = "cloud_metric_on_constant_key_source"
 	WarnUnfilteredConstantKey     = "constant_event_key_unfiltered"
 
+	// Existing metrics, read back when a create conflicts. Set by the command,
+	// not by Convert, but kept here so every report code is in one place.
+	WarnExistingEventKeyMismatch = "existing_metric_event_key_mismatch"
+	WarnExistingMetricUnverified = "existing_metric_unverified"
+
 	// Filter conversion.
 	WarnFilterApplied            = "filter_applied"
 	WarnFilterNoDataSource       = "filter_no_data_source"

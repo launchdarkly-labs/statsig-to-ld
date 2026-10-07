@@ -371,3 +371,35 @@ func TestJSON_IncludesDiagnostics(t *testing.T) {
 		t.Errorf("second filter term = %+v, want blocked on sql_filter", m.Filters[1])
 	}
 }
+
+// Blocking codes are the last CSV column, so earlier column positions are
+// unchanged for existing readers.
+func TestWriteCSV_BlockingCodesColumn(t *testing.T) {
+	r := New()
+	r.AddSkippedBlocked("pro", "count", "pro::count", "NOT CREATED", nil, Diagnostics{BlockingCodes: []string{"constant_event_key_unfiltered"}})
+	r.Finalize(1)
+	var buf bytes.Buffer
+	if err := r.WriteCSV(&buf); err != nil {
+		t.Fatal(err)
+	}
+	records, err := csv.NewReader(strings.NewReader(buf.String())).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := len(records[0]) - 1
+	if records[0][last] != "blocking_codes" || records[1][last] != "constant_event_key_unfiltered" {
+		t.Errorf("last column = %q / %q", records[0][last], records[1][last])
+	}
+}
+
+func TestRunOptions_RecordsDataSourceRead(t *testing.T) {
+	raw, err := json.Marshal(RunOptions{AssumeConstantEventKey: true, DataSourcesFetched: true, ConstantKeyDataSources: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"assume_constant_event_key":true`, `"data_sources_fetched":true`, `"constant_key_data_sources":2`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("%s missing %s", raw, want)
+		}
+	}
+}

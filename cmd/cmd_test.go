@@ -36,6 +36,7 @@ func TestConvertCmd_FlagsBound(t *testing.T) {
 		"extra-analysis-units", "widen-analysis-units", "ld-maintainer",
 		"output", "format", "default-unit",
 		"include-tags", "include-types", "concurrency", "verbose",
+		"assume-constant-event-key", "convert-lossy", "list", "dump-raw",
 	}
 	for _, name := range expected {
 		if convertCmd.Flags().Lookup(name) == nil {
