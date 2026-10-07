@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -92,6 +94,43 @@ func TestFetchDataSourceKeys_ReadsLaunchDarklyAndAssumesOnlyMissingSources(t *te
 	}
 	if _, ok := keys["hand-built"]; ok {
 		t.Error("a data source LaunchDarkly reports as not wrapped must not be assumed constant-key")
+	}
+}
+
+// A mapped data source that exists without the constant event key gets one
+// summary line telling the tester to add it, since metrics on it keep Statsig
+// event keys and usually match no rows.
+func TestFetchDataSourceKeys_WarnsOnceForSourcesWithoutConstantKey(t *testing.T) {
+	list, _ := json.Marshal(map[string]any{"items": []any{
+		map[string]any{
+			"key":      "checkout-events",
+			"sqlQuery": "SELECT *, 'checkout-events' AS LD_EVENT_KEY FROM (\nSELECT * FROM analytics.orders\n) AS ld_src",
+			"columnMappings": map[string]any{"keyColumn": "LD_EVENT_KEY", "columns": []any{
+				map[string]any{"name": "TS"}, map[string]any{"name": "LD_EVENT_KEY"},
+			}},
+		},
+		map[string]any{
+			"key": "page-views", "sqlQuery": "SELECT * FROM analytics.page_views",
+			"columnMappings": map[string]any{"keyColumn": "EVENT_NAME", "columns": []any{map[string]any{"name": "EVENT_NAME"}}},
+		},
+	}})
+	srv := dataSourceListServer(t, http.StatusOK, string(list))
+	defer srv.Close()
+	ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
+
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	if _, err := fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Count(out, "WARNING:") != 1 || !strings.Contains(out, "1 mapped data source(s) do not have the constant event key: page-views") || !strings.Contains(out, "warehouse --overwrite") {
+		t.Errorf("log = %q, want one warning naming page-views and pointing at warehouse --overwrite", out)
+	}
+	if strings.Contains(out, "checkout-events") {
+		t.Errorf("log = %q, the wrapped data source must not be named", out)
 	}
 }
 

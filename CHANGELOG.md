@@ -59,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   literal-tagged subqueries does not count), it sets every warehouse-native metric's event key (and a ratio
   denominator's event name) to the data source key, recorded as note code `constant_event_key` rather than a warning,
   sends the Statsig value column as `valueColumn` on numeric terms, and rewrites value, count-distinct, and filter
-  columns to the case the data source stores them in. `--constant-event-key=false` restores the old behavior. Source
+  columns to the case the data source stores them in. When a mapped data source exists without the constant, one line
+  names it and says to run `warehouse --overwrite` first. `--constant-event-key=false` restores the old behavior. Source
   SQL that cannot be nested (more than one statement, a Statsig date macro, or no SQL or table at all) fails that
   source with the reason. A `warehouse --dry-run` writes the wrapped bodies to `data-source-bodies.json` for review.
 

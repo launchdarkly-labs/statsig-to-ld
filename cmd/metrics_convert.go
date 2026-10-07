@@ -645,10 +645,13 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 		}
 	}
 
-	var missing []string
+	var missing, withoutKey []string
 	for _, ds := range mappedDataSources(sourceMapping, defaultDS) {
 		switch {
 		case listed[ds]:
+			if _, ok := info.keys[ds]; !ok {
+				withoutKey = append(withoutKey, ds)
+			}
 		case assume:
 			info.keys[ds] = ds
 			info.assumed = append(info.assumed, ds)
@@ -659,6 +662,10 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 	if len(missing) > 0 {
 		log.Printf("WARNING: %d mapped data source(s) do not exist in the LaunchDarkly project: %s. LaunchDarkly rejects metrics bound to them. Run `warehouse` first, or preview with --dry-run --assume-constant-event-key.",
 			len(missing), strings.Join(missing, ", "))
+	}
+	if len(withoutKey) > 0 {
+		log.Printf("WARNING: %d mapped data source(s) do not have the constant event key: %s. Warehouse-native metrics on them keep Statsig event keys, which usually match none of their rows. Run `warehouse --overwrite` first to add it.",
+			len(withoutKey), strings.Join(withoutKey, ", "))
 	}
 	return info, nil
 }

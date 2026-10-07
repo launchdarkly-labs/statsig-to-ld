@@ -1009,7 +1009,7 @@ func (e *migrationEngine) staleBoundMetrics(dsKey, constKey string) ([]string, e
 // while an API error's response body waits for the report.
 func (e *migrationEngine) failDataSource(key, name string, err error) {
 	first, _, _ := strings.Cut(err.Error(), "\n")
-	output.Fail(jsonutil.Truncate(first, 300))
+	output.Fail(first)
 	e.state.AddError("data_source", key, err.Error())
 	e.report.DataSources.Failed++
 	e.report.Errors = append(e.report.Errors, fmt.Sprintf("Data source \"%s\": %v", name, err))
