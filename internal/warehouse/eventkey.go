@@ -178,8 +178,17 @@ func WrapWithConstantEventKey(sourceSQL, eventKey, column, whType string) (strin
 	if err != nil {
 		return "", err
 	}
-	literal := "'" + strings.ReplaceAll(eventKey, "'", "''") + "'"
-	return fmt.Sprintf("SELECT *, %s AS %s FROM (\n%s\n) AS %s", literal, column, inner, constantEventKeyAlias), nil
+	return fmt.Sprintf("SELECT *, %s AS %s FROM (\n%s\n) AS %s", constantKeyLiteral(eventKey, whType), column, inner, constantEventKeyAlias), nil
+}
+
+// constantKeyLiteral is the projected value. Redshift types an uncast string literal in
+// a subquery as "unknown", which outer GROUP BYs and comparisons can reject.
+func constantKeyLiteral(eventKey, whType string) string {
+	lit := "'" + strings.ReplaceAll(eventKey, "'", "''") + "'"
+	if whType == "redshift" {
+		return "CAST(" + lit + " AS VARCHAR(256))"
+	}
+	return lit
 }
 
 // ChooseEventKeyColumn returns base, or base_N if a column already has that name
@@ -248,7 +257,21 @@ func PinConstantKeyColumn(cm map[string]any, column string, realColumns []map[st
 
 // reConstantKeyHead matches the wrapper's head, tolerating edits the LaunchDarkly UI or
 // an editor may make (CRLF, re-indentation, keyword case, a quoted alias).
-var reConstantKeyHead = regexp.MustCompile("(?i)^SELECT\\s+\\*\\s*,\\s*'((?:[^']|'')*)'\\s+AS\\s+[\"`]?([A-Za-z0-9_]+)[\"`]?\\s+FROM\\s*\\(")
+var reConstantKeyHead = regexp.MustCompile(`(?i)^SELECT\s+\*\s*,\s*` + reConstantKeyLiteral + `\s+AS\s+` + reQuote + `([A-Za-z0-9_]+)` + reQuote + `\s+FROM\s*\(`)
+
+// reConstantKeyLiteral matches the projected value, plain or cast as on Redshift.
+const reConstantKeyLiteral = `(?:'((?:[^']|'')*)'|CAST\s*\(\s*'((?:[^']|'')*)'\s+AS\s+VARCHAR\s*(?:\(\s*\d+\s*\))?\s*\))`
+
+const reQuote = "[\"`]?"
+
+// headParts returns the literal and column of a head match on s.
+func headParts(s string, m []int) (literal, column string) {
+	lit := m[2:4]
+	if lit[0] < 0 {
+		lit = m[4:6]
+	}
+	return strings.ReplaceAll(s[lit[0]:lit[1]], "''", "'"), s[m[6]:m[7]]
+}
 
 // reConstantKeyTail matches the alias and terminators after the closing ")".
 var reConstantKeyTail = regexp.MustCompile("(?i)^\\s*AS\\s+([\"`]?)" + constantEventKeyAlias + "([\"`]?)[\\s;]*$")
@@ -300,9 +323,10 @@ func ParseConstantKeyWrapper(sqlQuery, whType string) (ConstantKeyWrapper, bool)
 	if tail == nil || tail[1] != tail[2] {
 		return ConstantKeyWrapper{}, false
 	}
+	literal, column := headParts(sqlQuery[start:], head)
 	return ConstantKeyWrapper{
-		EventKey: strings.ReplaceAll(sqlQuery[start+head[2]:start+head[3]], "''", "'"),
-		Column:   sqlQuery[start+head[4] : start+head[5]],
+		EventKey: literal,
+		Column:   column,
 		Inner:    strings.TrimSpace(sqlQuery[open+1 : closing]),
 	}, true
 }
@@ -328,7 +352,7 @@ const (
 )
 
 // reConstantKeyHeadLoose is reConstantKeyHead with the alias's AS optional.
-var reConstantKeyHeadLoose = regexp.MustCompile("(?i)^SELECT\\s+\\*\\s*,\\s*'((?:[^']|'')*)'\\s*(?:AS\\s+)?[\"`]?([A-Za-z0-9_]+)[\"`]?\\s+FROM\\s*\\(")
+var reConstantKeyHeadLoose = regexp.MustCompile(`(?i)^SELECT\s+\*\s*,\s*` + reConstantKeyLiteral + `\s*(?:AS\s+)?` + reQuote + `([A-Za-z0-9_]+)` + reQuote + `\s+FROM\s*\(`)
 
 // ClassifyConstantKey reads a query and key column against the wrapper. A query that
 // fails the strict match but opens with the wrapper's head for dsKey is
@@ -353,8 +377,7 @@ func ClassifyConstantKey(sqlQuery, keyColumn, dsKey, whType string) (ConstantKey
 	if _, found := slices.BinarySearch(scan.significant, start+head[1]-1); !found {
 		return ConstantKeyWrapper{}, NoConstantKey
 	}
-	literal := strings.ReplaceAll(sqlQuery[start+head[2]:start+head[3]], "''", "'")
-	column := sqlQuery[start+head[4] : start+head[5]]
+	literal, column := headParts(sqlQuery[start:], head)
 	if literal != dsKey || !strings.EqualFold(column, keyColumn) {
 		return ConstantKeyWrapper{}, NoConstantKey
 	}

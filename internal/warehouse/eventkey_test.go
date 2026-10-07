@@ -328,6 +328,38 @@ func TestClassifyConstantKey(t *testing.T) {
 	}
 }
 
+func TestWrapWithConstantEventKey_CastsOnRedshift(t *testing.T) {
+	got, err := WrapWithConstantEventKey("SELECT * FROM public.orders", "checkout-events", "ld_event_key", "redshift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "SELECT *, CAST('checkout-events' AS VARCHAR(256)) AS ld_event_key FROM (\nSELECT * FROM public.orders\n) AS ld_src"
+	if got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
+	}
+	for _, wh := range []string{"snowflake", "bigquery", "databricks"} {
+		out, _ := WrapWithConstantEventKey("SELECT 1", "k", "c", wh)
+		if strings.Contains(out, "CAST(") {
+			t.Errorf("%s: unexpected cast in %q", wh, out)
+		}
+	}
+
+	w, ok := ParseConstantKeyWrapper(got, "redshift")
+	if !ok || w.EventKey != "checkout-events" || w.Column != "ld_event_key" || w.Inner != "SELECT * FROM public.orders" {
+		t.Errorf("parse: %+v, %v", w, ok)
+	}
+	if k, ok := ParseConstantEventKey(got, "ld_event_key", "redshift"); !ok || k != "checkout-events" {
+		t.Errorf("event key: %q, %v", k, ok)
+	}
+	edited := got + "\nWHERE created_at > '2024-01-01'"
+	if w, state := ClassifyConstantKey(edited, "ld_event_key", "checkout-events", "redshift"); state != ConstantKeyEdited || w.EventKey != "checkout-events" {
+		t.Errorf("edited: %+v, %v", w, state)
+	}
+	if _, state := ClassifyConstantKey("SELECT *, CAST('k' AS VARCHAR) ld_event_key FROM (SELECT 1) ld_src", "ld_event_key", "k", "redshift"); state != ConstantKeyEdited {
+		t.Errorf("cast without length or AS: %v", state)
+	}
+}
+
 func TestParseConstantKeyWrapper_InnerAndWarehouseComments(t *testing.T) {
 	w, ok := ParseConstantKeyWrapper("SELECT *, 'orders' AS LD_EVENT_KEY FROM (\n  SELECT * FROM t WHERE (a) = 1 -- (\n) AS ld_src", "snowflake")
 	if !ok || w.EventKey != "orders" || w.Column != "LD_EVENT_KEY" || w.Inner != "SELECT * FROM t WHERE (a) = 1 -- (" {

@@ -52,7 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not guess a key column from the Statsig field names, and converted metrics used the value column or source name as
   their event key, which matched no rows. `warehouse` now wraps each source's SQL as
   `SELECT *, '<data source key>' AS LD_EVENT_KEY FROM (<source SQL>) AS ld_src` (`ld_event_key` on BigQuery,
-  Databricks, and Redshift), previews the wrapped query so the saved columns match it exactly, and makes that column
+  Databricks, and Redshift; on Redshift the literal is cast to `VARCHAR(256)`, since Redshift types an uncast
+  literal in a subquery as `unknown`), previews the wrapped query so the saved columns match it exactly, and makes that column
   the key column. `metrics convert` reads each data source back from LaunchDarkly; for one that projects the constant
   (its key column is the projected column, and its whole query is that wrapper, ignoring comments, or still opens
   with `SELECT *, '<its own key>' AS <key column> FROM (` after an edit in LaunchDarkly; a hand-built `UNION` of
