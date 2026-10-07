@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,9 +23,14 @@ type fakeLD struct {
 	list       string
 	listStatus int
 	// metrics is the items array of the project's metric list; metricsStatus
-	// overrides 200.
+	// overrides 200, and metricsTotal, when set, is the totalCount reported
+	// instead of the number of items.
 	metrics       string
 	metricsStatus int
+	metricsTotal  int
+	// patchStatus and patchBody override the PATCH response.
+	patchStatus int
+	patchBody   string
 	// previewCols are the source's columns as the preview returns them.
 	previewCols string
 
@@ -80,6 +86,11 @@ func (f *fakeLD) server() *httptest.Server {
 			}
 			f.patches[strings.TrimPrefix(r.URL.Path, dsPath+"/")] = ops
 			f.patchCount++
+			if f.patchStatus != 0 {
+				w.WriteHeader(f.patchStatus)
+				_, _ = io.WriteString(w, f.patchBody)
+				return
+			}
 			_, _ = io.WriteString(w, `{}`)
 		case r.URL.Path == "/api/v2/metrics/proj" && r.Method == http.MethodGet:
 			f.metricsReads++
@@ -92,7 +103,18 @@ func (f *fakeLD) server() *httptest.Server {
 			if items == "" {
 				items = "[]"
 			}
-			_, _ = io.WriteString(w, `{"items":`+items+`,"_links":{}}`)
+			var parsed []any
+			if err := json.Unmarshal([]byte(items), &parsed); err != nil {
+				f.t.Fatalf("metrics: %v", err)
+			}
+			total := len(parsed)
+			if f.metricsTotal != 0 {
+				total = f.metricsTotal
+			}
+			if r.URL.Query().Get("offset") != "0" || r.URL.Query().Has("cursor") {
+				f.t.Errorf("metrics read with %q, want offset=0 (the fake holds one page)", r.URL.RawQuery)
+			}
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"items":%s,"_links":{},"totalCount":%d}`, items, total))
 		default:
 			f.t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -195,16 +217,39 @@ func TestPhase3_ExistingUnwrappedSource_WarnsWhatOverwriteWouldDo(t *testing.T) 
 		t.Fatalf("report %+v created=%d patches=%d previews=%d, want one skip and no warehouse or write calls", e.report.DataSources, len(f.created), f.patchCount, len(f.previews))
 	}
 	if len(e.report.Warnings) != 1 {
-		t.Fatalf("warnings = %q, want one", e.report.Warnings)
+		t.Fatalf("warnings = %q, want one summary line", e.report.Warnings)
 	}
 	w := e.report.Warnings[0]
-	for _, want := range []string{"--overwrite would replace its SQL", "refuses when metrics already bound", "built by hand"} {
+	for _, want := range []string{"1 data source(s) already exist without the constant event key", "rerun with --overwrite (it refuses any whose bound metrics use other event keys)", "built by hand"} {
 		if !strings.Contains(w, want) {
 			t.Errorf("warning %q does not contain %q", w, want)
 		}
 	}
-	if strings.Contains(strings.ToLower(w), "rerun with --overwrite") {
-		t.Errorf("warning %q still tells the user to rerun with --overwrite unconditionally", w)
+	if len(e.report.Notes) != 1 || e.report.Notes[0] != (reportNote{Code: noteExistsWithoutConstantKey, DataSource: "checkout-events"}) {
+		t.Errorf("notes = %+v, want the source recorded", e.report.Notes)
+	}
+}
+
+// Many existing sources without the constant print one line between them, not
+// one each.
+func TestPhase3_ExistingUnwrappedSources_OneSummaryLine(t *testing.T) {
+	t.Chdir(t.TempDir())
+	list := `{"items":[
+		{"key":"checkout-events","sqlQuery":"SELECT * FROM analytics.events","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","contexts":{"user":"USER_ID"}}},
+		{"key":"orders","sqlQuery":"SELECT * FROM analytics.orders","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","contexts":{"user":"USER_ID"}}}]}`
+	f := &fakeLD{t: t, list: list}
+	srv := f.server()
+	defer srv.Close()
+
+	e := newPhase3Engine(t, srv.URL, false)
+	orders := checkoutSource()
+	orders["name"] = "Orders"
+	e.metricSources = append(e.metricSources, orders)
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if e.report.DataSources.Skipped != 2 || len(e.report.Warnings) != 1 || !strings.HasPrefix(e.report.Warnings[0], "2 data source(s)") {
+		t.Errorf("report %+v warnings=%q, want two skips and one summary line", e.report.DataSources, e.report.Warnings)
 	}
 }
 
@@ -333,8 +378,8 @@ func TestPhase3_ConstantKeyOffNeverUnwrapsSource(t *testing.T) {
 	if f.patchCount != 0 || e.report.DataSources.Skipped != 1 {
 		t.Fatalf("patches=%v report %+v, want the wrapped source left alone", f.patches, e.report.DataSources)
 	}
-	if len(e.report.Warnings) != 1 || !strings.Contains(e.report.Warnings[0], `"checkout-events"`) || !strings.Contains(e.report.Warnings[0], "match no rows") {
-		t.Errorf("warnings = %q, want one naming the source and why it was not updated", e.report.Warnings)
+	if len(e.report.Warnings) != 0 || len(e.report.Notes) != 1 || e.report.Notes[0].Code != noteKeptConstantKey {
+		t.Errorf("warnings=%q notes=%+v, want no warning and a %s note", e.report.Warnings, e.report.Notes, noteKeptConstantKey)
 	}
 }
 
@@ -363,6 +408,8 @@ func TestPhase3_OverwriteKeepsExistingMappings(t *testing.T) {
 	}
 	ops := f.patches["checkout-events"]
 	want := []struct{ op, path string }{
+		{"test", "/sqlQuery"},
+		{"test", "/columnMappings"},
 		{"add", "/sqlQuery"},
 		{"add", "/columnMappings/keyColumn"},
 		{"replace", "/columnMappings/columns"},
@@ -376,10 +423,10 @@ func TestPhase3_OverwriteKeepsExistingMappings(t *testing.T) {
 			t.Errorf("op %d = %s %s, want %s %s", i, ops[i].Op, ops[i].Path, w.op, w.path)
 		}
 	}
-	if ops[0].Value != wantCheckoutSQL || ops[1].Value != "LD_EVENT_KEY" || ops[3].Value != "ACCOUNT_ID" {
-		t.Errorf("values = %v / %v / %v", ops[0].Value, ops[1].Value, ops[3].Value)
+	if ops[2].Value != wantCheckoutSQL || ops[3].Value != "LD_EVENT_KEY" || ops[5].Value != "ACCOUNT_ID" {
+		t.Errorf("values = %v / %v / %v", ops[2].Value, ops[3].Value, ops[5].Value)
 	}
-	if cols := ops[2].Value.([]any); len(cols) != 6 {
+	if cols := ops[4].Value.([]any); len(cols) != 6 {
 		t.Errorf("columns = %v, want the wrapped preview's 6 columns", cols)
 	}
 	if len(e.report.Warnings) != 0 {
@@ -399,7 +446,10 @@ func TestDataSourcePatch_FallsBackWhenExistingColumnsAreGone(t *testing.T) {
 		"contexts": map[string]string{"user": "USER_ID"},
 		"columns":  []map[string]any{{"name": "TS", "type": "TIMESTAMP_NTZ"}, {"name": "USER_ID", "type": "TEXT"}, {"name": "LD_EVENT_KEY", "type": "TEXT"}},
 	}}
-	ops, notes := dataSourcePatch(existing, body, true)
+	ops, notes, err := dataSourcePatch(existing, body, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []launchdarkly.JSONPatchOp{
 		{Op: "remove", Path: "/tableName"},
 		{Op: "add", Path: "/sqlQuery", Value: "SELECT 1"},
@@ -424,7 +474,7 @@ func TestDataSourcePatch_FallsBackWhenExistingColumnsAreGone(t *testing.T) {
 
 	// No existing context column survives: the contexts are replaced whole.
 	existing["columnMappings"].(map[string]any)["contexts"] = map[string]any{"account": "ACCT"}
-	ops, _ = dataSourcePatch(existing, body, true)
+	ops, _, _ = dataSourcePatch(existing, body, true)
 	last := ops[len(ops)-1]
 	if last.Op != "replace" || last.Path != "/columnMappings/contexts" {
 		t.Errorf("last op = %+v, want replace /columnMappings/contexts", last)
@@ -441,11 +491,28 @@ func TestDataSourcePatch_ConstantKeyOffKeepsKeyColumn(t *testing.T) {
 		"keyColumn": "EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]string{"user": "USER_ID"},
 		"columns": []map[string]any{{"name": "TS"}, {"name": "USER_ID"}, {"name": "EVENT_NAME"}, {"name": "EVENT_KEY"}},
 	}}
-	ops, _ := dataSourcePatch(existing, body, false)
+	ops, _, err := dataSourcePatch(existing, body, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
 	for _, op := range ops {
-		if op.Path == "/columnMappings/keyColumn" && op.Value != "EVENT_NAME" {
-			t.Errorf("keyColumn op = %+v, want the existing column in the new case", op)
+		if op.Path == "/columnMappings/keyColumn" {
+			found = true
+			if op.Value != "EVENT_NAME" {
+				t.Errorf("keyColumn op = %+v, want the existing column in the new case", op)
+			}
 		}
+	}
+	if !found {
+		t.Error("no keyColumn op, want the existing column rewritten to the new case")
+	}
+
+	// The new query does not return the existing key column: no ops at all.
+	body["columnMappings"].(map[string]any)["columns"] = []map[string]any{{"name": "TS"}, {"name": "USER_ID"}, {"name": "EVENT_KEY"}}
+	ops, _, err = dataSourcePatch(existing, body, false)
+	if ops != nil || err == nil || err.Error() != `not updated: its key column "event_name" is not in the updated query; metrics on it would filter a different column. Keep that column in the Statsig SQL, or update the data source by hand` {
+		t.Errorf("ops=%v err=%v, want no ops and the key column refusal", ops, err)
 	}
 }
 
@@ -524,11 +591,32 @@ func TestPhase3_OverwriteFailsClosedWhenMetricsCannotBeRead(t *testing.T) {
 	if f.patchCount != 0 || e.report.DataSources.Failed != 2 {
 		t.Fatalf("patches=%d report %+v, want both refused", f.patchCount, e.report.DataSources)
 	}
-	if !strings.Contains(e.report.Errors[0], "could not read the project's metrics") || !strings.Contains(e.report.Errors[0], "403") {
+	if !strings.Contains(e.report.Errors[0], "not updated, because its bound metrics could not be checked") || !strings.Contains(e.report.Errors[0], "403") {
 		t.Errorf("error = %q", e.report.Errors[0])
 	}
 	if f.metricsReads != 1 {
 		t.Errorf("metrics read %d times, want once per run", f.metricsReads)
+	}
+}
+
+// A metric list shorter than its totalCount is read once more, then refuses
+// the update rather than checking against a partial list.
+func TestPhase3_OverwriteFailsClosedOnAnIncompleteMetricList(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, list: unwrappedList, metrics: `[{"key":"checkouts-count","eventKey":"checkout-events","dataSource":{"key":"checkout-events"}}]`, metricsTotal: 2}
+	srv := f.server()
+	defer srv.Close()
+
+	e := newPhase3Engine(t, srv.URL, false)
+	e.overwrite, e.forceOverwrite = true, true
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if f.patchCount != 0 || e.report.DataSources.Failed != 1 || f.metricsReads != 2 {
+		t.Fatalf("patches=%d report %+v metricsReads=%d, want a refusal after one re-read", f.patchCount, e.report.DataSources, f.metricsReads)
+	}
+	if !strings.Contains(e.report.Errors[0], "could not read a complete list of the project's metrics: got 1 of 2") {
+		t.Errorf("error = %q", e.report.Errors[0])
 	}
 }
 
@@ -630,7 +718,7 @@ func TestDataSourcePatch_SwitchesTableSourceToSQL(t *testing.T) {
 	existing := map[string]any{"key": "k", "tableName": "DB.ORDERS", "columnMappings": map[string]any{"timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}}}
 	body := map[string]any{"key": "k", "sqlQuery": "SELECT 1", "columnMappings": map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS",
 		"columns": []map[string]any{{"name": "TS"}, {"name": "USER_ID"}, {"name": "LD_EVENT_KEY"}}}}
-	ops, _ := dataSourcePatch(existing, body, true)
+	ops, _, _ := dataSourcePatch(existing, body, true)
 	want := []launchdarkly.JSONPatchOp{
 		{Op: "remove", Path: "/tableName"},
 		{Op: "add", Path: "/sqlQuery", Value: "SELECT 1"},
@@ -658,6 +746,210 @@ func TestWarehouseCmd_FlagsBound(t *testing.T) {
 	} {
 		if warehouseCmd.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s not registered on `warehouse`", name)
+		}
+	}
+}
+
+// Data source keys are unique per project, so a Statsig source's key may be
+// taken by a data source in another environment. It is not created, updated,
+// or mapped, with or without --overwrite.
+func TestPhase3_KeyTakenInAnotherEnvironmentIsRefused(t *testing.T) {
+	list := `{"items":[{"key":"checkout-events","environmentKey":"staging","sqlQuery":"SELECT * FROM analytics.events","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","contexts":{"user":"USER_ID"}}}]}`
+	for _, overwrite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("overwrite=%v", overwrite), func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: list}
+			srv := f.server()
+			defer srv.Close()
+
+			e := newPhase3Engine(t, srv.URL, false)
+			orders := checkoutSource()
+			orders["name"] = "Orders"
+			e.metricSources = append(e.metricSources, orders)
+			e.overwrite = overwrite
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if f.patchCount != 0 || f.metricsReads != 0 || e.report.DataSources.Failed != 1 || e.report.DataSources.Created != 1 || len(f.created) != 1 || f.created[0]["key"] != "orders" {
+				t.Fatalf("patches=%d metricsReads=%d report %+v created=%v, want checkout-events refused and only orders created", f.patchCount, f.metricsReads, e.report.DataSources, f.created)
+			}
+			want := `Data source "Checkout Events": not created: the key "checkout-events" is taken by a data source in LaunchDarkly environment "staging", which was left unchanged, and this source was left out of source-mapping.json. Rename the source in Statsig, or run with --ld-environment staging`
+			if len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+				t.Errorf("errors = %q\nwant %q", e.report.Errors, want)
+			}
+			if len(e.report.Warnings) != 0 {
+				t.Errorf("warnings = %q, want none", e.report.Warnings)
+			}
+			if err := e.writeSourceMapping(); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := os.ReadFile("source-mapping.json")
+			var mapping map[string]string
+			_ = json.Unmarshal(raw, &mapping)
+			if len(mapping) != 1 || mapping["Orders"] != "orders" {
+				t.Errorf("source-mapping.json = %v, want only Orders", mapping)
+			}
+		})
+	}
+
+	// The same environment is the usual case.
+	t.Run("same environment", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		f := &fakeLD{t: t, list: strings.Replace(list, "staging", "production", 1)}
+		srv := f.server()
+		defer srv.Close()
+		e := newPhase3Engine(t, srv.URL, false)
+		e.overwrite = true
+		if err := e.phase3aMigrateDataSources(); err != nil {
+			t.Fatal(err)
+		}
+		if e.report.DataSources.Updated != 1 {
+			t.Errorf("report %+v errors=%q, want one update", e.report.DataSources, e.report.Errors)
+		}
+	})
+
+	t.Run("dry run", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		f := &fakeLD{t: t, list: list}
+		srv := f.server()
+		defer srv.Close()
+		e := newPhase3Engine(t, srv.URL, false)
+		e.dryRun, e.ldReadable = true, true
+		l := e.dryRunDataSources("snowflake")
+		if len(l.lines) != 1 || l.lines[0] != `Checkout Events (query): would refuse (key used in environment "staging")` || !e.unmapped["checkout-events"] {
+			t.Errorf("lines=%q unmapped=%v", l.lines, e.unmapped)
+		}
+	})
+}
+
+// A data source that still opens with the wrapper for its own key, but was
+// edited in LaunchDarkly after creation, is kept: never PATCHed and no
+// warning, even when its Statsig SQL has changed too.
+func TestPhase3_EditedWrapperIsKeptWithoutWarning(t *testing.T) {
+	edited := wantCheckoutSQL + "\nWHERE ts > '2024-01-01'"
+	list, _ := json.Marshal(map[string]any{"items": []any{map[string]any{
+		"key": "checkout-events", "sqlQuery": edited,
+		"columnMappings": map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}, "columns": []any{}},
+	}}})
+	for _, tc := range []struct {
+		name        string
+		constantKey bool
+	}{{"constant key", true}, {"constant key off", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: string(list)}
+			srv := f.server()
+			defer srv.Close()
+
+			e := newPhase3Engine(t, srv.URL, false)
+			e.overwrite, e.forceOverwrite, e.constantEventKey = true, true, tc.constantKey
+			e.metricSources[0]["sql"] = "SELECT ts, user_id FROM analytics.events WHERE kind = 'checkout' AND region = 'eu'"
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if f.patchCount != 0 || len(f.previews) != 0 || f.metricsReads != 0 || e.report.DataSources.Skipped != 1 {
+				t.Fatalf("patches=%d previews=%d metricsReads=%d report %+v, want a skip with no calls", f.patchCount, len(f.previews), f.metricsReads, e.report.DataSources)
+			}
+			if len(e.report.Warnings) != 0 || len(e.report.Errors) != 0 {
+				t.Errorf("warnings=%q errors=%q, want none", e.report.Warnings, e.report.Errors)
+			}
+			if len(e.report.Notes) != 1 || e.report.Notes[0] != (reportNote{Code: noteEditedConstantKey, DataSource: "checkout-events"}) {
+				t.Errorf("notes = %+v", e.report.Notes)
+			}
+		})
+	}
+
+	t.Run("dry run", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		f := &fakeLD{t: t, list: string(list)}
+		srv := f.server()
+		defer srv.Close()
+		e := newPhase3Engine(t, srv.URL, false)
+		e.dryRun, e.ldReadable, e.overwrite = true, true, true
+		l := e.dryRunDataSources("snowflake")
+		if len(l.lines) != 1 || l.lines[0] != "Checkout Events (query): would skip (kept: edited in LaunchDarkly)" || len(l.warnings) != 0 {
+			t.Errorf("lines=%q warnings=%q", l.lines, l.warnings)
+		}
+	})
+}
+
+// Every update first tests the listed query and column mappings, so a data
+// source edited in LaunchDarkly after this run listed it is not overwritten.
+func TestPhase3_UpdateTestsTheListedStateFirst(t *testing.T) {
+	t.Chdir(t.TempDir())
+	listedCM := map[string]any{"keyColumn": "EVENT_NAME", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"},
+		"columns": []any{map[string]any{"name": "TS", "type": "TIMESTAMP_NTZ", "nullable": false}, map[string]any{"name": "USER_ID", "type": "TEXT", "length": 16777216, "nullable": true}}}
+	list, _ := json.Marshal(map[string]any{"items": []any{map[string]any{
+		"key": "checkout-events", "environmentKey": "production", "sqlQuery": "SELECT * FROM analytics.events", "columnMappings": listedCM,
+	}}})
+	f := &fakeLD{t: t, list: string(list)}
+	srv := f.server()
+	defer srv.Close()
+
+	e := newPhase3Engine(t, srv.URL, false)
+	e.overwrite = true
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	ops := f.patches["checkout-events"]
+	if len(ops) < 3 || ops[0].Op != "test" || ops[0].Path != "/sqlQuery" || ops[0].Value != "SELECT * FROM analytics.events" ||
+		ops[1].Op != "test" || ops[1].Path != "/columnMappings" {
+		t.Fatalf("ops = %+v, want test /sqlQuery and test /columnMappings first", ops)
+	}
+	got, _ := json.Marshal(ops[1].Value)
+	want, _ := json.Marshal(listedCM)
+	if string(got) != string(want) {
+		t.Errorf("test /columnMappings value =\n%s\nwant the listed value\n%s", got, want)
+	}
+
+	// LaunchDarkly answers a failed test with 400.
+	f2 := &fakeLD{t: t, list: string(list), patchStatus: http.StatusBadRequest, patchBody: `{"code":"invalid_request","message":"Error applying json-patch document"}`}
+	srv2 := f2.server()
+	defer srv2.Close()
+	e = newPhase3Engine(t, srv2.URL, false)
+	e.overwrite = true
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := `Data source "Checkout Events": not updated: it changed in LaunchDarkly after this run read it; rerun to pick up the change`
+	if e.report.DataSources.Failed != 1 || len(e.report.Errors) != 1 || e.report.Errors[0] != wantErr {
+		t.Errorf("report %+v errors=%q, want %q", e.report.DataSources, e.report.Errors, wantErr)
+	}
+}
+
+// With --constant-event-key=false, an update keeps the existing key column. A
+// new query that does not return it is not sent at all.
+func TestPhase3_ConstantKeyOffRefusesWhenKeyColumnIsGone(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, list: unwrappedList}
+	srv := f.server()
+	defer srv.Close()
+
+	e := newPhase3Engine(t, srv.URL, false)
+	e.overwrite, e.constantEventKey = true, false
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	want := `Data source "Checkout Events": not updated: its key column "EVENT_NAME" is not in the updated query; metrics on it would filter a different column. Keep that column in the Statsig SQL, or update the data source by hand`
+	if f.patchCount != 0 || e.report.DataSources.Failed != 1 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+		t.Fatalf("patches=%d report %+v errors=%q, want %q", f.patchCount, e.report.DataSources, e.report.Errors, want)
+	}
+
+	// The preview returns it: updated, keeping it.
+	f2 := &fakeLD{t: t, list: unwrappedList, previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"EVENT_NAME","type":"TEXT"}`}
+	srv2 := f2.server()
+	defer srv2.Close()
+	e = newPhase3Engine(t, srv2.URL, false)
+	e.overwrite, e.constantEventKey = true, false
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if e.report.DataSources.Updated != 1 {
+		t.Fatalf("report %+v errors=%q, want one update", e.report.DataSources, e.report.Errors)
+	}
+	for _, op := range f2.patches["checkout-events"] {
+		if op.Path == "/columnMappings/keyColumn" {
+			t.Errorf("keyColumn changed to %v, want EVENT_NAME kept", op.Value)
 		}
 	}
 }

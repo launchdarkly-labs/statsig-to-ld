@@ -388,6 +388,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		MetricSourcesFetched:    len(convOpts.SourceUnitTypes) > 0,
 		RegisteredAnalysisUnits: sortedKeys(convOpts.RegisteredAnalysisUnits),
 		AssumeConstantEventKey:  flagAssumeConstKey,
+		AssumedConstantKeyDS:    dsInfo.assumed,
 		DataSourcesFetched:      dsInfo.fetched,
 		ConstantKeyDataSources:  dsInfo.constant,
 	}
@@ -456,8 +457,13 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if unread := existingMetricsWithCode(rpt, converter.WarnExistingMetricUnverified); len(unread) > 0 {
-		fmt.Printf("\n⚠  %d existing metric(s) could not be read back, so their event keys were not checked\n", len(unread))
-		fmt.Printf("   against their data source's constant event key (code %s in the report).\n", converter.WarnExistingMetricUnverified)
+		fmt.Printf("\n⚠  %d existing metric(s) could not be read back from LaunchDarkly, so their event keys\n", len(unread))
+		fmt.Println("   were not checked. Rerun to check them.")
+	}
+	if n := metricsWithNoteCode(rpt, converter.WarnColumnUnverified); n > 0 {
+		fmt.Printf("\n⚠  %d metric(s) use columns that could not be checked against their data source, because\n", n)
+		fmt.Println("   LaunchDarkly did not report its columns. LaunchDarkly matches column names exactly, so")
+		fmt.Println("   rerun with --ld-key and --ld-project once `warehouse` has created the data sources.")
 	}
 
 	// Warehouse-native and ratio metrics need a LaunchDarkly data source. Call
@@ -593,6 +599,9 @@ type dataSourceInfo struct {
 	fetched bool
 	// constant counts the data sources read back as constant-key (not assumed).
 	constant int
+	// assumed lists the data sources treated as constant-key by
+	// --assume-constant-event-key.
+	assumed []string
 }
 
 // fetchDataSourceKeys reads each LD data source's constant event key (when its
@@ -611,7 +620,7 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 		case err != nil && !dryRun:
 			return dataSourceInfo{}, fmt.Errorf("%w\n  warehouse-native metrics take their event key and column names from their LaunchDarkly data source, so the run stopped before creating any. Check that the token can read this project's metric data sources", err)
 		case err != nil:
-			log.Printf("WARNING: %v. The dry run continues without it, so warehouse-native metrics are previewed with legacy event keys unless --assume-constant-event-key is set; a real run stops here.", err)
+			log.Printf("WARNING: %v. A real run stops here; this dry run continues with Statsig event keys for warehouse-native metrics. Check that the token can read the project's metric data sources, or add --assume-constant-event-key.", err)
 		default:
 			info.fetched = true
 			for _, ds := range list {
@@ -619,8 +628,10 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 				listed[key] = true
 				cm := jsonutil.GetMap(ds, "columnMappings")
 				whType := warehouse.WarehouseTypeForIntegration(jsonutil.GetStr(ds, "integrationKey"))
-				if k, ok := warehouse.ParseConstantEventKey(jsonutil.GetStr(ds, "sqlQuery"), jsonutil.GetStr(cm, "keyColumn"), whType); ok {
-					info.keys[key] = k
+				// A wrapper edited in LaunchDarkly after creation still counts:
+				// every row it returns carries the constant.
+				if w, state := warehouse.ClassifyConstantKey(jsonutil.GetStr(ds, "sqlQuery"), jsonutil.GetStr(cm, "keyColumn"), key, whType); state != warehouse.NoConstantKey {
+					info.keys[key] = w.EventKey
 					info.constant++
 				}
 				for _, c := range jsonutil.GetSlice(cm, "columns") {
@@ -631,27 +642,22 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 					}
 				}
 			}
-			log.Printf("LaunchDarkly data sources: %d with a constant event key, %d with known columns", info.constant, len(info.cols))
 		}
 	}
 
-	var assumed, missing []string
+	var missing []string
 	for _, ds := range mappedDataSources(sourceMapping, defaultDS) {
 		switch {
 		case listed[ds]:
 		case assume:
 			info.keys[ds] = ds
-			assumed = append(assumed, ds)
+			info.assumed = append(info.assumed, ds)
 		case info.fetched:
 			missing = append(missing, ds)
 		}
 	}
-	if len(assumed) > 0 {
-		log.Printf("NOTE: --assume-constant-event-key: treating %d data source(s) LaunchDarkly did not report as constant-key: %s. Their columns are unknown, so value, count-distinct, and filter column case cannot be verified; affected metrics carry a %q warning.",
-			len(assumed), strings.Join(assumed, ", "), converter.WarnColumnUnverified)
-	}
 	if len(missing) > 0 {
-		log.Printf("WARNING: %d mapped data source(s) are not in the LaunchDarkly project: %s. Metrics bound to them keep legacy event keys and LaunchDarkly will reject them; run `warehouse` first, or preview with --dry-run --assume-constant-event-key.",
+		log.Printf("WARNING: %d mapped data source(s) do not exist in the LaunchDarkly project: %s. LaunchDarkly rejects metrics bound to them. Run `warehouse` first, or preview with --dry-run --assume-constant-event-key.",
 			len(missing), strings.Join(missing, ", "))
 	}
 	return info, nil
@@ -714,6 +720,17 @@ func readsConstantKeySource(m launchdarkly.MetricPost, constKeys map[string]stri
 		}
 	}
 	return false
+}
+
+// metricsWithNoteCode counts the metrics carrying a note code.
+func metricsWithNoteCode(rpt *report.Report, code string) int {
+	n := 0
+	for _, m := range rpt.Metrics {
+		if slices.Contains(m.NoteCodes, code) {
+			n++
+		}
+	}
+	return n
 }
 
 // existingMetricsWithCode lists the skipped-existing metrics that
@@ -1030,6 +1047,7 @@ func buildDiagnostics(sg statsig.Metric, result *converter.Result) report.Diagno
 		LossyReasons:            result.LossyReasons,
 		LossyCodes:              result.LossyCodes,
 		BlockingCodes:           result.BlockingCodes,
+		NoteCodes:               result.NoteCodes,
 		AnalysisUnits:           result.LDMetric.AnalysisUnits,
 		StatsigRollupTimeWindow: sg.EffectiveRollupTimeWindow(),
 		StatsigSourceName:       sg.NumeratorSourceName(),

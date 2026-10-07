@@ -47,6 +47,14 @@ func TestConvert_ConstKey_SumUsesDataSourceKeyAndValueColumn(t *testing.T) {
 	if res.IsLossy() || res.IsBlocked() {
 		t.Errorf("unexpected lossy=%v blocked=%v", res.LossyReasons, res.BlockingReasons)
 	}
+	// Using the constant is the expected outcome, not something to act on: a
+	// note code for the report, not a warning.
+	if !hasCode(res.NoteCodes, WarnConstantEventKey) || hasCode(res.WarningCodes, WarnConstantEventKey) {
+		t.Errorf("notes=%v warnings=%v, want %s as a note only", res.NoteCodes, res.WarningCodes, WarnConstantEventKey)
+	}
+	if len(res.Warnings) != len(res.WarningCodes) {
+		t.Errorf("warnings %q and codes %v out of step", res.Warnings, res.WarningCodes)
+	}
 }
 
 func TestConvert_ConstKey_CountHasNoProvisionalWarning(t *testing.T) {
@@ -162,8 +170,8 @@ func TestConvert_ConstKey_UnknownColumnsAreFlaggedUnverified(t *testing.T) {
 	if res.LDMetric.ValueColumn != "order_total" {
 		t.Errorf("ValueColumn = %q, want Statsig's order_total unchanged", res.LDMetric.ValueColumn)
 	}
-	if !hasCode(res.WarningCodes, WarnColumnUnverified) {
-		t.Errorf("want a %s warning; codes=%v", WarnColumnUnverified, res.WarningCodes)
+	if !hasCode(res.NoteCodes, WarnColumnUnverified) || hasCode(res.WarningCodes, WarnColumnUnverified) {
+		t.Errorf("want a %s note and no such warning; notes=%v warnings=%v", WarnColumnUnverified, res.NoteCodes, res.WarningCodes)
 	}
 	if res.IsLossy() {
 		t.Errorf("unverified is advisory, not lossy: %v", res.LossyReasons)
@@ -181,8 +189,8 @@ func TestConvert_ConstKey_OnlyForConstantDataSources(t *testing.T) {
 	if res.LDMetric.EventKey != "price_usd" || res.LDMetric.ValueColumn != "" {
 		t.Errorf("got eventKey=%q valueColumn=%q, want legacy price_usd / empty", res.LDMetric.EventKey, res.LDMetric.ValueColumn)
 	}
-	if hasCode(res.WarningCodes, WarnColumnUnverified) {
-		t.Error("a legacy data source sends no value column, so there is nothing unverified to warn about")
+	if hasCode(res.NoteCodes, WarnColumnUnverified) {
+		t.Error("a legacy data source sends no value column, so there is nothing unverified to note")
 	}
 }
 

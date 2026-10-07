@@ -297,6 +297,49 @@ func TestParseConstantEventKey_RejectsOtherSQL(t *testing.T) {
 	}
 }
 
+func TestClassifyConstantKey(t *testing.T) {
+	tests := []struct {
+		name, sql, keyColumn string
+		want                 ConstantKeyState
+	}{
+		{"unmodified", "SELECT *, 'k' AS LD_EVENT_KEY FROM (\nSELECT 1\n) AS ld_src", "LD_EVENT_KEY", ConstantKeyWrapped},
+		{"appended WHERE", "SELECT *, 'k' AS LD_EVENT_KEY FROM (\nSELECT 1\n) AS ld_src WHERE ts > '2024-01-01'", "LD_EVENT_KEY", ConstantKeyEdited},
+		{"appended LIMIT", "SELECT *, 'k' AS LD_EVENT_KEY FROM (\nSELECT 1\n) AS ld_src\nLIMIT 1000", "LD_EVENT_KEY", ConstantKeyEdited},
+		{"missing derived-table AS", "SELECT *, 'k' AS LD_EVENT_KEY FROM (\nSELECT 1\n) ld_src", "LD_EVENT_KEY", ConstantKeyEdited},
+		{"missing column AS", "SELECT *, 'k' LD_EVENT_KEY FROM (\nSELECT 1\n) AS ld_src", "ld_event_key", ConstantKeyEdited},
+		{"leading comment", "-- edited\nselect *, 'k' as ld_event_key from (select 1) as src", "LD_EVENT_KEY", ConstantKeyEdited},
+		{"literal is another key", "SELECT *, 'j' AS LD_EVENT_KEY FROM (SELECT 1) AS ld_src WHERE 1 = 1", "LD_EVENT_KEY", NoConstantKey},
+		{"key column elsewhere", "SELECT *, 'k' AS LD_EVENT_KEY FROM (SELECT 1) AS ld_src WHERE 1 = 1", "EVENT_NAME", NoConstantKey},
+		{"no key column", "SELECT *, 'k' AS LD_EVENT_KEY FROM (SELECT 1) AS ld_src WHERE 1 = 1", "", NoConstantKey},
+		{"head inside a comment", "/* SELECT *, 'k' AS LD_EVENT_KEY FROM ( */ SELECT * FROM t", "LD_EVENT_KEY", NoConstantKey},
+		{"plain SQL", "SELECT * FROM t", "LD_EVENT_KEY", NoConstantKey},
+		{"union of tagged subqueries",
+			"SELECT *, 'signup' AS EVENT_NAME FROM (SELECT user_id, ts FROM signups) AS a\nUNION ALL\nSELECT *, 'purchase' AS EVENT_NAME FROM (SELECT user_id, ts FROM purchases) AS b",
+			"EVENT_NAME", NoConstantKey},
+	}
+	for _, tt := range tests {
+		w, got := ClassifyConstantKey(tt.sql, tt.keyColumn, "k", "snowflake")
+		if got != tt.want {
+			t.Errorf("%s: state = %v, want %v", tt.name, got, tt.want)
+		}
+		if got != NoConstantKey && w.EventKey != "k" {
+			t.Errorf("%s: event key = %q, want k", tt.name, w.EventKey)
+		}
+	}
+	// The union stays rejected whatever the data source is called, unless its key
+	// is the first branch's literal.
+	union := tests[len(tests)-1].sql
+	for _, key := range []string{"events", "purchase", "signups"} {
+		if _, got := ClassifyConstantKey(union, "EVENT_NAME", key, "snowflake"); got != NoConstantKey {
+			t.Errorf("union on data source %q read as %v", key, got)
+		}
+	}
+	// The strict wrapper keeps its own literal even when it is not the key.
+	if w, got := ClassifyConstantKey("SELECT *, 'j' AS LD_EVENT_KEY FROM (SELECT 1) AS ld_src", "LD_EVENT_KEY", "k", "snowflake"); got != ConstantKeyWrapped || w.EventKey != "j" {
+		t.Errorf("strict wrapper with another literal: %+v, %v", w, got)
+	}
+}
+
 func TestParseConstantKeyWrapper_InnerAndWarehouseComments(t *testing.T) {
 	w, ok := ParseConstantKeyWrapper("SELECT *, 'orders' AS LD_EVENT_KEY FROM (\n  SELECT * FROM t WHERE (a) = 1 -- (\n) AS ld_src", "snowflake")
 	if !ok || w.EventKey != "orders" || w.Column != "LD_EVENT_KEY" || w.Inner != "SELECT * FROM t WHERE (a) = 1 -- (" {

@@ -67,8 +67,10 @@ type RunOptions struct {
 	// was verified against the project.
 	RegisteredAnalysisUnits []string `json:"registered_analysis_units"`
 
-	// AssumeConstantEventKey records --assume-constant-event-key.
-	AssumeConstantEventKey bool `json:"assume_constant_event_key"`
+	// AssumeConstantEventKey records --assume-constant-event-key, and
+	// AssumedConstantKeyDS the data sources it was applied to.
+	AssumeConstantEventKey bool     `json:"assume_constant_event_key"`
+	AssumedConstantKeyDS   []string `json:"assumed_constant_key_data_sources,omitempty"`
 
 	// DataSourcesFetched is false when the LaunchDarkly data sources were not
 	// read (no binding, no credentials, or a failed dry-run read), so no event
@@ -126,6 +128,12 @@ type Diagnostics struct {
 	// BlockingCodes are the codes of the warnings that kept a metric from being
 	// created even with --convert-lossy.
 	BlockingCodes []string `json:"blocking_codes,omitempty"`
+
+	// NoteCodes record facts about the conversion that need no action on the
+	// metric, such as constant_event_key. They are not warnings, so they do not
+	// count a metric as converted with warnings; column_unverified is summed
+	// into one line of the run summary.
+	NoteCodes []string `json:"note_codes,omitempty"`
 
 	// LDDataSource is the LaunchDarkly data source the metric resolved to, empty
 	// if none. This is the main thing gating filter and window conversion, so it

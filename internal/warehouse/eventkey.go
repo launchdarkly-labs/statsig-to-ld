@@ -372,6 +372,65 @@ func ParseConstantEventKey(sqlQuery, keyColumn, whType string) (string, bool) {
 	return w.EventKey, true
 }
 
+// ConstantKeyState is how a data source's query relates to the constant
+// event-key wrapper.
+type ConstantKeyState int
+
+const (
+	// NoConstantKey means the data source does not project the constant.
+	NoConstantKey ConstantKeyState = iota
+	// ConstantKeyWrapped means the whole query is the wrapper as
+	// WrapWithConstantEventKey writes it (see ParseConstantKeyWrapper).
+	ConstantKeyWrapped
+	// ConstantKeyEdited means the query still opens with the wrapper's head for
+	// the data source's own key, but what follows was changed after creation,
+	// for example an appended WHERE or LIMIT.
+	ConstantKeyEdited
+)
+
+// reConstantKeyHeadLoose is reConstantKeyHead with the column alias's AS
+// optional.
+var reConstantKeyHeadLoose = regexp.MustCompile("(?i)^SELECT\\s+\\*\\s*,\\s*'((?:[^']|'')*)'\\s*(?:AS\\s+)?[\"`]?([A-Za-z0-9_]+)[\"`]?\\s+FROM\\s*\\(")
+
+// ClassifyConstantKey reads a data source's query and key column against the
+// constant event-key wrapper. dsKey is the data source's key.
+//
+// ConstantKeyWrapped is the strict whole-statement match. Failing that, the
+// query is ConstantKeyEdited when, after leading whitespace and comments, it
+// opens with SELECT *, '<literal>' AS <column> FROM ( where the literal is
+// dsKey, the column is the key column (case-insensitively), and the "(" is
+// structural. Every row such a query returns still carries the constant, so
+// metrics on it can use dsKey as their event key. A query that opens the same
+// way with another literal, such as a UNION of literal-tagged subqueries, is
+// NoConstantKey.
+func ClassifyConstantKey(sqlQuery, keyColumn, dsKey, whType string) (ConstantKeyWrapper, ConstantKeyState) {
+	keyColumn = strings.TrimSpace(keyColumn)
+	if keyColumn == "" {
+		return ConstantKeyWrapper{}, NoConstantKey
+	}
+	if w, ok := ParseConstantKeyWrapper(sqlQuery, whType); ok && strings.EqualFold(w.Column, keyColumn) {
+		return w, ConstantKeyWrapped
+	}
+	scan, err := scanSQL(sqlQuery, whType)
+	if err != nil || len(scan.significant) == 0 {
+		return ConstantKeyWrapper{}, NoConstantKey
+	}
+	start := scan.significant[0]
+	head := reConstantKeyHeadLoose.FindStringSubmatchIndex(sqlQuery[start:])
+	if head == nil {
+		return ConstantKeyWrapper{}, NoConstantKey
+	}
+	if _, found := slices.BinarySearch(scan.significant, start+head[1]-1); !found {
+		return ConstantKeyWrapper{}, NoConstantKey
+	}
+	literal := strings.ReplaceAll(sqlQuery[start+head[2]:start+head[3]], "''", "'")
+	column := sqlQuery[start+head[4] : start+head[5]]
+	if literal != dsKey || !strings.EqualFold(column, keyColumn) {
+		return ConstantKeyWrapper{}, NoConstantKey
+	}
+	return ConstantKeyWrapper{EventKey: literal, Column: column}, ConstantKeyEdited
+}
+
 // SameSQL reports whether two queries are equal ignoring whitespace runs.
 func SameSQL(a, b string) bool {
 	return strings.Join(strings.Fields(a), " ") == strings.Join(strings.Fields(b), " ")

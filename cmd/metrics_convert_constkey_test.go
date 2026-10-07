@@ -274,3 +274,63 @@ func TestProcessMetric_ExistingMetricReadBackFailureIsUnverified(t *testing.T) {
 		t.Errorf("unverified = %v, want the metric", unread)
 	}
 }
+
+// A wrapper edited in LaunchDarkly after creation (an appended WHERE, a
+// dropped AS) still projects the data source key on every row it returns, so
+// metrics on it get that key. Another literal does not count.
+func TestFetchDataSourceKeys_EditedWrapperIsConstantKey(t *testing.T) {
+	ds := func(key, sql string) map[string]any {
+		return map[string]any{"key": key, "sqlQuery": sql, "integrationKey": "snowflake-experimentation",
+			"columnMappings": map[string]any{"keyColumn": "LD_EVENT_KEY", "columns": []any{map[string]any{"name": "TS"}, map[string]any{"name": "LD_EVENT_KEY"}}}}
+	}
+	list, _ := json.Marshal(map[string]any{"items": []any{
+		ds("checkout-events", "SELECT *, 'checkout-events' AS LD_EVENT_KEY FROM (\nSELECT * FROM analytics.orders\n) AS ld_src\nWHERE ts > '2024-01-01' LIMIT 1000"),
+		ds("page-views", "SELECT *, 'page-views' LD_EVENT_KEY FROM (\nSELECT * FROM analytics.pages\n) ld_src"),
+		ds("signups", "SELECT *, 'other' AS LD_EVENT_KEY FROM (\nSELECT * FROM analytics.signups\n) AS ld_src WHERE 1 = 1"),
+	}})
+	srv := dataSourceListServer(t, http.StatusOK, string(list))
+	defer srv.Close()
+	ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
+	mapping := map[string]string{"Checkout Events": "checkout-events", "Page Views": "page-views", "Signups": "signups"}
+	info, err := fetchDataSourceKeys(context.Background(), ld, mapping, "", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"checkout-events": "checkout-events", "page-views": "page-views"}
+	if len(info.keys) != 2 || info.keys["checkout-events"] != want["checkout-events"] || info.keys["page-views"] != want["page-views"] || info.constant != 2 {
+		t.Errorf("keys = %v (constant %d), want %v", info.keys, info.constant, want)
+	}
+}
+
+// Constant-key notes are not warnings: a clean conversion on a constant-key
+// data source does not count as converted with warnings, and unverified
+// columns are summed into one line instead of a warning per metric.
+func TestProcessMetric_ConstantKeyNotesAreNotWarnings(t *testing.T) {
+	var m statsig.Metric
+	raw := `{"type":"user_warehouse","name":"Order Total","id":"Order Total::user_warehouse","directionality":"increase",
+	  "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout Events","valueColumn":"order_total"}}`
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	opts := constKeyConvOpts()
+	opts.RegisteredAnalysisUnits = map[string]bool{"user": true}
+	rpt := report.New()
+	processMetric(context.Background(), m, opts, nil, rpt, "proj", true, 1, 1, new(int64))
+	opts.DataSourceColumns = nil
+	m2 := m
+	m2.Name, m2.ID = "Order Total 2", "Order Total 2::user_warehouse"
+	processMetric(context.Background(), m2, opts, nil, rpt, "proj", true, 1, 1, new(int64))
+	rpt.Finalize(2)
+
+	if rpt.Converted != 2 {
+		t.Fatalf("report = %+v", rpt.Metrics)
+	}
+	for _, e := range rpt.Metrics {
+		if slices.Contains(e.WarningCodes, converter.WarnConstantEventKey) || slices.Contains(e.WarningCodes, converter.WarnColumnUnverified) || !slices.Contains(e.NoteCodes, converter.WarnConstantEventKey) {
+			t.Errorf("%s: warnings=%v notes=%v, want the constant-key codes as notes only", e.StatsigName, e.WarningCodes, e.NoteCodes)
+		}
+	}
+	if n := metricsWithNoteCode(rpt, converter.WarnColumnUnverified); n != 1 {
+		t.Errorf("unverified = %d, want the metric whose data source columns are unknown", n)
+	}
+}

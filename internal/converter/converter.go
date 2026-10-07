@@ -105,11 +105,17 @@ const (
 	WarnWindowNoDataSource        = "window_no_data_source"
 	WarnDailyParticipationRatio   = "daily_participation_ratio_term"
 	WarnRatioNoDataSource         = "ratio_no_data_source"
-	WarnConstantEventKey          = "constant_event_key"
 	WarnColumnNotInDataSource     = "column_not_in_data_source"
-	WarnColumnUnverified          = "column_unverified"
 	WarnCloudMetricConstantKey    = "cloud_metric_on_constant_key_source"
 	WarnUnfilteredConstantKey     = "constant_event_key_unfiltered"
+
+	// Note codes (Result.NoteCodes): reported, never printed per metric.
+	// WarnConstantEventKey marks a term that uses its data source's constant
+	// event key. WarnColumnUnverified marks a term on a constant-key data source
+	// whose columns LaunchDarkly did not report, so its value, count-distinct,
+	// and filter columns keep Statsig's case; the run summary counts them.
+	WarnConstantEventKey = "constant_event_key"
+	WarnColumnUnverified = "column_unverified"
 
 	// Existing metrics, read back when a create conflicts. Set by the command,
 	// not by Convert, but kept here so every report code is in one place.
@@ -169,6 +175,10 @@ type Result struct {
 	WarningCodes []string
 	LossyCodes   []string
 
+	// NoteCodes record facts about the conversion that need no action on the
+	// metric. They are reported, not printed. Populated only via addNote.
+	NoteCodes []string
+
 	// BlockingReasons is the subset of warnings that rule the metric out
 	// entirely: creating it would measure something materially different, and
 	// --convert-lossy does not override that. BlockingCodes runs parallel to it.
@@ -197,6 +207,13 @@ func (r *Result) addLossy(code, format string, args ...any) {
 	r.WarningCodes = append(r.WarningCodes, code)
 	r.LossyReasons = append(r.LossyReasons, msg)
 	r.LossyCodes = append(r.LossyCodes, code)
+}
+
+// addNote records a note code once.
+func (r *Result) addNote(code string) {
+	if !slices.Contains(r.NoteCodes, code) {
+		r.NoteCodes = append(r.NoteCodes, code)
+	}
 }
 
 // addBlocking records a message that warns the user and rules the metric out,
@@ -315,8 +332,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 				valueColumn = col
 			}
 		}
-		result.addWarning(WarnConstantEventKey,
-			"warehouse-native metric uses the constant event key %q of data source %q; its filters select the rows", constKey, boundDS)
+		result.addNote(WarnConstantEventKey)
 	} else if len(sg.MetricEvents) > 0 {
 		eventKey = sg.MetricEvents[0].Name
 	} else if sg.IsWarehouseNative() {
@@ -745,7 +761,7 @@ func constantEventKey(dsKey string, opts Options) (string, bool) {
 // alignTermColumns rewrites one term's value, count-distinct, and filter
 // columns to the case its data source stores them in. When the data source's
 // columns are unknown and the term depends on them (it reads a constant-key
-// source, so these columns are what select and measure its rows), it warns
+// source, so these columns are what select and measure its rows), it notes
 // that their case could not be checked. label prefixes the column descriptions,
 // e.g. "numerator ".
 func alignTermColumns(result *Result, opts Options, dsKey, label string, constKey bool, valueColumn, field *string, filters *launchdarkly.EventFilter) {
@@ -757,9 +773,7 @@ func alignTermColumns(result *Result, opts Options, dsKey, label string, constKe
 		names := appendUnique(nil, *valueColumn, *field)
 		names = appendUnique(names, filterAttributes(filters)...)
 		if len(names) > 0 {
-			result.addWarning(WarnColumnUnverified,
-				"%scolumns %v could not be checked against LaunchDarkly data source %q because its columns are unknown, so they keep Statsig's case. LaunchDarkly matches column names exactly (Snowflake stores unquoted names in upper case); pass --ld-key and --ld-project once the data source exists to have them checked",
-				label, names, dsKey)
+			result.addNote(WarnColumnUnverified)
 		}
 		return
 	}
@@ -1263,14 +1277,14 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 			if numSpec.isNumeric && numSpec.unitAgg != "count_distinct" {
 				result.LDMetric.ValueColumn = numEv.Name
 			}
-			result.addWarning(WarnConstantEventKey, "numerator uses the constant event key %q of data source %q", numConstKey, numDS)
+			result.addNote(WarnConstantEventKey)
 		}
 		if denHasConst && result.LDMetric.Denominator != nil {
 			result.LDMetric.Denominator.EventName = denConstKey
 			if denSpec.isNumeric && denSpec.unitAgg != "count_distinct" {
 				result.LDMetric.Denominator.ValueColumn = denEv.Name
 			}
-			result.addWarning(WarnConstantEventKey, "denominator uses the constant event key %q of data source %q", denConstKey, denDS)
+			result.addNote(WarnConstantEventKey)
 		}
 	}
 
