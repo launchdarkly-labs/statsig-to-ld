@@ -403,3 +403,35 @@ func readAll(r interface{ Read(p []byte) (int, error) }) ([]byte, error) {
 		}
 	}
 }
+
+// ListMetricsRaw follows the collection's next links, and a failed page is an
+// error rather than a short list.
+func TestListMetricsRaw_FollowsNextLinksAndFailsOnBadPage(t *testing.T) {
+	var failSecond bool
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/v2/metrics/my-project" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("cursor") == "" {
+			_, _ = w.Write([]byte(`{"items":[{"key":"a"},{"key":"b"}],"_links":{"next":{"href":"/api/v2/metrics/my-project?cursor=c2&limit=50"}}}`))
+			return
+		}
+		if failSecond {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"forbidden"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[{"key":"c"}],"_links":{"self":{"href":"/api/v2/metrics/my-project"}}}`))
+	})
+
+	got, err := client.ListMetricsRaw(context.Background())
+	if err != nil || len(got) != 3 || got[2]["key"] != "c" {
+		t.Fatalf("got %v, %v; want three metrics across two pages", got, err)
+	}
+
+	failSecond = true
+	if got, err := client.ListMetricsRaw(context.Background()); err == nil || !strings.Contains(err.Error(), "403") {
+		t.Errorf("got %v, %v; want the second page's 403", got, err)
+	}
+}

@@ -219,12 +219,17 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
-	if vc := j.GetStr(preview, "valueColumn"); vc != "" {
-		cm["valueColumn"] = vc
-	} else if v, ok := cm["valueColumn"].(string); ok {
+	// Same precedence for the value column: the preview's guess is the first
+	// numeric column, so Statsig's configured column wins when it is returned.
+	vcMapped := false
+	if v, ok := cm["valueColumn"].(string); ok && v != "" {
 		if real, found := actual[strings.ToLower(v)]; found {
 			cm["valueColumn"] = real
+			vcMapped = true
 		}
+	}
+	if vc := j.GetStr(preview, "valueColumn"); vc != "" && !vcMapped {
+		cm["valueColumn"] = vc
 	}
 
 	if contexts, ok := cm["contexts"].(map[string]string); ok {

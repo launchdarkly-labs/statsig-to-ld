@@ -333,3 +333,19 @@ func TestReconcileColumnMappings_PreviewTimestampWhenStatsigColumnMissing(t *tes
 		t.Errorf("timestampColumn = %v, want the preview's CREATED_AT", cm["timestampColumn"])
 	}
 }
+
+// The preview's value column is a guess (the first numeric column), so the
+// Statsig value column wins whenever the warehouse returns it.
+func TestReconcileColumnMappings_StatsigValueColumnWins(t *testing.T) {
+	real := []map[string]any{{"name": "QUANTITY", "type": "NUMBER"}, {"name": "ORDER_TOTAL", "type": "NUMBER"}, {"name": "TS", "type": "TIMESTAMP_NTZ"}}
+	cm := map[string]any{"timestampColumn": "ts", "valueColumn": "order_total"}
+	ReconcileColumnMappings(cm, map[string]any{"valueColumn": "QUANTITY"}, real)
+	if cm["valueColumn"] != "ORDER_TOTAL" {
+		t.Errorf("valueColumn = %v, want ORDER_TOTAL", cm["valueColumn"])
+	}
+	cm = map[string]any{"timestampColumn": "ts", "valueColumn": "amount"}
+	ReconcileColumnMappings(cm, map[string]any{"valueColumn": "QUANTITY"}, real)
+	if cm["valueColumn"] != "QUANTITY" {
+		t.Errorf("valueColumn = %v, want the preview's QUANTITY when Statsig's column is missing", cm["valueColumn"])
+	}
+}

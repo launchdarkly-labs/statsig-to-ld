@@ -197,24 +197,6 @@ func (c *Client) ListMetricDataSources(ctx context.Context) ([]map[string]any, e
 	return j.ExtractItemsList(body), nil
 }
 
-// GetMetricDataSource fetches one metric data source. With expandMetrics the
-// response also lists the metrics bound to it (LaunchDarkly returns at most
-// ten, with the full count in metrics.totalCount).
-func (c *Client) GetMetricDataSource(ctx context.Context, key string, expandMetrics bool) (map[string]any, error) {
-	path := fmt.Sprintf("/internal/projects/%s/metric-data-sources/%s", c.projectKey, url.PathEscape(key))
-	if expandMetrics {
-		path += "?expand=metrics"
-	}
-	status, body, err := c.requestJSON(ctx, "GET", path, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != 200 {
-		return nil, fmt.Errorf("failed to get metric data source %s: %d\n%s", key, status, j.ToJSON(body))
-	}
-	return body, nil
-}
-
 // UpdateMetricDataSource applies a JSON Patch (RFC 6902) to a metric data
 // source. LaunchDarkly applies it to the data source's API representation and
 // re-validates the query and column mappings when either changes.
@@ -244,30 +226,30 @@ func (c *Client) CreateMetricDataSource(ctx context.Context, payload map[string]
 
 // -- Metrics (raw, for warehouse flow) --
 
-// ListMetricsRaw lists all metrics as raw maps (paginated).
-func (c *Client) ListMetricsRaw(ctx context.Context) []map[string]any {
+// ListMetricsRaw lists every metric in the project as raw maps, following the
+// collection's next links (LaunchDarkly returns at most 50 per page). Callers
+// decide whether a data source can be changed safely from this list, so any
+// failed page is an error rather than a short list.
+func (c *Client) ListMetricsRaw(ctx context.Context) ([]map[string]any, error) {
 	var all []map[string]any
-	status, body, _ := c.requestJSON(ctx, "GET", fmt.Sprintf("/api/v2/metrics/%s?limit=50", c.projectKey), nil)
-	if status == 200 && body != nil {
-		all = append(all, j.ExtractItemsList(body)...)
-		for {
-			links := j.GetMap(body, "_links")
-			next := j.GetMap(links, "next")
-			if next == nil {
-				break
-			}
-			href := j.GetStr(next, "href")
-			if href == "" {
-				break
-			}
-			status, body, _ = c.requestJSON(ctx, "GET", href, nil)
-			if status != 200 {
-				break
-			}
-			all = append(all, j.ExtractItemsList(body)...)
+	path := fmt.Sprintf("/api/v2/metrics/%s?limit=50", c.projectKey)
+	seen := map[string]bool{}
+	for path != "" {
+		if seen[path] {
+			return nil, fmt.Errorf("listing metrics: pagination repeated %s", path)
 		}
+		seen[path] = true
+		status, body, err := c.requestJSON(ctx, "GET", path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("listing metrics: %w", err)
+		}
+		if status != 200 || body == nil {
+			return nil, fmt.Errorf("listing metrics: %d\n%s", status, j.ToJSON(body))
+		}
+		all = append(all, j.ExtractItemsList(body)...)
+		path = j.GetStr(j.GetMap(j.GetMap(body, "_links"), "next"), "href")
 	}
-	return all
+	return all, nil
 }
 
 // GetMetricRaw fetches one metric as a raw map.
