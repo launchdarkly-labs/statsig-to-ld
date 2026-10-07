@@ -21,9 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `metrics convert`: `--assume-constant-event-key` treats mapped data sources that LaunchDarkly cannot report on (no
   credentials, or not created yet) as projecting the constant event key, so a dry run before `warehouse` previews the
   event keys a real run will use. Their columns are unknown, so value, count-distinct, and filter column case cannot
-  be checked; each affected metric carries a `column_unverified` warning. The report's `options` block records the
-  flag as `assume_constant_event_key`, with `data_sources_fetched` (whether the data sources were read from
-  LaunchDarkly) and `constant_key_data_sources` (how many of them project the constant).
+  be checked; the run summary counts the affected metrics in one line, and each carries the note code
+  `column_unverified` in the report's new per-metric `note_codes`. The report's `options` block records the flag as
+  `assume_constant_event_key`, the data sources it applied to as `assumed_constant_key_data_sources`, with
+  `data_sources_fetched` (whether the data sources were read from LaunchDarkly) and `constant_key_data_sources` (how
+  many of them project the constant).
 
 
 ### Added
@@ -52,8 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SELECT *, '<data source key>' AS LD_EVENT_KEY FROM (<source SQL>) AS ld_src` (`ld_event_key` on BigQuery,
   Databricks, and Redshift), previews the wrapped query so the saved columns match it exactly, and makes that column
   the key column. `metrics convert` reads each data source back from LaunchDarkly; for one that projects the constant
-  (its whole query is that wrapper, ignoring comments, and its key column is the projected column, so a hand-built
-  `UNION` of literal-tagged subqueries does not count), it sets every warehouse-native metric's event key (and a ratio denominator's event name) to the data source key,
+  (its key column is the projected column, and its whole query is that wrapper, ignoring comments, or still opens
+  with `SELECT *, '<its own key>' AS <key column> FROM (` after an edit in LaunchDarkly; a hand-built `UNION` of
+  literal-tagged subqueries does not count), it sets every warehouse-native metric's event key (and a ratio
+  denominator's event name) to the data source key, recorded as note code `constant_event_key` rather than a warning,
   sends the Statsig value column as `valueColumn` on numeric terms, and rewrites value, count-distinct, and filter
   columns to the case the data source stores them in. `--constant-event-key=false` restores the old behavior. Source
   SQL that cannot be nested (more than one statement, a Statsig date macro, or no SQL or table at all) fails that
@@ -69,14 +73,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of skipping it. LaunchDarkly has no way to delete a metric data source and keeps keys unique even after archiving,
   so this is how a data source created before the constant event key gets one. The update changes only the query, the
   key column, and the column list; the timestamp, value, and context mappings are kept while the new query returns
-  them. A data source that already projects the constant is never rewritten, whatever the state file says (the run
-  warns when its Statsig SQL has changed), and `--constant-event-key=false` never removes the constant. Before
-  updating, the run reads the project's metrics and refuses a data source whose bound metrics (through the numerator
-  or a ratio's denominator) use an event key other than the data source key, since they would match no rows
-  afterwards; `--force-overwrite` updates it anyway and lists them. If the metrics cannot be read, nothing is
-  updated. Without `--overwrite`, an existing data source that lacks the constant is skipped with a warning saying
-  what `--overwrite` would do. A `--dry-run` with `--ld-key` and `--ld-project` reports, per source, whether a real
-  run would create, update, skip, or refuse it.
+  them. It is a JSON Patch that first tests the query and column mappings the run listed, so a data source changed in
+  LaunchDarkly during the run fails ("changed in LaunchDarkly after this run read it; rerun to pick up the change")
+  instead of being overwritten. A data source that already projects the constant is never rewritten, whatever the
+  state file says (the run warns when its Statsig SQL has changed), nor is one whose wrapper was edited in
+  LaunchDarkly (skipped as "kept: edited in LaunchDarkly", without a warning), and `--constant-event-key=false` never
+  removes the constant. Before updating, the run reads the project's metrics (by offset, checked against the total
+  count and read once more if short) and refuses a data source whose bound metrics (through the numerator or a
+  ratio's denominator) use an event key other than the data source key, since they would match no rows afterwards;
+  `--force-overwrite` updates it anyway and lists them. If the metrics cannot be read completely, nothing is updated.
+  With `--constant-event-key=false`, an update keeps the existing key column instead, and fails the source when the
+  new query does not return it. A source whose key is taken by a data source in another LaunchDarkly environment
+  fails, with or without `--overwrite`, and is left out of `source-mapping.json`. Without `--overwrite`, existing data
+  sources that lack the constant are skipped, and the run prints one line counting them and saying what
+  `--overwrite` would do; the report's new `notes` list names them. A `--dry-run` with `--ld-key` and `--ld-project`
+  reports, per source, whether a real run would create, update, skip, or refuse it.
 
 - `metrics convert`: `--widen-analysis-units` now defaults to **off**. Real data settled it: in a customer's
   warehouse export, 60 of 100 metric sources map two or more id types and one maps nine, so widening is not a
