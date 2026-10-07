@@ -47,8 +47,6 @@ func TestConvert_ConstKey_SumUsesDataSourceKeyAndValueColumn(t *testing.T) {
 	if res.IsLossy() || res.IsBlocked() {
 		t.Errorf("unexpected lossy=%v blocked=%v", res.LossyReasons, res.BlockingReasons)
 	}
-	// Using the constant is the expected outcome, not something to act on: a
-	// note code for the report, not a warning.
 	if !hasCode(res.NoteCodes, WarnConstantEventKey) || hasCode(res.WarningCodes, WarnConstantEventKey) {
 		t.Errorf("notes=%v warnings=%v, want %s as a note only", res.NoteCodes, res.WarningCodes, WarnConstantEventKey)
 	}
@@ -114,9 +112,7 @@ func TestConvert_ConstKey_RatioSameSourceBothTermsSameKey(t *testing.T) {
 	}
 }
 
-// A warehouse-native ratio term carries its column as the term's value column,
-// not in MetadataKey where a cloud event carries it. A count_distinct term
-// must keep that column rather than fall back to counting units.
+// Warehouse-native ratio terms carry their column as the value column, not MetadataKey.
 func TestConvert_ConstKey_RatioCountDistinctTermsKeepTheirColumns(t *testing.T) {
 	raw := `{"type":"user_warehouse","name":"Distinct Orders per Page","id":"Distinct Orders per Page::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"ratio",
@@ -135,7 +131,6 @@ func TestConvert_ConstKey_RatioCountDistinctTermsKeepTheirColumns(t *testing.T) 
 	}
 }
 
-// Filter columns nested in a group are case-mapped.
 func TestConvert_ConstKey_FilterCaseMappingNested(t *testing.T) {
 	raw := `{"type":"user_warehouse","name":"S","id":"S::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"count","metricSourceName":"Checkout Events",
@@ -157,9 +152,6 @@ func TestConvert_ConstKey_MissingColumnIsLossy(t *testing.T) {
 	}
 }
 
-// With --assume-constant-event-key and no LaunchDarkly access, the data
-// source's columns are unknown, so value and filter columns keep Statsig's
-// case. That must be visible on the metric rather than read as verified.
 func TestConvert_ConstKey_UnknownColumnsAreFlaggedUnverified(t *testing.T) {
 	raw := `{"type":"user_warehouse","name":"Order Total","id":"Order Total::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout Events","valueColumn":"order_total",
@@ -178,8 +170,6 @@ func TestConvert_ConstKey_UnknownColumnsAreFlaggedUnverified(t *testing.T) {
 	}
 }
 
-// A data source not created by the wrapper (for example a hand-built one passed
-// with --ld-data-source) keeps today's behavior.
 func TestConvert_ConstKey_OnlyForConstantDataSources(t *testing.T) {
 	raw := `{"type":"user_warehouse","name":"Rev","id":"Rev::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"sum","metricSourceName":"Unmapped","valueColumn":"price_usd"}}`
@@ -194,8 +184,6 @@ func TestConvert_ConstKey_OnlyForConstantDataSources(t *testing.T) {
 	}
 }
 
-// A cloud (SDK-event) metric bound through --ld-data-source to a wrapped
-// source keeps its event name, which can never equal the constant.
 func TestConvert_ConstKey_CloudMetricOnWrappedSourceWarns(t *testing.T) {
 	raw := `{"type":"event_count","name":"Clicks","id":"Clicks::event_count","directionality":"increase",
 	  "metricEvents":[{"name":"add_to_cart","type":"count"}]}`
@@ -227,9 +215,6 @@ func TestConvert_ConstKey_CloudRatioOnWrappedSourceWarns(t *testing.T) {
 	}
 }
 
-// On a constant-key data source the event key matches every row, so a filter
-// that did not convert leaves the metric counting the whole source. That is
-// never acceptable, so the metric is blocked, not merely lossy.
 func TestConvert_ConstKey_UnconvertedFilterBlocksMetric(t *testing.T) {
 	raw := `{"type":"user_warehouse","name":"Pro Checkouts","id":"Pro Checkouts::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"count","metricSourceName":"Checkout Events",
@@ -243,8 +228,7 @@ func TestConvert_ConstKey_UnconvertedFilterBlocksMetric(t *testing.T) {
 		t.Errorf("no partial filter may be emitted: %#v", res.LDMetric.Filters)
 	}
 
-	// The same metric on a legacy data source stays merely lossy: there its event
-	// key, not the filter, is what keeps it from counting every row.
+	// On a legacy data source it is only lossy: there the event key selects rows.
 	legacy := constKeyOpts()
 	legacy.ConstantEventKeys = nil
 	res = mustConvert(t, raw, legacy)

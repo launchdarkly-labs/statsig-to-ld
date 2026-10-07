@@ -66,8 +66,7 @@ func TestPrepareSourceSQL(t *testing.T) {
 	}
 }
 
-// BigQuery and Databricks read "..." as a string literal, where a backslash
-// does escape the quote.
+// On BigQuery and Databricks "..." is a string, where a backslash escapes the quote.
 func TestPrepareSourceSQL_DoubleQuotedStringsOnBigQuery(t *testing.T) {
 	in := `SELECT "say \"hi\";" AS s FROM t;`
 	for _, wt := range []string{"bigquery", "databricks"} {
@@ -81,7 +80,6 @@ func TestPrepareSourceSQL_DoubleQuotedStringsOnBigQuery(t *testing.T) {
 	}
 }
 
-// Every documented Statsig macro must be caught (none is expandable by LD).
 func TestPrepareSourceSQL_AllDocumentedMacrosRejected(t *testing.T) {
 	for _, m := range []string{"{statsig_start_date}", "{statsig_end_date}", "{statsig_start_date_int}", "{statsig_end_date_int}", "{statsig_experiment_start_timestamp}", "{ statsig_start_date }"} {
 		if _, err := PrepareSourceSQL("SELECT * FROM t WHERE ds >= "+m, "snowflake"); err == nil || !strings.Contains(err.Error(), m) {
@@ -90,8 +88,6 @@ func TestPrepareSourceSQL_AllDocumentedMacrosRejected(t *testing.T) {
 	}
 }
 
-// Multi-statement inputs must be rejected even when the second statement hides
-// behind comments or strings.
 func TestPrepareSourceSQL_MultiStatement(t *testing.T) {
 	for _, in := range []string{
 		"SET d = '2026-01-01'; SELECT * FROM t WHERE ds >= $d",
@@ -147,10 +143,8 @@ func TestWrapWithConstantEventKey_Shapes(t *testing.T) {
 	}
 }
 
-// The wrapper puts ")" on its own line so a trailing line comment in the source
-// cannot swallow it. LaunchDarkly then nests the whole query again, both to
-// preview it ("SELECT * FROM (%s) LIMIT %d") and to compute metrics
-// ("... FROM (%s) AS data_source"); parentheses must balance in both.
+// LaunchDarkly nests the query again to preview ("SELECT * FROM (%s) LIMIT %d") and
+// to compute metrics ("... FROM (%s) AS data_source").
 func TestWrapWithConstantEventKey_SurvivesOuterWraps(t *testing.T) {
 	inner := "SELECT user_id, ts FROM events -- trailing comment ) ;"
 	w, err := WrapWithConstantEventKey(inner, "k", "LD_EVENT_KEY", "snowflake")
@@ -228,8 +222,6 @@ func TestApplyConstantEventKey_RewritesBody(t *testing.T) {
 		t.Errorf("keyColumn = %v (col %q), want LD_EVENT_KEY", cm["keyColumn"], col)
 	}
 
-	// The preview guessed a different key column; the constant column must win,
-	// in the preview's case.
 	preview := map[string]any{"keyColumn": "EVENT_KEY"}
 	real := []map[string]any{{"name": "TS", "type": "TIMESTAMP_NTZ"}, {"name": "USER_ID", "type": "TEXT"}, {"name": "EVENT_KEY", "type": "TEXT"}, {"name": "LD_EVENT_KEY", "type": "TEXT"}}
 	ReconcileColumnMappings(cm, preview, real)
@@ -239,9 +231,6 @@ func TestApplyConstantEventKey_RewritesBody(t *testing.T) {
 	}
 }
 
-// A Statsig source with neither SQL nor a table name maps to a body whose
-// tableName is only the source's display name. Wrapping that would produce
-// "SELECT * FROM Checkout Events", which is not SQL.
 func TestApplyConstantEventKey_NoSQLOrTableIsAnError(t *testing.T) {
 	body := MapMetricSourceToDataSource(map[string]any{"name": "Checkout Events", "timestampColumn": "ts"}, "production", "snowflake-experimentation", "")
 	_, err := ApplyConstantEventKey(body, "snowflake", nil)
@@ -326,8 +315,7 @@ func TestClassifyConstantKey(t *testing.T) {
 			t.Errorf("%s: event key = %q, want k", tt.name, w.EventKey)
 		}
 	}
-	// The union stays rejected whatever the data source is called, unless its key
-	// is the first branch's literal.
+	// The union is rejected for any data source key except the first branch's literal.
 	union := tests[len(tests)-1].sql
 	for _, key := range []string{"events", "purchase", "signups"} {
 		if _, got := ClassifyConstantKey(union, "EVENT_NAME", key, "snowflake"); got != NoConstantKey {
@@ -355,8 +343,6 @@ func TestParseConstantKeyWrapper_InnerAndWarehouseComments(t *testing.T) {
 	}
 }
 
-// The preview guesses the timestamp column (the first timestamp-typed one);
-// Statsig's configured column wins whenever the warehouse returns it.
 func TestReconcileColumnMappings_StatsigTimestampWins(t *testing.T) {
 	cm := map[string]any{"timestampColumn": "event_ts", "contexts": map[string]string{"user": "user_id"}}
 	preview := map[string]any{"timestampColumn": "CREATED_AT"}
@@ -377,8 +363,6 @@ func TestReconcileColumnMappings_PreviewTimestampWhenStatsigColumnMissing(t *tes
 	}
 }
 
-// The preview's value column is a guess (the first numeric column), so the
-// Statsig value column wins whenever the warehouse returns it.
 func TestReconcileColumnMappings_StatsigValueColumnWins(t *testing.T) {
 	real := []map[string]any{{"name": "QUANTITY", "type": "NUMBER"}, {"name": "ORDER_TOTAL", "type": "NUMBER"}, {"name": "TS", "type": "TIMESTAMP_NTZ"}}
 	cm := map[string]any{"timestampColumn": "ts", "valueColumn": "order_total"}

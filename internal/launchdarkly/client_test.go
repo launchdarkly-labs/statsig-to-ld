@@ -408,11 +408,8 @@ func readAll(r interface{ Read(p []byte) (int, error) }) ([]byte, error) {
 	}
 }
 
-// fakeMetricList serves /api/v2/metrics the way LaunchDarkly does: ordered by
-// creation time only, a keyset cursor of (created at or after, id after) in
-// its next links, and offset paging when offset is present. reverseTies, when
-// set, reverses the order of metrics created at the same instant for a given
-// request number (counting from 1), as an ORDER BY on a non-unique column may.
+// fakeMetricList mimics LaunchDarkly's metric list: ordered by creation time only, with
+// keyset-cursor next links and offset paging. reverseTies(n) reverses ties on request n.
 type fakeMetricList struct {
 	t           *testing.T
 	metrics     []fakeMetric
@@ -476,7 +473,6 @@ func (f *fakeMetricList) handler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "_links": links, "totalCount": len(f.metrics)})
 }
 
-// followNextLinks lists metrics by following the collection's next links.
 func followNextLinks(t *testing.T, client *Client) map[string]bool {
 	t.Helper()
 	got := map[string]bool{}
@@ -494,10 +490,6 @@ func followNextLinks(t *testing.T, client *Client) map[string]bool {
 	return got
 }
 
-// The cursor in LaunchDarkly's next links resumes at "created at or after the
-// last metric, with a greater id", but the list is ordered by creation time
-// alone, so a later metric with a smaller id is skipped. ListMetricsRaw pages by
-// offset and never follows the links.
 func TestListMetricsRaw_DoesNotMissMetricsTheCursorSkips(t *testing.T) {
 	f := &fakeMetricList{t: t}
 	for i := 0; i < 60; i++ {
@@ -521,9 +513,6 @@ func TestListMetricsRaw_DoesNotMissMetricsTheCursorSkips(t *testing.T) {
 	}
 }
 
-// Offset pages ordered by a non-unique creation time can put a metric on two
-// pages and another on neither. The short list is read once more; if it is
-// still short, the error says how short.
 func TestListMetricsRaw_RereadsWhenTiesShuffleBetweenPages(t *testing.T) {
 	f := &fakeMetricList{t: t}
 	for i := 0; i < 60; i++ {
@@ -563,8 +552,6 @@ func TestListMetricsRaw_FailedPageIsAnError(t *testing.T) {
 	}
 }
 
-// LaunchDarkly answers a JSON Patch that does not apply, including a failed
-// "test" operation, with 400 "Error applying json-patch document".
 func TestUpdateMetricDataSource_PatchNotAppliedIsDistinct(t *testing.T) {
 	status, msg := http.StatusBadRequest, "Error applying json-patch document"
 	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {

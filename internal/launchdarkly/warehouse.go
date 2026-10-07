@@ -186,8 +186,6 @@ func (c *Client) PreviewDataSource(ctx context.Context, integrationConfigID, sql
 }
 
 // ListMetricDataSources lists the project's unarchived metric data sources.
-// Callers decide what exists and how metrics bind from this list, so a failed
-// request is an error rather than an empty list.
 func (c *Client) ListMetricDataSources(ctx context.Context) ([]map[string]any, error) {
 	status, body, err := c.requestJSON(ctx, "GET", fmt.Sprintf("/internal/projects/%s/metric-data-sources", c.projectKey), nil)
 	if err != nil {
@@ -199,17 +197,11 @@ func (c *Client) ListMetricDataSources(ctx context.Context) ([]map[string]any, e
 	return j.ExtractItemsList(body), nil
 }
 
-// ErrPatchNotApplied reports that LaunchDarkly could not apply a data source
-// JSON Patch to the data source as it is now. For a patch built from a listing
-// and guarded by "test" operations, that means the data source changed after
-// it was listed.
+// ErrPatchNotApplied means a JSON Patch, e.g. one with a failed "test" op, did not apply.
 var ErrPatchNotApplied = errors.New("the JSON Patch does not apply to the data source as it is now")
 
-// UpdateMetricDataSource applies a JSON Patch (RFC 6902) to a metric data
-// source. LaunchDarkly applies it to the data source's API representation and
-// re-validates the query and column mappings when either changes. A patch that
-// does not apply, including a failed "test" operation, is ErrPatchNotApplied:
-// LaunchDarkly answers 400 "Error applying json-patch document" for both.
+// UpdateMetricDataSource applies a JSON Patch to a metric data source. LaunchDarkly
+// answers 400 "Error applying json-patch document" for any patch that does not apply.
 func (c *Client) UpdateMetricDataSource(ctx context.Context, key string, ops []JSONPatchOp) (map[string]any, error) {
 	path := fmt.Sprintf("/internal/projects/%s/metric-data-sources/%s", c.projectKey, url.PathEscape(key))
 	status, body, err := c.requestJSON(ctx, "PATCH", path, ops)
@@ -242,18 +234,10 @@ func (c *Client) CreateMetricDataSource(ctx context.Context, payload map[string]
 // metricsPageSize is the largest page LaunchDarkly's metric list returns.
 const metricsPageSize = 50
 
-// ListMetricsRaw lists every metric in the project as raw maps. Callers decide
-// whether a data source can be changed safely from this list, so a failed page
-// or a short list is an error.
-//
-// It pages by offset, building each URL itself. The collection's next link is
-// a cursor that can skip metrics: it resumes after the last metric's creation
-// time and id, but the list is ordered by creation time alone. Offset pages
-// have their own gap, since metrics created at the same instant may come back
-// in a different order on each request, so one can land on two pages and
-// another on neither. So the metrics are deduplicated by key and counted
-// against the first page's totalCount; a short list is read once more, then
-// is an error.
+// ListMetricsRaw lists every metric in the project. It pages by offset: the next-link
+// cursor resumes by creation time and id but the list is ordered by creation time
+// alone, so it can skip metrics. Offset pages can reorder ties too, so metrics are
+// deduplicated by key and checked against totalCount, rereading once if short.
 func (c *Client) ListMetricsRaw(ctx context.Context) ([]map[string]any, error) {
 	metrics, total, err := c.readMetricPages(ctx)
 	if err == nil && len(metrics) < total {
@@ -268,8 +252,6 @@ func (c *Client) ListMetricsRaw(ctx context.Context) ([]map[string]any, error) {
 	return metrics, nil
 }
 
-// readMetricPages reads the metric list once, page by page, and returns the
-// distinct metrics with the totalCount of the first page.
 func (c *Client) readMetricPages(ctx context.Context) ([]map[string]any, int, error) {
 	var all []map[string]any
 	seen := map[string]bool{}

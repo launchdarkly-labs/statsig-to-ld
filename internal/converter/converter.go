@@ -63,17 +63,12 @@ type Options struct {
 	// nothing.
 	RegisteredAnalysisUnits map[string]bool
 
-	// ConstantEventKeys maps an LD data source key to the event key its SQL
-	// projects as a constant key column (see warehouse.ApplyConstantEventKey).
-	// A warehouse-native metric bound to one of these uses that event key, so
-	// LaunchDarkly's key-column filter matches every row and the metric's own
-	// filters do the selecting.
+	// ConstantEventKeys maps an LD data source key to the constant event key its SQL
+	// projects; warehouse-native metrics on it use that key and select rows by filters.
 	ConstantEventKeys map[string]string
 
-	// DataSourceColumns maps an LD data source key to its column names as
-	// LaunchDarkly stores them. LaunchDarkly references columns as quoted,
-	// case-sensitive identifiers, so value, count-distinct, and filter columns
-	// are matched to these case-insensitively and rewritten to the stored case.
+	// DataSourceColumns maps an LD data source key to its column names. LaunchDarkly
+	// matches columns case-sensitively, so metric columns are rewritten to this case.
 	DataSourceColumns map[string][]string
 }
 
@@ -110,15 +105,10 @@ const (
 	WarnUnfilteredConstantKey     = "constant_event_key_unfiltered"
 
 	// Note codes (Result.NoteCodes): reported, never printed per metric.
-	// WarnConstantEventKey marks a term that uses its data source's constant
-	// event key. WarnColumnUnverified marks a term on a constant-key data source
-	// whose columns LaunchDarkly did not report, so its value, count-distinct,
-	// and filter columns keep Statsig's case; the run summary counts them.
 	WarnConstantEventKey = "constant_event_key"
 	WarnColumnUnverified = "column_unverified"
 
-	// Existing metrics, read back when a create conflicts. Set by the command,
-	// not by Convert, but kept here so every report code is in one place.
+	// Set by the command when a create conflicts, not by Convert.
 	WarnExistingEventKeyMismatch = "existing_metric_event_key_mismatch"
 	WarnExistingMetricUnverified = "existing_metric_unverified"
 
@@ -175,14 +165,11 @@ type Result struct {
 	WarningCodes []string
 	LossyCodes   []string
 
-	// NoteCodes record facts about the conversion that need no action on the
-	// metric. They are reported, not printed. Populated only via addNote.
+	// NoteCodes need no action: reported, not printed. Populated only via addNote.
 	NoteCodes []string
 
-	// BlockingReasons is the subset of warnings that rule the metric out
-	// entirely: creating it would measure something materially different, and
-	// --convert-lossy does not override that. BlockingCodes runs parallel to it.
-	// Populated only via addBlocking.
+	// BlockingReasons are the warnings that rule the metric out even with --convert-lossy;
+	// BlockingCodes runs parallel to it. Populated only via addBlocking.
 	BlockingReasons []string
 	BlockingCodes   []string
 
@@ -209,16 +196,12 @@ func (r *Result) addLossy(code, format string, args ...any) {
 	r.LossyCodes = append(r.LossyCodes, code)
 }
 
-// addNote records a note code once.
 func (r *Result) addNote(code string) {
 	if !slices.Contains(r.NoteCodes, code) {
 		r.NoteCodes = append(r.NoteCodes, code)
 	}
 }
 
-// addBlocking records a message that warns the user and rules the metric out,
-// even with --convert-lossy. The message is added to Warnings and
-// BlockingReasons.
 func (r *Result) addBlocking(code, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	r.Warnings = append(r.Warnings, msg)
@@ -238,8 +221,7 @@ func (r *Result) addCoded(prefix string, ws ...codedWarning) {
 // feature. Lossy metrics are skipped by default; --convert-lossy converts them.
 func (r *Result) IsLossy() bool { return len(r.LossyReasons) > 0 }
 
-// IsBlocked reports whether the metric must not be created at all, regardless
-// of --convert-lossy.
+// IsBlocked reports whether the metric must not be created, even with --convert-lossy.
 func (r *Result) IsBlocked() bool { return len(r.BlockingReasons) > 0 }
 
 // IncompatibleError indicates the Statsig metric type has no LD equivalent.
@@ -308,9 +290,8 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		}
 	}
 
-	// A warehouse-native metric bound to a data source that projects a constant
-	// event key uses that key: Statsig selects rows with filter criteria, not by
-	// event name, so the key column must match every row.
+	// Statsig selects warehouse rows by filter criteria, not event name, so on a
+	// constant-key data source the event key is the constant, matching every row.
 	boundDS := boundDataSource(sg, opts)
 	constKey, hasConstKey := constantEventKey(boundDS, opts)
 	var valueColumn string
@@ -739,8 +720,6 @@ func appendUnique(dst []string, values ...string) []string {
 	return dst
 }
 
-// boundDataSource returns the LD data source a simple metric binds to: its
-// source's mapping, else the global default.
 func boundDataSource(sg *statsig.Metric, opts Options) string {
 	if src := sg.NumeratorSourceName(); src != "" {
 		return resolveDataSource(src, opts)
@@ -748,8 +727,6 @@ func boundDataSource(sg *statsig.Metric, opts Options) string {
 	return opts.LDDataSource
 }
 
-// constantEventKey returns the event key a data source projects as a constant
-// key column, when it does.
 func constantEventKey(dsKey string, opts Options) (string, bool) {
 	if dsKey == "" {
 		return "", false
@@ -758,12 +735,8 @@ func constantEventKey(dsKey string, opts Options) (string, bool) {
 	return k, ok
 }
 
-// alignTermColumns rewrites one term's value, count-distinct, and filter
-// columns to the case its data source stores them in. When the data source's
-// columns are unknown and the term depends on them (it reads a constant-key
-// source, so these columns are what select and measure its rows), it notes
-// that their case could not be checked. label prefixes the column descriptions,
-// e.g. "numerator ".
+// alignTermColumns rewrites a term's columns to the data source's stored case. With
+// unknown columns it notes, for a constant-key term, that their case went unchecked.
 func alignTermColumns(result *Result, opts Options, dsKey, label string, constKey bool, valueColumn, field *string, filters *launchdarkly.EventFilter) {
 	cols := opts.DataSourceColumns[dsKey]
 	if len(cols) == 0 {
@@ -782,7 +755,6 @@ func alignTermColumns(result *Result, opts Options, dsKey, label string, constKe
 	matchFilterColumns(result, cols, filters)
 }
 
-// filterAttributes returns every leaf column in a filter tree.
 func filterAttributes(f *launchdarkly.EventFilter) []string {
 	if f == nil {
 		return nil
@@ -802,11 +774,8 @@ func filterAttributes(f *launchdarkly.EventFilter) []string {
 	return out
 }
 
-// blockUnfilteredTerms rules the metric out when a term reading a constant-key
-// data source carried Statsig filter criteria that did not all convert. On such
-// a source the event key matches every row, so the filter is the only thing
-// selecting rows; without it the metric counts the whole source. Unlike other
-// lossy filter outcomes, --convert-lossy does not override this.
+// blockUnfilteredTerms rules the metric out when a constant-key term's filter did not
+// fully convert: the event key matches every row, so it would count the whole source.
 func blockUnfilteredTerms(result *Result, dsKey string, terms ...string) {
 	for _, f := range result.FilterOutcomes {
 		if f.Applied || !slices.Contains(terms, f.Term) {
@@ -818,18 +787,13 @@ func blockUnfilteredTerms(result *Result, dsKey string, terms ...string) {
 	}
 }
 
-// warnCloudOnConstantKey flags a cloud (SDK-event) metric term bound to a
-// constant-key data source: its event name can never equal the constant, so the
-// term matches no rows.
 func warnCloudOnConstantKey(result *Result, label, eventName, dsKey, constKey string) {
 	result.addWarning(WarnCloudMetricConstantKey,
 		"%sevent %q is bound to data source %q, whose key column holds the constant %q, so it matches no rows. Bind cloud metrics to a data source with an event-name key column, or leave them unbound to read SDK events",
 		label, eventName, dsKey, constKey)
 }
 
-// matchColumn returns col in the case the data source stores it. With no known
-// columns it returns col unchanged. A column the data source does not have is
-// recorded as lossy: LaunchDarkly either rejects the metric or the query fails.
+// matchColumn returns col in the data source's case, recording a missing column as lossy.
 func matchColumn(result *Result, cols []string, col, what string) string {
 	if col == "" || len(cols) == 0 {
 		return col
@@ -848,8 +812,6 @@ func matchColumn(result *Result, cols []string, col, what string) string {
 	return col
 }
 
-// matchFilterColumns rewrites every filter leaf's column to the data source's
-// stored case.
 func matchFilterColumns(result *Result, cols []string, f *launchdarkly.EventFilter) {
 	if f == nil || len(cols) == 0 {
 		return
@@ -1126,9 +1088,7 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		// Top-level Aggregation is "ratio"; each term has its own column,
 		// aggregation, and filters. The numerator uses the shared warehouseNative
 		// value column/criteria; the denominator has denominator* fields.
-		// ratioTermSpec reads a count_distinct term's column from MetadataKey,
-		// where cloud events carry it; a warehouse-native term carries it as its
-		// value column, so set both.
+		// ratioTermSpec reads a count_distinct column from MetadataKey, so set it too.
 		numCol, denCol := sg.NumeratorValueColumn(), wn.DenominatorValueColumn
 		numEv = statsig.MetricEvent{Name: numCol, MetadataKey: numCol, Type: wn.NumeratorAggregation, Criteria: sg.NumeratorCriteria()}
 		denEv = statsig.MetricEvent{Name: denCol, MetadataKey: denCol, Type: wn.DenominatorAggregation, Criteria: wn.DenominatorCriteria}
@@ -1266,9 +1226,7 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		result.LDMetric.Denominator.DataSource = &launchdarkly.DataSource{Key: denDS}
 	}
 
-	// Constant event keys: each term uses the key of its own data source, so a
-	// denominator on a different source gets that source's key. The term's
-	// Statsig column then becomes the LD value column for a numeric term.
+	// Constant event keys: each term uses its own data source's key.
 	numConstKey, numHasConst := constantEventKey(numDS, opts)
 	denConstKey, denHasConst := constantEventKey(denDS, opts)
 	if sg.IsWarehouseNative() {

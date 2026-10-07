@@ -41,8 +41,7 @@ type MetricPost struct {
 	// metric these filter warehouse columns.
 	Filters *EventFilter `json:"filters,omitempty"`
 
-	// ValueColumn is the warehouse column a numeric warehouse-native metric
-	// aggregates. Overrides the value column mapped on the data source.
+	// ValueColumn overrides the data source's value column for a numeric warehouse-native metric.
 	ValueColumn string `json:"valueColumn,omitempty"`
 }
 
@@ -100,8 +99,7 @@ type DenominatorPost struct {
 	// Filters narrows which events the denominator counts, independently of the
 	// numerator's filter.
 	Filters *EventFilter `json:"filters,omitempty"`
-	// ValueColumn is the column a numeric warehouse-native denominator
-	// aggregates. Overrides the value column mapped on its data source.
+	// ValueColumn overrides the data source's value column for a numeric denominator.
 	ValueColumn string `json:"valueColumn,omitempty"`
 }
 

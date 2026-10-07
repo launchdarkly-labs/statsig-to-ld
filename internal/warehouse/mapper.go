@@ -59,8 +59,7 @@ func SanitizeTags(tags []string) []string {
 	return result
 }
 
-// FallbackColumn is a column entry guessed from the Statsig mapping, used when
-// the warehouse preview is unavailable.
+// FallbackColumn is a column guessed from the Statsig mapping when the preview is unavailable.
 type FallbackColumn struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
@@ -197,9 +196,7 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
-	// The timestamp column Statsig was configured with wins, in the case the
-	// warehouse returns it. The preview only guesses (the first timestamp-typed
-	// column), so its guess is used only when Statsig's column is not there.
+	// Statsig's configured column wins; the preview only guesses the first timestamp-typed column.
 	tsMapped := false
 	if v, ok := cm["timestampColumn"].(string); ok {
 		if real, found := actual[strings.ToLower(v)]; found {
@@ -219,8 +216,6 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
-	// Same precedence for the value column: the preview's guess is the first
-	// numeric column, so Statsig's configured column wins when it is returned.
 	vcMapped := false
 	if v, ok := cm["valueColumn"].(string); ok && v != "" {
 		if real, found := actual[strings.ToLower(v)]; found {

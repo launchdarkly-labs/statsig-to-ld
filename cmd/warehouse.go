@@ -133,27 +133,18 @@ type migrationReport struct {
 	} `json:"warehouse"`
 	Warnings []string `json:"warnings"`
 	Errors   []string `json:"errors"`
-	// Notes records per-source outcomes that need no action, so they are not
-	// printed, or are printed only as a count.
+	// Notes record per-source outcomes that need no action; none is printed individually.
 	Notes []reportNote `json:"notes,omitempty"`
 }
 
-// reportNote is one data source outcome kept for debugging.
 type reportNote struct {
 	Code       string `json:"code"`
 	DataSource string `json:"data_source"`
 }
 
-// Report note codes.
 const (
-	// noteEditedConstantKey: the data source opens with the constant event-key
-	// wrapper but was edited after creation, so it was kept as is.
-	noteEditedConstantKey = "constant_key_edited_in_launchdarkly"
-	// noteKeptConstantKey: --constant-event-key=false did not remove the
-	// constant from a data source that has it.
-	noteKeptConstantKey = "constant_key_kept"
-	// noteExistsWithoutConstantKey: the data source exists without the constant
-	// event key and --overwrite was not set.
+	noteEditedConstantKey        = "constant_key_edited_in_launchdarkly"
+	noteKeptConstantKey          = "constant_key_kept"
 	noteExistsWithoutConstantKey = "exists_without_constant_key"
 )
 
@@ -176,20 +167,15 @@ type migrationEngine struct {
 	verbose        bool
 
 	constantEventKey bool
-	// forceOverwrite lets --overwrite update a data source whose bound metrics
-	// would match no rows afterwards.
-	forceOverwrite bool
-	// ldReadable is true when credentials allow reading the project, which a
-	// dry run uses to check existing data sources.
-	ldReadable bool
+	forceOverwrite   bool
+	ldReadable       bool
 
 	// The project's metrics, read once per run by projectMetrics.
 	metrics     []map[string]any
 	metricsErr  error
 	metricsRead bool
 
-	// unmapped holds data source keys left out of source-mapping.json because
-	// they belong to another LaunchDarkly environment.
+	// unmapped holds keys taken in another environment, left out of source-mapping.json.
 	unmapped map[string]bool
 
 	whConnections map[string]any
@@ -678,8 +664,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 
 	whType := warehouse.WarehouseTypeForIntegration(integrationKey)
 
-	// The list decides what is created, updated, or skipped, so a failed read
-	// stops the phase rather than reading as "nothing exists yet".
+	// A failed read must stop the phase, not read as "nothing exists yet".
 	list, err := e.ld.ListMetricDataSources(e.ctx)
 	if err != nil {
 		return fmt.Errorf("could not read the project's existing LaunchDarkly metric data sources, so cannot tell which to create: %w", err)
@@ -696,8 +681,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 
 		output.Progress(i+1, total, name, "")
 
-		// Decided before any preview, so a source that will not be written does
-		// not cost a warehouse query.
+		// Planned before the preview so a source that is not written costs no warehouse query.
 		plan := e.planDataSource(body, existing, collisions, whType)
 		e.recordPlan(key, plan)
 		if plan.note == noteExistsWithoutConstantKey {
@@ -775,7 +759,6 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 	return nil
 }
 
-// recordPlan keeps what the report and source-mapping.json need from a plan.
 func (e *migrationEngine) recordPlan(key string, plan dataSourcePlan) {
 	if plan.note != "" {
 		e.report.Notes = append(e.report.Notes, reportNote{Code: plan.note, DataSource: key})
@@ -788,8 +771,6 @@ func (e *migrationEngine) recordPlan(key string, plan dataSourcePlan) {
 	}
 }
 
-// withoutConstantKeySummary is one line for the n data sources skipped because
-// they exist without the constant event key, or "" when n is 0.
 func withoutConstantKeySummary(n int) string {
 	if n == 0 {
 		return ""
@@ -797,7 +778,6 @@ func withoutConstantKeySummary(n int) string {
 	return fmt.Sprintf("%d data source(s) already exist without the constant event key, so metrics converted against them keep Statsig event keys, which usually match no rows. To update them, rerun with --overwrite (it refuses any whose bound metrics use other event keys); leave any built by hand whose key column holds real event names.", n)
 }
 
-// indexDataSources keys a data source list by data source key.
 func indexDataSources(list []map[string]any) map[string]map[string]any {
 	existing := map[string]map[string]any{}
 	for _, ds := range list {
@@ -806,10 +786,7 @@ func indexDataSources(list []map[string]any) map[string]map[string]any {
 	return existing
 }
 
-// keyCollisions groups Statsig source names by the LD data source key they
-// sanitize to, keeping only keys shared by more than one source. Two such
-// sources would be written onto one data source, the last one winning, and
-// source-mapping.json would bind both sources' metrics to it.
+// keyCollisions returns the LD keys shared by more than one Statsig source, with their names.
 func keyCollisions(sources []map[string]any) map[string][]string {
 	byKey := map[string][]string{}
 	for _, source := range sources {
@@ -825,7 +802,6 @@ func keyCollisions(sources []map[string]any) map[string][]string {
 	return byKey
 }
 
-// planAction is what Phase 3 does with one Statsig source.
 type planAction int
 
 const (
@@ -835,31 +811,20 @@ const (
 	planRefuse
 )
 
-// dataSourcePlan is the decision for one Statsig source, made from
-// LaunchDarkly's data sources before anything is written. The dry run reports
-// the same decisions.
+// dataSourcePlan is decided before anything is written; the dry run reports the same plans.
 type dataSourcePlan struct {
-	action planAction
-	// reason is the short outcome for a skip or refusal.
-	reason string
-	// warning is printed and kept for the report.
-	warning string
-	// note is a report-only code (see reportNote) for an outcome that needs no
-	// action.
-	note string
-	// err is why a refused source fails.
-	err error
-	// markDone records a skipped source in migration_state.json.
+	action   planAction
+	reason   string
+	warning  string
+	note     string
+	err      error
 	markDone bool
 	// unmapped leaves the source out of source-mapping.json.
 	unmapped bool
-	// stale names the bound metrics an update leaves matching no rows. Only set
-	// when --force-overwrite lets the update go ahead anyway.
+	// stale names bound metrics left matching no rows; set only with --force-overwrite.
 	stale []string
 }
 
-// planDataSource decides what to do with the data source body built for one
-// Statsig source. existing is the project's data sources by key.
 func (e *migrationEngine) planDataSource(body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string) dataSourcePlan {
 	key := jsonutil.GetStr(body, "key")
 	if names, ok := collisions[key]; ok {
@@ -879,11 +844,8 @@ func (e *migrationEngine) planDataSource(body map[string]any, existing map[strin
 		return dataSourcePlan{action: planCreate}
 	}
 
-	// Data source keys are unique per project, not per environment, so the key
-	// may already be taken in another environment. That data source is not this
-	// one: it is neither updated nor bound to this environment's metrics. The
-	// list always carries environmentKey (gonfalon's MetricDataSourceRep); a
-	// listing without one is taken to be this environment.
+	// Data source keys are unique per project, not per environment; one in another
+	// environment is neither updated nor bound to this environment's metrics.
 	if env := jsonutil.GetStr(ds, "environmentKey"); env != "" && env != e.environmentKey {
 		return dataSourcePlan{
 			action:   planRefuse,
@@ -897,20 +859,16 @@ func (e *migrationEngine) planDataSource(body map[string]any, existing map[strin
 	wrapper, state := existingConstantKey(ds, whType)
 	switch {
 	case state == warehouse.ConstantKeyEdited:
-		// It still projects the constant, so its metrics match, and the edit is
-		// someone's choice: never rewritten, whatever the flags say.
+		// Someone's edit that still projects the constant: never rewritten, whatever the flags.
 		return dataSourcePlan{action: planSkip, reason: "kept: edited in LaunchDarkly", note: noteEditedConstantKey, markDone: true}
 	case state == warehouse.ConstantKeyWrapped && e.constantEventKey:
-		// Never rewritten, whatever the state file or --overwrite says: another
-		// PATCH could only drop mappings edited in LaunchDarkly since.
+		// Never rewritten, even with --overwrite: a PATCH could only drop mappings edited since.
 		plan := dataSourcePlan{action: planSkip, reason: "already has the constant event key", markDone: true}
 		if inner, err := warehouse.PrepareSourceSQL(jsonutil.GetStr(body, "sqlQuery"), whType); err == nil && !warehouse.SameSQL(inner, wrapper.Inner) {
 			plan.warning = fmt.Sprintf("Data source %q was kept as is, but its Statsig SQL has changed since it was created; edit its SQL in LaunchDarkly if the change matters.", key)
 		}
 		return plan
 	case state == warehouse.ConstantKeyWrapped:
-		// --constant-event-key=false never removes the constant: metrics on the
-		// data source use it as their event key.
 		plan := dataSourcePlan{action: planSkip, reason: "already exists in LD", markDone: true}
 		if e.overwrite {
 			plan.reason = "kept: has the constant event key, which its metrics need"
@@ -931,9 +889,7 @@ func (e *migrationEngine) planDataSource(body map[string]any, existing map[strin
 		return dataSourcePlan{action: planUpdate}
 	}
 
-	// --overwrite on a data source without the constant: after the update its
-	// key column holds only the data source key, so check the metrics bound to
-	// it before writing anything.
+	// After the update the key column holds only the data source key, so check bound metrics first.
 	stale, err := e.staleBoundMetrics(key, key)
 	if err != nil {
 		return dataSourcePlan{
@@ -953,10 +909,7 @@ func (e *migrationEngine) planDataSource(body map[string]any, existing map[strin
 	return dataSourcePlan{action: planUpdate, stale: stale}
 }
 
-// existingConstantKey classifies an existing data source's query against the
-// constant event-key wrapper (see warehouse.ClassifyConstantKey), using the
-// data source's own warehouse type for comment and quoting rules (whType when
-// it has none).
+// existingConstantKey classifies ds's query by its own warehouse type, else whType.
 func existingConstantKey(ds map[string]any, whType string) (warehouse.ConstantKeyWrapper, warehouse.ConstantKeyState) {
 	if t := warehouse.WarehouseTypeForIntegration(jsonutil.GetStr(ds, "integrationKey")); t != "" {
 		whType = t
@@ -965,8 +918,6 @@ func existingConstantKey(ds map[string]any, whType string) (warehouse.ConstantKe
 	return warehouse.ClassifyConstantKey(jsonutil.GetStr(ds, "sqlQuery"), keyColumn, jsonutil.GetStr(ds, "key"), whType)
 }
 
-// projectMetrics reads the project's metrics once per run. The result, or the
-// error, is reused for every data source.
 func (e *migrationEngine) projectMetrics() ([]map[string]any, error) {
 	if !e.metricsRead {
 		e.metrics, e.metricsErr = e.ld.ListMetricsRaw(e.ctx)
@@ -975,9 +926,7 @@ func (e *migrationEngine) projectMetrics() ([]map[string]any, error) {
 	return e.metrics, e.metricsErr
 }
 
-// staleBoundMetrics names the project's metrics bound to dsKey, through the
-// numerator or a ratio's denominator, whose event key on that term is not
-// constKey.
+// staleBoundMetrics names metrics whose term on dsKey has an event key other than constKey.
 func (e *migrationEngine) staleBoundMetrics(dsKey, constKey string) ([]string, error) {
 	metrics, err := e.projectMetrics()
 	if err != nil {
@@ -1004,9 +953,7 @@ func (e *migrationEngine) staleBoundMetrics(dsKey, constKey string) ([]string, e
 	return stale, nil
 }
 
-// failDataSource records a data source that could not be created or updated.
-// The progress line gets the error's first line, so a refusal reads in full
-// while an API error's response body waits for the report.
+// failDataSource prints only the error's first line; the report keeps the full error.
 func (e *migrationEngine) failDataSource(key, name string, err error) {
 	first, _, _ := strings.Cut(err.Error(), "\n")
 	output.Fail(first)
@@ -1015,16 +962,13 @@ func (e *migrationEngine) failDataSource(key, name string, err error) {
 	e.report.Errors = append(e.report.Errors, fmt.Sprintf("Data source \"%s\": %v", name, err))
 }
 
-// warn prints a warning and keeps it for the final report.
 func (e *migrationEngine) warn(msg string) {
 	output.Warn(msg)
 	e.report.Warnings = append(e.report.Warnings, msg)
 }
 
-// updateDataSource updates an existing data source's query, key column, and
-// column list in place. LaunchDarkly has no route to delete a metric data
-// source and keeps keys unique even after archiving, so updating in place is
-// the only way to fix an existing one.
+// updateDataSource patches in place: LaunchDarkly has no delete route for metric data
+// sources and keeps keys unique after archiving.
 func (e *migrationEngine) updateDataSource(existing, body map[string]any, name string, plan dataSourcePlan) {
 	key := jsonutil.GetStr(body, "key")
 	ops, changes, err := dataSourcePatch(existing, body, e.constantEventKey)
@@ -1053,13 +997,8 @@ func (e *migrationEngine) updateDataSource(existing, body map[string]any, name s
 	}
 }
 
-// patchPreconditions are JSON Patch "test" operations that make LaunchDarkly
-// apply an update only to the data source this run listed: its query field
-// (whichever of tableName, viewName, and sqlQuery it has) and its column
-// mappings must still equal the listed values. LaunchDarkly compares them as
-// JSON, field by field, with numbers and strings compared by their encoding;
-// the listed values re-encode as LaunchDarkly encodes them (column lengths,
-// precisions, and scales are integers well inside float64's exact range).
+// patchPreconditions returns "test" ops so LaunchDarkly applies the patch only if the
+// query field and column mappings still equal what this run listed.
 func patchPreconditions(existing map[string]any) []launchdarkly.JSONPatchOp {
 	var ops []launchdarkly.JSONPatchOp
 	for _, field := range []string{"tableName", "viewName", "sqlQuery"} {
@@ -1073,26 +1012,11 @@ func patchPreconditions(existing map[string]any) []launchdarkly.JSONPatchOp {
 	return ops
 }
 
-// dataSourcePatch builds the JSON Patch for updating an existing data source
-// to the body this run built. It changes as little as it can, so mappings
-// edited in LaunchDarkly survive:
-//
-//   - The query: LaunchDarkly requires exactly one of tableName, viewName, or
-//     sqlQuery, so whichever the existing source used and the body does not is
-//     removed.
-//   - keyColumn: the body's (the constant column). With constantKey false the
-//     existing key column is kept, in the new query's case; if the new query
-//     does not return it, there is no update, since metrics on the data source
-//     would filter a different column.
-//   - columns: the body's, which LaunchDarkly validates against the query.
-//   - timestampColumn, valueColumn, and each context kind: kept while the new
-//     columns include them (matched case-insensitively and rewritten to the new
-//     case), else the body's value for the same field, else removed.
-//
-// Paths follow gonfalon's MetricDataSourceColumnMappingsRep: timestampColumn,
-// contexts, and columns are always present; keyColumn and valueColumn are
-// omitted when unset, so they are set with "add". Returns the ops and a short
-// description of every mapping that had to change beyond the case.
+// dataSourcePatch builds the JSON Patch from existing to body. Existing mappings are
+// kept while the new columns include them (case-insensitively, in the new case), so
+// edits made in LaunchDarkly survive. LaunchDarkly requires exactly one of tableName,
+// viewName, and sqlQuery, and omits unset keyColumn and valueColumn, hence "add".
+// The []string describes mappings that changed beyond case.
 func dataSourcePatch(existing, body map[string]any, constantKey bool) ([]launchdarkly.JSONPatchOp, []string, error) {
 	cm, _ := body["columnMappings"].(map[string]any)
 	old := jsonutil.GetMap(existing, "columnMappings")
@@ -1191,8 +1115,7 @@ func dataSourcePatch(existing, body map[string]any, constantKey bool) ([]launchd
 	return ops, changes, nil
 }
 
-// columnSet resolves column names against a data source's column list: an
-// exact match first, then a case-insensitive one, returned in the list's case.
+// columnSet matches names exactly, then case-insensitively, returning the list's case.
 type columnSet struct {
 	exact map[string]bool
 	lower map[string]string
@@ -1239,8 +1162,6 @@ func (s columnSet) find(name string) (string, bool) {
 	return real, ok
 }
 
-// stringMap reads a context mapping, as built (map[string]string) or decoded
-// from JSON (map[string]any).
 func stringMap(v any) map[string]string {
 	out := map[string]string{}
 	switch m := v.(type) {
@@ -1258,7 +1179,6 @@ func stringMap(v any) map[string]string {
 	return out
 }
 
-// quoteAll quotes and joins names for a message.
 func quoteAll(names []string) string {
 	quoted := make([]string, len(names))
 	for i, n := range names {
@@ -1267,10 +1187,8 @@ func quoteAll(names []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// applyConstantEventKey wraps the data source SQL with the constant event-key
-// column and, when a warehouse preview is available, re-previews the wrapped
-// SQL: LaunchDarkly validates the saved columns against exactly that query, so
-// the column list must come from it, not from the unwrapped source.
+// applyConstantEventKey wraps the SQL and re-previews it: LaunchDarkly validates the
+// saved columns against the wrapped query, so the column list must come from it.
 func (e *migrationEngine) applyConstantEventKey(body map[string]any, whType, integrationConfigID string, sourceColumns []string) error {
 	column, err := warehouse.ApplyConstantEventKey(body, whType, sourceColumns)
 	if err != nil {
@@ -1322,21 +1240,16 @@ func (e *migrationEngine) printDryRunReport() {
 	fmt.Fprintln(os.Stderr, "\n  Note: metric definitions are migrated separately by `statsig-to-ld metrics convert`.")
 }
 
-// dryRunListing is what a dry run reports about the data sources.
 type dryRunListing struct {
 	// checked reports that the project's data sources were read.
-	checked bool
-	// lines has one "<name> (<type>): <outcome>" entry per Statsig source.
+	checked  bool
 	lines    []string
 	warnings []string
 	note     string
 }
 
-// dryRunDataSources decides what a real run would do with each Statsig source.
-// With LaunchDarkly credentials it reads the project's data sources (and, when
-// an update depends on them, its metrics) and makes the decisions a real run
-// makes before any preview. Without them existing data sources are unknown, so
-// every source that does not collide is listed as a create.
+// dryRunDataSources makes the plans a real run would. Without LD credentials existing
+// data sources are unknown, so every non-colliding source is listed as a create.
 func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 	var out dryRunListing
 	existing := map[string]map[string]any{}
@@ -1377,7 +1290,6 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 	return out
 }
 
-// printDryRunDataSources prints dryRunDataSources.
 func (e *migrationEngine) printDryRunDataSources(whType string) {
 	l := e.dryRunDataSources(whType)
 	if l.checked {
@@ -1396,7 +1308,6 @@ func (e *migrationEngine) printDryRunDataSources(whType string) {
 	}
 }
 
-// dryRunOutcome describes a plan for the dry-run listing.
 func dryRunOutcome(plan dataSourcePlan) string {
 	switch plan.action {
 	case planUpdate:
@@ -1413,9 +1324,7 @@ func dryRunOutcome(plan dataSourcePlan) string {
 	}
 }
 
-// writeDryRunBodies writes the data source bodies a real run would send, before
-// preview reconciliation, so the wrapped SQL can be reviewed and run by hand in
-// the warehouse. Sources whose SQL cannot be wrapped are listed with the reason.
+// writeDryRunBodies writes the pre-preview bodies so the wrapped SQL can be run by hand.
 func (e *migrationEngine) writeDryRunBodies(whType string) {
 	integrationKey := warehouse.WarehouseTypes[whType]
 	var bodies []map[string]any
@@ -1487,9 +1396,7 @@ func (e *migrationEngine) writeSourceMapping() error {
 	if len(e.metricSources) == 0 {
 		return nil
 	}
-	// Sources that share a key are never created, so they are left out rather
-	// than bound to a data source holding another source's rows. So are sources
-	// whose key is taken in another environment.
+	// Colliding keys are never created; unmapped keys belong to another environment.
 	collisions := keyCollisions(e.metricSources)
 	mapping := map[string]string{}
 	for _, source := range e.metricSources {

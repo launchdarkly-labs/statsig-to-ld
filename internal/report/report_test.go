@@ -372,8 +372,7 @@ func TestJSON_IncludesDiagnostics(t *testing.T) {
 	}
 }
 
-// Blocking codes are the last CSV column, so earlier column positions are
-// unchanged for existing readers.
+// Appended last so existing readers' column positions are unchanged.
 func TestWriteCSV_BlockingCodesColumn(t *testing.T) {
 	r := New()
 	r.AddSkippedBlocked("pro", "count", "pro::count", "NOT CREATED", nil, Diagnostics{BlockingCodes: []string{"constant_event_key_unfiltered"}})

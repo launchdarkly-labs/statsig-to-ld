@@ -15,24 +15,18 @@ import (
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/state"
 )
 
-// fakeLD answers the Phase 3 endpoints. Its preview behaves like Snowflake for
-// the wrapper: an unquoted alias comes back upper-cased.
+// fakeLD's preview upper-cases an unquoted alias, as Snowflake does.
 type fakeLD struct {
-	t *testing.T
-	// list is the body of the data source list; listStatus overrides 200.
+	t          *testing.T
 	list       string
 	listStatus int
-	// metrics is the items array of the project's metric list; metricsStatus
-	// overrides 200, and metricsTotal, when set, is the totalCount reported
-	// instead of the number of items.
+	// metricsTotal, when set, overrides the reported totalCount.
 	metrics       string
 	metricsStatus int
 	metricsTotal  int
-	// patchStatus and patchBody override the PATCH response.
-	patchStatus int
-	patchBody   string
-	// previewCols are the source's columns as the preview returns them.
-	previewCols string
+	patchStatus   int
+	patchBody     string
+	previewCols   string
 
 	created      []map[string]any
 	patches      map[string][]launchdarkly.JSONPatchOp
@@ -146,8 +140,7 @@ func newPhase3Engine(t *testing.T, srvURL string, resume bool) *migrationEngine 
 	}
 }
 
-// An existing data source created before the constant event key: plain SQL,
-// and its key column is a real column.
+// unwrappedList is a data source created before the constant event key.
 const unwrappedList = `{"items":[{"key":"checkout-events","sqlQuery":"SELECT * FROM analytics.events","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","contexts":{"user":"USER_ID"},"columns":[]}}]}`
 
 const wantCheckoutSQL = "SELECT *, 'checkout-events' AS LD_EVENT_KEY FROM (\nSELECT ts, user_id FROM analytics.events WHERE kind = 'checkout'\n) AS ld_src"
@@ -185,8 +178,6 @@ func TestPhase3_ConstantEventKey_WrapsSQLAndPinsKeyColumn(t *testing.T) {
 	}
 }
 
-// A failed list must not read as "no data sources exist": that would re-post
-// every source and skip the existing-source checks.
 func TestPhase3_ListFailureStopsThePhase(t *testing.T) {
 	t.Chdir(t.TempDir())
 	f := &fakeLD{t: t, listStatus: http.StatusForbidden}
@@ -230,8 +221,6 @@ func TestPhase3_ExistingUnwrappedSource_WarnsWhatOverwriteWouldDo(t *testing.T) 
 	}
 }
 
-// Many existing sources without the constant print one line between them, not
-// one each.
 func TestPhase3_ExistingUnwrappedSources_OneSummaryLine(t *testing.T) {
 	t.Chdir(t.TempDir())
 	list := `{"items":[
@@ -253,9 +242,6 @@ func TestPhase3_ExistingUnwrappedSources_OneSummaryLine(t *testing.T) {
 	}
 }
 
-// On --resume, a data source recorded in migration_state.json by an earlier
-// run is still checked against LaunchDarkly, so one created before the
-// constant event key is flagged rather than skipped silently.
 func TestPhase3_ResumeStillChecksExistingSources(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := os.WriteFile("migration_state.json", []byte(`{"data_sources_created":["checkout-events"]}`), 0o644); err != nil {
@@ -273,7 +259,6 @@ func TestPhase3_ResumeStillChecksExistingSources(t *testing.T) {
 		t.Errorf("resumed run skipped an unwrapped existing source without warning (report %+v)", e.report.DataSources)
 	}
 
-	// With --overwrite, the resumed run updates it.
 	f2 := &fakeLD{t: t, list: unwrappedList}
 	srv2 := f2.server()
 	defer srv2.Close()
@@ -298,9 +283,6 @@ func wrappedCheckoutList(t *testing.T, cm map[string]any) string {
 	return string(raw)
 }
 
-// A data source that already projects the constant is never rewritten, with
-// or without the state file: another PATCH could only drop mappings edited in
-// LaunchDarkly since, such as an added context kind or value column.
 func TestPhase3_OverwriteNeverRewritesSourceWithConstantKey(t *testing.T) {
 	for _, resume := range []bool{false, true} {
 		t.Run(map[bool]string{false: "fresh state", true: "resume"}[resume], func(t *testing.T) {
@@ -360,8 +342,6 @@ func TestPhase3_SourceWithConstantKeyWarnsWhenStatsigSQLChanged(t *testing.T) {
 	}
 }
 
-// --constant-event-key=false must never unwrap a data source: its metrics use
-// the data source key as their event key and would match no rows.
 func TestPhase3_ConstantKeyOffNeverUnwrapsSource(t *testing.T) {
 	t.Chdir(t.TempDir())
 	f := &fakeLD{t: t, list: wrappedCheckoutList(t, map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS"}),
@@ -383,9 +363,6 @@ func TestPhase3_ConstantKeyOffNeverUnwrapsSource(t *testing.T) {
 	}
 }
 
-// --overwrite updates only the query, the key column, and the column list. The
-// timestamp, value, and context mappings are kept while the new query returns
-// them, in the new query's case.
 func TestPhase3_OverwriteKeepsExistingMappings(t *testing.T) {
 	t.Chdir(t.TempDir())
 	list, _ := json.Marshal(map[string]any{"items": []any{map[string]any{
@@ -434,8 +411,6 @@ func TestPhase3_OverwriteKeepsExistingMappings(t *testing.T) {
 	}
 }
 
-// Mappings whose column the new query no longer returns fall back to this
-// run's value, or are removed, and each change is reported.
 func TestDataSourcePatch_FallsBackWhenExistingColumnsAreGone(t *testing.T) {
 	existing := map[string]any{"key": "k", "tableName": "DB.ORDERS", "columnMappings": map[string]any{
 		"keyColumn": "EVENT_NAME", "timestampColumn": "CREATED_AT", "valueColumn": "AMT",
@@ -481,8 +456,6 @@ func TestDataSourcePatch_FallsBackWhenExistingColumnsAreGone(t *testing.T) {
 	}
 }
 
-// With the constant key off, an existing key column the new query still
-// returns is kept.
 func TestDataSourcePatch_ConstantKeyOffKeepsKeyColumn(t *testing.T) {
 	existing := map[string]any{"sqlQuery": "SELECT * FROM t", "columnMappings": map[string]any{
 		"keyColumn": "event_name", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"},
@@ -508,7 +481,6 @@ func TestDataSourcePatch_ConstantKeyOffKeepsKeyColumn(t *testing.T) {
 		t.Error("no keyColumn op, want the existing column rewritten to the new case")
 	}
 
-	// The new query does not return the existing key column: no ops at all.
 	body["columnMappings"].(map[string]any)["columns"] = []map[string]any{{"name": "TS"}, {"name": "USER_ID"}, {"name": "EVENT_KEY"}}
 	ops, _, err = dataSourcePatch(existing, body, false)
 	if ops != nil || err == nil || err.Error() != `not updated: its key column "event_name" is not in the updated query; metrics on it would filter a different column. Keep that column in the Statsig SQL, or update the data source by hand` {
@@ -523,8 +495,7 @@ const boundCheckoutMetrics = `[
 	 "denominator":{"eventName":"checkout","dataSource":{"key":"checkout-events"}}},
 	{"key":"page-views","eventKey":"page_view","dataSource":{"key":"page-views"}}]`
 
-// The bound-metric check runs before anything is written. Metrics bound
-// through a ratio's denominator count too.
+// Metrics bound through a ratio's denominator count too.
 func TestPhase3_OverwriteRefusesWhenBoundMetricsWouldMatchNothing(t *testing.T) {
 	t.Chdir(t.TempDir())
 	f := &fakeLD{t: t, list: unwrappedList, metrics: boundCheckoutMetrics}
@@ -569,8 +540,7 @@ func TestPhase3_ForceOverwriteUpdatesAndNamesStaleMetrics(t *testing.T) {
 	}
 }
 
-// Fail closed: a data source is not updated when its bound metrics cannot be
-// checked. The project's metrics are read once per run.
+// The project's metrics are read once per run.
 func TestPhase3_OverwriteFailsClosedWhenMetricsCannotBeRead(t *testing.T) {
 	t.Chdir(t.TempDir())
 	list := `{"items":[
@@ -599,8 +569,7 @@ func TestPhase3_OverwriteFailsClosedWhenMetricsCannotBeRead(t *testing.T) {
 	}
 }
 
-// A metric list shorter than its totalCount is read once more, then refuses
-// the update rather than checking against a partial list.
+// A short list is read once more before the update is refused.
 func TestPhase3_OverwriteFailsClosedOnAnIncompleteMetricList(t *testing.T) {
 	t.Chdir(t.TempDir())
 	f := &fakeLD{t: t, list: unwrappedList, metrics: `[{"key":"checkouts-count","eventKey":"checkout-events","dataSource":{"key":"checkout-events"}}]`, metricsTotal: 2}
@@ -620,8 +589,6 @@ func TestPhase3_OverwriteFailsClosedOnAnIncompleteMetricList(t *testing.T) {
 	}
 }
 
-// Two Statsig sources that sanitize to one key would be written onto the same
-// data source, the last one winning. Neither is created, updated, or mapped.
 func TestPhase3_DuplicateSanitizedKeysFailTheWholeGroup(t *testing.T) {
 	t.Chdir(t.TempDir())
 	f := &fakeLD{t: t, list: unwrappedList}
@@ -664,8 +631,6 @@ func TestPhase3_DuplicateSanitizedKeysFailTheWholeGroup(t *testing.T) {
 	}
 }
 
-// A dry run with credentials reports what a real run would do with each
-// source; without them it says existing sources were not checked.
 func TestDryRun_ReportsPlannedOutcomes(t *testing.T) {
 	t.Chdir(t.TempDir())
 	list := `{"items":[
@@ -735,8 +700,6 @@ func TestDataSourcePatch_SwitchesTableSourceToSQL(t *testing.T) {
 	}
 }
 
-// TestWarehouseCmd_FlagsBound verifies every user-facing flag is registered
-// on warehouseCmd.
 func TestWarehouseCmd_FlagsBound(t *testing.T) {
 	for _, name := range []string{
 		"statsig-key", "statsig-url", "statsig-export-file",
@@ -750,9 +713,7 @@ func TestWarehouseCmd_FlagsBound(t *testing.T) {
 	}
 }
 
-// Data source keys are unique per project, so a Statsig source's key may be
-// taken by a data source in another environment. It is not created, updated,
-// or mapped, with or without --overwrite.
+// Data source keys are unique per project, not per environment.
 func TestPhase3_KeyTakenInAnotherEnvironmentIsRefused(t *testing.T) {
 	list := `{"items":[{"key":"checkout-events","environmentKey":"staging","sqlQuery":"SELECT * FROM analytics.events","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","contexts":{"user":"USER_ID"}}}]}`
 	for _, overwrite := range []bool{false, true} {
@@ -792,7 +753,6 @@ func TestPhase3_KeyTakenInAnotherEnvironmentIsRefused(t *testing.T) {
 		})
 	}
 
-	// The same environment is the usual case.
 	t.Run("same environment", func(t *testing.T) {
 		t.Chdir(t.TempDir())
 		f := &fakeLD{t: t, list: strings.Replace(list, "staging", "production", 1)}
@@ -822,9 +782,7 @@ func TestPhase3_KeyTakenInAnotherEnvironmentIsRefused(t *testing.T) {
 	})
 }
 
-// A data source that still opens with the wrapper for its own key, but was
-// edited in LaunchDarkly after creation, is kept: never PATCHed and no
-// warning, even when its Statsig SQL has changed too.
+// Kept without a PATCH or warning even when its Statsig SQL has changed too.
 func TestPhase3_EditedWrapperIsKeptWithoutWarning(t *testing.T) {
 	edited := wantCheckoutSQL + "\nWHERE ts > '2024-01-01'"
 	list, _ := json.Marshal(map[string]any{"items": []any{map[string]any{
@@ -873,8 +831,6 @@ func TestPhase3_EditedWrapperIsKeptWithoutWarning(t *testing.T) {
 	})
 }
 
-// Every update first tests the listed query and column mappings, so a data
-// source edited in LaunchDarkly after this run listed it is not overwritten.
 func TestPhase3_UpdateTestsTheListedStateFirst(t *testing.T) {
 	t.Chdir(t.TempDir())
 	listedCM := map[string]any{"keyColumn": "EVENT_NAME", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"},
@@ -917,8 +873,6 @@ func TestPhase3_UpdateTestsTheListedStateFirst(t *testing.T) {
 	}
 }
 
-// With --constant-event-key=false, an update keeps the existing key column. A
-// new query that does not return it is not sent at all.
 func TestPhase3_ConstantKeyOffRefusesWhenKeyColumnIsGone(t *testing.T) {
 	t.Chdir(t.TempDir())
 	f := &fakeLD{t: t, list: unwrappedList}
@@ -935,7 +889,6 @@ func TestPhase3_ConstantKeyOffRefusesWhenKeyColumnIsGone(t *testing.T) {
 		t.Fatalf("patches=%d report %+v errors=%q, want %q", f.patchCount, e.report.DataSources, e.report.Errors, want)
 	}
 
-	// The preview returns it: updated, keeping it.
 	f2 := &fakeLD{t: t, list: unwrappedList, previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"EVENT_NAME","type":"TEXT"}`}
 	srv2 := f2.server()
 	defer srv2.Close()

@@ -67,15 +67,11 @@ type RunOptions struct {
 	// was verified against the project.
 	RegisteredAnalysisUnits []string `json:"registered_analysis_units"`
 
-	// AssumeConstantEventKey records --assume-constant-event-key, and
-	// AssumedConstantKeyDS the data sources it was applied to.
+	// AssumeConstantEventKey records the flag; AssumedConstantKeyDS, where it applied.
 	AssumeConstantEventKey bool     `json:"assume_constant_event_key"`
 	AssumedConstantKeyDS   []string `json:"assumed_constant_key_data_sources,omitempty"`
 
-	// DataSourcesFetched is false when the LaunchDarkly data sources were not
-	// read (no binding, no credentials, or a failed dry-run read), so no event
-	// key or column came from LaunchDarkly. ConstantKeyDataSources counts those
-	// read back as projecting the constant event key, not ones assumed.
+	// DataSourcesFetched reports a LaunchDarkly read; ConstantKeyDataSources excludes assumed ones.
 	DataSourcesFetched     bool `json:"data_sources_fetched"`
 	ConstantKeyDataSources int  `json:"constant_key_data_sources"`
 }
@@ -125,14 +121,10 @@ type Diagnostics struct {
 	LossyReasons []string `json:"lossy_reasons,omitempty"`
 	LossyCodes   []string `json:"lossy_codes,omitempty"`
 
-	// BlockingCodes are the codes of the warnings that kept a metric from being
-	// created even with --convert-lossy.
+	// BlockingCodes kept the metric from being created even with --convert-lossy.
 	BlockingCodes []string `json:"blocking_codes,omitempty"`
 
-	// NoteCodes record facts about the conversion that need no action on the
-	// metric, such as constant_event_key. They are not warnings, so they do not
-	// count a metric as converted with warnings; column_unverified is summed
-	// into one line of the run summary.
+	// NoteCodes need no action and do not count as warnings.
 	NoteCodes []string `json:"note_codes,omitempty"`
 
 	// LDDataSource is the LaunchDarkly data source the metric resolved to, empty
@@ -189,9 +181,7 @@ func (r *Report) AddConverted(name, typ, id, ldKey, ldProject string, warnings [
 	})
 }
 
-// AddSkippedExisting records a metric that already exists in LD. warnings
-// (with warningCodes parallel to it) describe problems found with the existing
-// metric, if any. Thread-safe.
+// AddSkippedExisting records a metric that already exists in LD. Thread-safe.
 func (r *Report) AddSkippedExisting(name, typ, id, ldKey, ldProject string, warnings, warningCodes []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -242,9 +232,7 @@ func (r *Report) AddSkippedLossy(name, typ, id string, warnings []string, diag D
 	})
 }
 
-// AddSkippedBlocked records a metric that converted but must not be created,
-// whatever --convert-lossy says, because it would measure something materially
-// different from the Statsig metric. It counts as incompatible. Thread-safe.
+// AddSkippedBlocked records a blocked metric as incompatible. Thread-safe.
 func (r *Report) AddSkippedBlocked(name, typ, id, reason string, warnings []string, diag Diagnostics) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

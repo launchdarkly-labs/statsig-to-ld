@@ -313,10 +313,8 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Warehouse-native metrics take their event key from the data source when it
-	// projects a constant key column. Read that from LaunchDarkly, which is the
-	// source of truth, rather than assuming how the data source was created.
-	// Only runs that bind metrics to a data source need it.
+	// Warehouse-native metrics take their event key from a data source's constant key
+	// column; read it from LaunchDarkly rather than assume how the source was created.
 	var dsInfo dataSourceInfo
 	if len(sourceMapping) > 0 || flagLDDataSource != "" {
 		var err error
@@ -445,9 +443,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	// Print summary table to stdout
 	rpt.PrintSummaryTable(os.Stdout)
 
-	// Existing metrics are skipped, so one created before its data source was
-	// switched to the constant event key keeps an event key that matches no
-	// rows. Name them: nothing else in this run will fix them.
+	// Existing metrics are skipped, so name the stale ones: nothing else in this run fixes them.
 	if stale := existingMetricsWithCode(rpt, converter.WarnExistingEventKeyMismatch); len(stale) > 0 {
 		fmt.Printf("\n⚠  %d existing metric(s) were skipped but use an event key their data source's\n", len(stale))
 		fmt.Println("   key column never holds, so they match no rows. Set each one's event key to its")
@@ -587,30 +583,18 @@ func fetchRegisteredAnalysisUnits(ctx context.Context, ldClient *launchdarkly.Cl
 	return registered, true
 }
 
-// dataSourceInfo is what metrics convert learned about the data sources it
-// binds metrics to.
 type dataSourceInfo struct {
-	// keys maps a data source key to the constant event key it projects, read
-	// from LaunchDarkly or assumed.
-	keys map[string]string
-	// cols maps a data source key to its column names as LaunchDarkly stores them.
-	cols map[string][]string
-	// fetched reports that LaunchDarkly's data source list was read.
+	// keys maps a data source key to the constant event key it projects.
+	keys    map[string]string
+	cols    map[string][]string
 	fetched bool
-	// constant counts the data sources read back as constant-key (not assumed).
+	// constant counts data sources read back as constant-key, not assumed ones.
 	constant int
-	// assumed lists the data sources treated as constant-key by
-	// --assume-constant-event-key.
-	assumed []string
+	assumed  []string
 }
 
-// fetchDataSourceKeys reads each LD data source's constant event key (when its
-// SQL projects one) and its column names. A failed read is an error on a real
-// run: without it, warehouse-native metrics would be created with event keys
-// that match no rows. A dry run warns and continues. With assume set, mapped
-// data sources LaunchDarkly cannot report on (no credentials, a failed dry-run
-// read, or not created yet) are treated as constant-key, matching what the
-// warehouse command creates by default.
+// fetchDataSourceKeys reads each LD data source's constant event key and columns. With
+// assume, mapped data sources LaunchDarkly cannot report on count as constant-key.
 func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sourceMapping map[string]string, defaultDS string, assume, dryRun bool) (dataSourceInfo, error) {
 	info := dataSourceInfo{keys: map[string]string{}, cols: map[string][]string{}}
 	listed := map[string]bool{}
@@ -628,8 +612,7 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 				listed[key] = true
 				cm := jsonutil.GetMap(ds, "columnMappings")
 				whType := warehouse.WarehouseTypeForIntegration(jsonutil.GetStr(ds, "integrationKey"))
-				// A wrapper edited in LaunchDarkly after creation still counts:
-				// every row it returns carries the constant.
+				// An edited wrapper still counts: every row it returns carries the constant.
 				if w, state := warehouse.ClassifyConstantKey(jsonutil.GetStr(ds, "sqlQuery"), jsonutil.GetStr(cm, "keyColumn"), key, whType); state != warehouse.NoConstantKey {
 					info.keys[key] = w.EventKey
 					info.constant++
@@ -670,8 +653,6 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 	return info, nil
 }
 
-// mappedDataSources returns the distinct LD data source keys a run binds
-// metrics to, sorted.
 func mappedDataSources(sourceMapping map[string]string, defaultDS string) []string {
 	set := map[string]bool{}
 	for _, ds := range sourceMapping {
@@ -685,12 +666,8 @@ func mappedDataSources(sourceMapping map[string]string, defaultDS string) []stri
 	return sortedKeys(set)
 }
 
-// existingMetricWarning reads back a metric that already exists. If a term
-// reads a constant-key data source but its event key is not that source's
-// constant, the metric matches no rows, and this run cannot fix it because
-// existing metrics are skipped. Returns a warning naming the metric and its
-// code (converter.WarnExistingEventKeyMismatch, or
-// converter.WarnExistingMetricUnverified when the read failed), or "" twice.
+// existingMetricWarning returns a warning and its code when an existing metric's event
+// key is not its constant-key data source's constant, or "" twice.
 func existingMetricWarning(ctx context.Context, ldClient *launchdarkly.Client, key string, constKeys map[string]string) (string, string) {
 	m, err := ldClient.GetMetricRaw(ctx, key)
 	if err != nil {
@@ -713,8 +690,6 @@ func existingMetricWarning(ctx context.Context, ldClient *launchdarkly.Client, k
 	return fmt.Sprintf("metric %q already exists with %s, so it matches no rows. It was skipped because it exists; set its event key to the data source key in LaunchDarkly, or delete it and run again", key, strings.Join(problems, "; ")), converter.WarnExistingEventKeyMismatch
 }
 
-// readsConstantKeySource reports whether a converted metric binds any term to
-// a constant-key data source.
 func readsConstantKeySource(m launchdarkly.MetricPost, constKeys map[string]string) bool {
 	if m.DataSource != nil {
 		if _, ok := constKeys[m.DataSource.Key]; ok {
@@ -729,7 +704,6 @@ func readsConstantKeySource(m launchdarkly.MetricPost, constKeys map[string]stri
 	return false
 }
 
-// metricsWithNoteCode counts the metrics carrying a note code.
 func metricsWithNoteCode(rpt *report.Report, code string) int {
 	n := 0
 	for _, m := range rpt.Metrics {
@@ -740,8 +714,6 @@ func metricsWithNoteCode(rpt *report.Report, code string) int {
 	return n
 }
 
-// existingMetricsWithCode lists the skipped-existing metrics that
-// existingMetricWarning flagged with code.
 func existingMetricsWithCode(rpt *report.Report, code string) []string {
 	var names []string
 	for _, m := range rpt.Metrics {
@@ -831,9 +803,8 @@ func processMetric(
 
 	diag := buildDiagnostics(sg, result)
 
-	// Some conversions are ruled out entirely, such as a metric whose filter did
-	// not convert on a data source whose event key matches every row: it would
-	// count the whole source. --convert-lossy does not override these.
+	// Blocked conversions (e.g. an unconverted filter on a data source whose event key
+	// matches every row) are skipped even with --convert-lossy.
 	if result.IsBlocked() {
 		rpt.AddSkippedBlocked(sg.Name, effType, sg.ID, strings.Join(result.BlockingReasons, "; "), result.Warnings, diag)
 		if flagVerbose {

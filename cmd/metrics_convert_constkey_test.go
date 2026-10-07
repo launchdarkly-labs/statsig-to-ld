@@ -30,8 +30,6 @@ func dataSourceListServer(t *testing.T, status int, body string) *httptest.Serve
 	}))
 }
 
-// A failed data source read must not quietly fall back to legacy event keys on
-// a real run: every warehouse-native metric would be created matching no rows.
 func TestFetchDataSourceKeys_ListFailureStopsRealRun(t *testing.T) {
 	srv := dataSourceListServer(t, http.StatusForbidden, `{"code":"forbidden"}`)
 	defer srv.Close()
@@ -82,8 +80,7 @@ func TestFetchDataSourceKeys_ReadsLaunchDarklyAndAssumesOnlyMissingSources(t *te
 		t.Errorf("cols = %v", cols)
 	}
 
-	// page-views is mapped but not in LaunchDarkly yet; hand-built exists and is
-	// not wrapped, which LaunchDarkly reports, so the assumption leaves it alone.
+	// page-views is not in LaunchDarkly yet; hand-built is listed unwrapped, so assume skips it.
 	info, err = fetchDataSourceKeys(context.Background(), ld, checkoutMapping, "hand-built", true, false)
 	if err != nil {
 		t.Fatal(err)
@@ -97,9 +94,6 @@ func TestFetchDataSourceKeys_ReadsLaunchDarklyAndAssumesOnlyMissingSources(t *te
 	}
 }
 
-// A mapped data source that exists without the constant event key gets one
-// summary line telling the tester to add it, since metrics on it keep Statsig
-// event keys and usually match no rows.
 func TestFetchDataSourceKeys_WarnsOnceForSourcesWithoutConstantKey(t *testing.T) {
 	list, _ := json.Marshal(map[string]any{"items": []any{
 		map[string]any{
@@ -144,10 +138,7 @@ func TestFetchDataSourceKeys_AssumeWithoutCredentials(t *testing.T) {
 	}
 }
 
-// A hand-built data source that unions literal-tagged subqueries starts like
-// the wrapper but has a multi-valued key column. Read as constant-key, every
-// metric on it would get the first branch's literal and silently drop the
-// other branches' rows.
+// A UNION of literal-tagged subqueries opens like the wrapper but has a multi-valued key column.
 func TestFetchDataSourceKeys_UnionOfTaggedSubqueriesIsNotConstantKey(t *testing.T) {
 	unionSQL := "SELECT *, 'signup' AS EVENT_NAME FROM (SELECT user_id, ts FROM signups) AS a\n" +
 		"UNION ALL\nSELECT *, 'purchase' AS EVENT_NAME FROM (SELECT user_id, ts FROM purchases) AS b"
@@ -202,8 +193,6 @@ func constKeyConvOpts() converter.Options {
 	}
 }
 
-// --convert-lossy accepts approximations, but not a metric that would count
-// every row of its data source because its filter could not be converted.
 func TestProcessMetric_UnfilteredConstantKeyMetricSkippedEvenWithConvertLossy(t *testing.T) {
 	prev := flagConvertLossy
 	flagConvertLossy = true
@@ -227,9 +216,6 @@ func TestProcessMetric_UnfilteredConstantKeyMetricSkippedEvenWithConvertLossy(t 
 	}
 }
 
-// A metric that already exists is skipped. If it predates the constant event
-// key it matches no rows, and nothing else in the run fixes it, so it must be
-// named rather than counted as a quiet skip.
 func TestProcessMetric_ExistingMetricWithLegacyEventKeyIsReported(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -279,8 +265,6 @@ func TestProcessMetric_ExistingMetricWithLegacyEventKeyIsReported(t *testing.T) 
 	}
 }
 
-// A read-back that fails is not a mismatch: it gets its own code and is not
-// listed among the metrics that match no rows.
 func TestProcessMetric_ExistingMetricReadBackFailureIsUnverified(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -314,9 +298,7 @@ func TestProcessMetric_ExistingMetricReadBackFailureIsUnverified(t *testing.T) {
 	}
 }
 
-// A wrapper edited in LaunchDarkly after creation (an appended WHERE, a
-// dropped AS) still projects the data source key on every row it returns, so
-// metrics on it get that key. Another literal does not count.
+// An edited wrapper still projects the data source key on every row; another literal does not.
 func TestFetchDataSourceKeys_EditedWrapperIsConstantKey(t *testing.T) {
 	ds := func(key, sql string) map[string]any {
 		return map[string]any{"key": key, "sqlQuery": sql, "integrationKey": "snowflake-experimentation",
@@ -341,9 +323,6 @@ func TestFetchDataSourceKeys_EditedWrapperIsConstantKey(t *testing.T) {
 	}
 }
 
-// Constant-key notes are not warnings: a clean conversion on a constant-key
-// data source does not count as converted with warnings, and unverified
-// columns are summed into one line instead of a warning per metric.
 func TestProcessMetric_ConstantKeyNotesAreNotWarnings(t *testing.T) {
 	var m statsig.Metric
 	raw := `{"type":"user_warehouse","name":"Order Total","id":"Order Total::user_warehouse","directionality":"increase",
