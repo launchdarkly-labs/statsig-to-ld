@@ -27,6 +27,8 @@ type fakeLD struct {
 	patchStatus   int
 	patchBody     string
 	previewCols   string
+	// previewValue is the preview's guessed value column, as LaunchDarkly returns one.
+	previewValue string
 
 	created      []map[string]any
 	patches      map[string][]launchdarkly.JSONPatchOp
@@ -55,7 +57,11 @@ func (f *fakeLD) server() *httptest.Server {
 			if strings.HasPrefix(sql, "SELECT *, '") {
 				cols += `,{"name":"LD_EVENT_KEY","type":"TEXT","length":15}`
 			}
-			_, _ = io.WriteString(w, `{"rows":[],"timestampColumn":"TS","keyColumn":"EVENT_KEY","columns":[`+cols+`]}`)
+			guess := ""
+			if f.previewValue != "" {
+				guess = `"valueColumn":"` + f.previewValue + `",`
+			}
+			_, _ = io.WriteString(w, `{"rows":[],"timestampColumn":"TS","keyColumn":"EVENT_KEY",`+guess+`"columns":[`+cols+`]}`)
 		case r.URL.Path == dsPath && r.Method == http.MethodGet:
 			if f.listStatus != 0 {
 				w.WriteHeader(f.listStatus)
@@ -175,6 +181,92 @@ func TestPhase3_ConstantEventKey_WrapsSQLAndPinsKeyColumn(t *testing.T) {
 	}
 	if len(f.previews) != 2 || !strings.HasPrefix(f.previews[1], "SELECT *, '") {
 		t.Errorf("previews = %q, want raw then wrapped", f.previews)
+	}
+}
+
+// numericPreviewCols give the preview numeric columns to guess a value column from.
+const numericPreviewCols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"QUANTITY","type":"NUMBER"},{"name":"ORDER_TOTAL","type":"NUMBER"}`
+
+func TestPhase3_ValueColumnOnlyWhenStatsigMapsOne(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		fields          []any
+		want, wantDraft any
+	}{
+		{"not mapped", nil, nil, nil},
+		{"mapped", []any{map[string]any{"fieldName": "amount", "column": "order_total"}}, "ORDER_TOTAL", "order_total"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, previewCols: numericPreviewCols, previewValue: "QUANTITY"}
+			srv := f.server()
+			defer srv.Close()
+
+			e := newPhase3Engine(t, srv.URL, false)
+			if tc.fields != nil {
+				e.metricSources[0]["customFieldMapping"] = tc.fields
+			}
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if len(f.created) != 1 {
+				t.Fatalf("created %d, want 1; errors=%v", len(f.created), e.report.Errors)
+			}
+			cm := f.created[0]["columnMappings"].(map[string]any)
+			if got, present := cm["valueColumn"]; got != tc.want || present != (tc.want != nil) {
+				t.Errorf("POSTed valueColumn = %v (present %v), want %v", got, present, tc.want)
+			}
+
+			e.writeDryRunBodies("snowflake")
+			raw, err := os.ReadFile("data-source-bodies.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var bodies []map[string]any
+			if err := json.Unmarshal(raw, &bodies); err != nil || len(bodies) != 1 {
+				t.Fatalf("data-source-bodies.json = %s (%v)", raw, err)
+			}
+			cm = bodies[0]["columnMappings"].(map[string]any)
+			if got, present := cm["valueColumn"]; got != tc.wantDraft || present != (tc.wantDraft != nil) {
+				t.Errorf("dry-run valueColumn = %v (present %v), want %v", got, present, tc.wantDraft)
+			}
+		})
+	}
+}
+
+func TestPhase3_OverwriteAddsNoGuessedValueColumn(t *testing.T) {
+	for _, old := range []string{"", "AMT"} {
+		t.Run(fmt.Sprintf("existing %q", old), func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			cm := map[string]any{"keyColumn": "EVENT_NAME", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}, "columns": []any{}}
+			if old != "" {
+				cm["valueColumn"] = old
+			}
+			list, _ := json.Marshal(map[string]any{"items": []any{map[string]any{
+				"key": "checkout-events", "sqlQuery": "SELECT * FROM analytics.events", "columnMappings": cm,
+			}}})
+			f := &fakeLD{t: t, list: string(list), previewCols: numericPreviewCols, previewValue: "QUANTITY"}
+			srv := f.server()
+			defer srv.Close()
+
+			e := newPhase3Engine(t, srv.URL, false)
+			e.overwrite = true
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if e.report.DataSources.Updated != 1 {
+				t.Fatalf("report %+v errors=%q, want one update", e.report.DataSources, e.report.Errors)
+			}
+			var ops []launchdarkly.JSONPatchOp
+			for _, op := range f.patches["checkout-events"] {
+				if op.Path == "/columnMappings/valueColumn" {
+					ops = append(ops, op)
+				}
+			}
+			if old == "" && len(ops) != 0 || old != "" && (len(ops) != 1 || ops[0].Op != "remove") {
+				t.Errorf("valueColumn ops = %+v, want none added, and a column the query no longer returns removed", ops)
+			}
+		})
 	}
 }
 

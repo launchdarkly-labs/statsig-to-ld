@@ -333,7 +333,7 @@ Three phases:
 
 1. **Export** — Fetches the warehouse connection config and metric_sources from Statsig (or loads them from a previously-saved JSON export file).
 2. **Warehouse setup** — Sets up data export + experimentation integrations in LaunchDarkly via an interactive wizard (Snowflake, BigQuery, Databricks, Redshift). Auto-detects and skips integrations that already exist.
-3. **Data sources** — Creates LD metric data sources, using LD's preview API to discover real warehouse column schemas. Each source's SQL is wrapped to project a [constant event key](#the-constant-event-key). Writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key it created.
+3. **Data sources** — Creates LD metric data sources, using LD's preview API to discover real warehouse column schemas. A data source gets a value column only when its Statsig source defines one; the column the preview guesses is not used. Each source's SQL is wrapped to project a [constant event key](#the-constant-event-key). Writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key it created.
 
 After Phase 3 completes, the next step is `statsig-to-ld metrics convert --source-mapping source-mapping.json` to migrate metric definitions bound to those data sources. The `warehouse` subcommand prints this hand-off command at the end of every successful run.
 
@@ -365,7 +365,7 @@ A source is failed, with the reason, instead of created when its SQL cannot be n
 
 `metrics convert` skips metrics that already exist, and names any it meets whose event key their constant-key data source never holds.
 
-Pass `--constant-event-key=false` to create data sources from the Statsig SQL unchanged. The event key column is then guessed from Statsig's custom field names, and creation fails when there is no guess.
+Pass `--constant-event-key=false` to create data sources from the Statsig SQL unchanged. The event key column is then guessed from Statsig's custom field names, and creation fails when there is no guess. `metrics convert` sets no value column on metrics bound to such a data source, so on one whose Statsig source defines no value column, a numeric metric needs a value column set by hand.
 
 ### Quick start
 

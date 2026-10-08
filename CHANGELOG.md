@@ -107,6 +107,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numeric column) replaced the columns configured in Statsig. Statsig's columns now win whenever the warehouse
   returns them, in the warehouse's case.
 
+- `warehouse`: a data source got a value column even when the Statsig export defined none, because the CLI copied the
+  one LaunchDarkly's preview guesses (an `event_value` column, else the first numeric column). A data source now gets
+  a value column only when its Statsig source defines one and the query returns it, and `--overwrite` no longer puts
+  the guess in place of an existing value column the new query lacks. Numeric metrics then take their value column
+  from the metric, which `metrics convert` sets on constant-key data sources; on one created with
+  `--constant-event-key=false`, a numeric metric needs a value column set by hand.
+
 - `warehouse`: Statsig sources whose names sanitize to the same LaunchDarkly key (for example `Checkout Events` and
   `checkout events`) were written to one data source, the last one winning, and `source-mapping.json` bound all of
   them to it. Every source in such a group now fails with an error naming the others, and none of them is created,

@@ -172,7 +172,7 @@ If integrations already exist, both are skipped automatically without prompting.
 
 For each Statsig metric source:
 1. Calls the LD preview API to discover real warehouse columns (types, nullable, length)
-2. Reconciles column names (Snowflake returns uppercase; Statsig config uses lowercase). Statsig's timestamp column wins over the preview's guess whenever the warehouse returns it.
+2. Reconciles column names (Snowflake returns uppercase; Statsig config uses lowercase). Statsig's timestamp column wins over the preview's guess whenever the warehouse returns it. The value column comes only from Statsig's mapping, never the preview's guess, so a source that defines none gets none; with `--constant-event-key=false`, a numeric metric on it then needs a value column set by hand.
 3. Wraps the SQL as `SELECT *, '<data-source-key>' AS LD_EVENT_KEY FROM (<source SQL>) AS ld_src` (`ld_event_key` outside Snowflake; on Redshift the literal is cast to `VARCHAR(256)`), previews the wrapped query, and makes that column the event key column. LaunchDarkly requires an event key column and Statsig sources have none; with the constant, `metrics convert` can give every metric the data source key as its event key. See [The constant event key](../../docs/cli-reference.md#the-constant-event-key).
 4. Creates the LD data source with the wrapped query's column schema
 
