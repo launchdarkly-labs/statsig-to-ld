@@ -351,24 +351,29 @@ Sets up the LaunchDarkly side of a Statsig warehouse-native experimentation proj
 
 # Phase 3 only — skip integrations wizard (assumes integrations exist), create data sources
 ./statsig-to-ld warehouse ... --only data-sources
+
+# Correct existing data sources' timestamp, value, and context mappings from the export
+# (preview first: add --dry-run with --ld-key and --ld-project)
+./statsig-to-ld warehouse ... --only data-sources --update-mappings
 ```
 
 ### Phases
 
 1. **Export** — Fetches `wh_connections` and `metric_source/list` from Statsig (or loads from `--statsig-export-file`). Writes `statsig_export_<timestamp>.json`. (Metric definitions are not fetched here — `metrics convert` re-fetches them itself.)
 2. **Warehouse setup** (interactive) — Checks for existing data-export and experimentation integrations in LD; if absent, runs the wizard. Snowflake / BigQuery / Databricks / Redshift each have their own setup path. Auto-skips if integrations already exist.
-3. **Data sources** — Creates LD data sources (calling the warehouse preview API to discover real column schemas first), each wrapped to project a constant `LD_EVENT_KEY` column holding the data source key, which becomes its event key column (`--constant-event-key=false` turns this off). A data source gets a value column only when its Statsig source defines one and its query returns it, never the preview's guess (the run prints one line naming those whose query does not); numeric metrics take theirs from the metric, which `metrics convert` sets only on constant-key data sources. An existing data source that already has that column is never rewritten, nor is one whose wrapper was edited in LD (skipped as "kept: edited in LaunchDarkly"). One without it is skipped, and the run prints one line counting them; `--overwrite` updates its query, key column, and column list in place, keeping its timestamp, value, and context mappings while the new query returns them, but refuses (fails the source) when metrics bound to it use other event keys, since they would match no rows afterwards. `--force-overwrite` updates it anyway and lists them. It also refuses, even with `--force-overwrite`, when the new query drops a value column that bound numeric metrics without one of their own read. With `--constant-event-key=false`, `--overwrite` keeps the existing key column instead and fails the source if the new query does not return it. Each update is a JSON Patch that first tests the query and column mappings the run listed, so a data source changed in LD during the run fails rather than being overwritten. A key already used by a data source in another LD environment fails that source. Statsig sources whose names map to the same key all fail and are left out of `source-mapping.json`, as are sources whose key is used in another environment. It then writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key it created. The subcommand prints the recommended `metrics convert --source-mapping source-mapping.json` hand-off command at the end of a successful run.
+3. **Data sources** — Creates LD data sources (calling the warehouse preview API to discover real column schemas first), each wrapped to project a constant `LD_EVENT_KEY` column holding the data source key, which becomes its event key column (`--constant-event-key=false` turns this off). A data source gets a value column only when its Statsig source defines one and its query returns it, never the preview's guess (the run prints one line naming those whose query does not); numeric metrics take theirs from the metric, which `metrics convert` sets only on constant-key data sources. An existing data source that already has that column is never rewritten, nor is one whose wrapper was edited in LD (skipped as "kept: edited in LaunchDarkly"). One without it is skipped, and the run prints one line counting them; `--overwrite` updates its query, key column, and column list in place, keeping its timestamp, value, and context mappings while the new query returns them, but refuses (fails the source) when metrics bound to it use other event keys, since they would match no rows afterwards. `--force-overwrite` updates it anyway and lists them. It also refuses, even with `--force-overwrite`, when the new query drops a value column that bound numeric metrics without one of their own read. With `--constant-event-key=false`, `--overwrite` keeps the existing key column instead and fails the source if the new query does not return it. Each update is a JSON Patch that first tests the query and column mappings the run listed, so a data source changed in LD during the run fails rather than being overwritten. `--update-mappings` corrects an existing data source's timestamp, value, and context mappings in place from the Statsig export, with or without the constant event key, and leaves its query, key column, and columns alone; it fails a source whose export drops a context kind that bound metrics use as an analysis unit, keeps a value column that bound numeric metrics without their own value column read, and with `--overwrite` makes an updated query take its mappings from the export ([Correcting mappings](docs/cli-reference.md#correcting-mappings)). A key already used by a data source in another LD environment fails that source. Statsig sources whose names map to the same key all fail and are left out of `source-mapping.json`, as are sources whose key is used in another environment. It then writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key it created. The subcommand prints the recommended `metrics convert --source-mapping source-mapping.json` hand-off command at the end of a successful run.
 
 ### Report notes
 
-`migration_report_<timestamp>.json` keeps data source outcomes that need no action as `notes` (`{code, data_source}`), not as warnings:
+`migration_report_<timestamp>.json` keeps data source outcomes that need no action as `notes` (`{code, data_source}`, plus `changes` on `mappings_updated`), not as warnings:
 
 | Note code | Meaning |
 |---|---|
-| `exists_without_constant_key` | The data source exists without the constant event key and `--overwrite` was not set, so it was skipped. The run prints one line counting these. |
-| `constant_key_edited_in_launchdarkly` | The data source opens with the constant event-key wrapper but was edited in LD after creation, so it was kept as is. |
+| `exists_without_constant_key` | The data source exists without the constant event key and `--overwrite` was not set, so its query was left as is (`--update-mappings` may still have changed its mappings). The run prints one line counting these. |
+| `constant_key_edited_in_launchdarkly` | The data source opens with the constant event-key wrapper but was edited in LD after creation, so its query was kept as is. |
 | `constant_key_kept` | `--constant-event-key=false` did not remove the constant from a data source that has it. |
 | `statsig_value_column_not_in_query` | The Statsig source defines a value column its query does not return, so the data source did not get it. The run prints one line naming these. |
+| `mappings_updated` | `--update-mappings` changed the data source's mappings. `changes` lists each changed field as `field: old → new`, separated by `; ` (for example `timestamp: TS → CREATED_AT; context user: USER_ID → UID`). |
 
 ### Relationship to `metrics convert`
 
@@ -427,6 +432,8 @@ cat migration-report.json | jq -r '.metrics[] | select(.warning_codes[]? == "exi
 cat migration-report.json | jq -r '.metrics[].note_codes[]?' | sort | uniq -c | sort -rn
 # warehouse: data source outcomes kept as notes (codes in the table below)
 cat migration_report_*.json | jq -r '.notes[]? | "\(.code)\t\(.data_source)"' | sort
+# warehouse --update-mappings: what changed on each data source
+cat migration_report_*.json | jq -r '.notes[]? | select(.code == "mappings_updated") | "\(.data_source)\t\(.changes)"'
 
 # metric filters: how many terms converted vs were blocked
 cat migration-report.json | jq '[.metrics[].filters[]?] | group_by(.applied) | map({applied: .[0].applied, terms: length, criteria: (map(.criteria) | add)})'
@@ -486,6 +493,15 @@ Nothing was changed. The first means someone edited the data source during the r
 
 ### `warehouse` fails a data source with "is taken by a data source in LaunchDarkly environment"
 Data source keys are unique per project, and that key belongs to a data source in another environment, which this run will not change or map. Rename the source in Statsig, or run against that environment with `--ld-environment`.
+
+### `warehouse --update-mappings` fails a data source with "no longer maps context kind(s)"
+Bound metrics use that context kind as an analysis unit, and the Statsig export no longer maps it. Change those metrics' analysis units in LD, or map the kind in the Statsig source, then rerun. Nothing else on the data source was changed.
+
+### `warehouse --update-mappings` warns "its value column ... was kept" or "its query does not return the columns the Statsig export maps"
+The rest of its mappings were applied. For the first, bound numeric metrics read the data source's value column; set their own value column in LD, then rerun to remove it. For the second, the export names a column the data source's query does not return, so that mapping was left as it was; correct the column in Statsig, or add it to the query in LD.
+
+### `warehouse --update-mappings` fails a data source with "the warehouse now returns different columns"
+LD reruns the query to validate a mapping change and compares the columns exactly. Run the query preview in the data source's LD editor and save it to refresh its columns, then rerun.
 
 ### `warehouse --constant-event-key=false --overwrite` fails a data source with "its key column ... is not in the updated query"
 In that mode an update keeps the existing key column, and the new Statsig SQL no longer returns it, so metrics on the data source would filter a different column. Keep the column in the Statsig SQL, or update the data source by hand.

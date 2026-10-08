@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `data_sources_fetched` (whether the data sources were read from LaunchDarkly) and `constant_key_data_sources` (how
   many of them project the constant).
 
+- `warehouse`: `--update-mappings` corrects the timestamp, value, and context mappings of existing metric data
+  sources in place from the Statsig export, keeping their keys, queries, key columns, column lists, and bound
+  metrics, on data sources with or without the constant event key. Each mapping the export defines itself (its
+  timestamp column, its id-type mappings, and a value column only when it names one) is matched case-insensitively
+  to the data source's listed columns, and only fields that differ are patched, after the same `test` ops as
+  `--overwrite`; a data source that already matches gets no PATCH. A context kind the export no longer maps is
+  removed, but a data source whose bound metrics use that kind as an analysis unit is refused, naming them. A value
+  column the export no longer maps is kept while bound numeric metrics without their own value column read it, and
+  one line names them. A mapping whose export column the data source's query does not return is left as it is,
+  reported in one line per source. With `--overwrite`, a data source without the constant event key still gets the
+  wrapped query and new column list, but takes its mappings from the export instead of keeping its old ones. A
+  `--dry-run` with LD credentials prints each changed field (`timestamp: TS → CREATED_AT`), and the report records
+  each update as note code `mappings_updated` with its `changes`.
+
 
 ### Added
 
