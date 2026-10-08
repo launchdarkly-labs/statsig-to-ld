@@ -40,6 +40,9 @@ type MetricPost struct {
 	// Filters narrows which events the numerator counts. On a warehouse-native
 	// metric these filter warehouse columns.
 	Filters *EventFilter `json:"filters,omitempty"`
+
+	// ValueColumn overrides the data source's value column for a numeric warehouse-native metric.
+	ValueColumn string `json:"valueColumn,omitempty"`
 }
 
 // EventFilter is a node in a LaunchDarkly metric filter tree: either a group
@@ -96,6 +99,8 @@ type DenominatorPost struct {
 	// Filters narrows which events the denominator counts, independently of the
 	// numerator's filter.
 	Filters *EventFilter `json:"filters,omitempty"`
+	// ValueColumn overrides the data source's value column for a numeric denominator.
+	ValueColumn string `json:"valueColumn,omitempty"`
 }
 
 // EventDefault configures the default event value for missing units.

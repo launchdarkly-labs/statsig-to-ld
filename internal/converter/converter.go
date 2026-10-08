@@ -62,6 +62,14 @@ type Options struct {
 	// accepts. Units outside the set are dropped. Nil means unknown and filters
 	// nothing.
 	RegisteredAnalysisUnits map[string]bool
+
+	// ConstantEventKeys maps an LD data source key to the constant event key its SQL
+	// projects; warehouse-native metrics on it use that key and select rows by filters.
+	ConstantEventKeys map[string]string
+
+	// DataSourceColumns maps an LD data source key to its column names. LaunchDarkly
+	// matches columns case-sensitively, so metric columns are rewritten to this case.
+	DataSourceColumns map[string][]string
 }
 
 // Warning codes are stable identifiers for the diagnostics the converter emits.
@@ -92,6 +100,17 @@ const (
 	WarnWindowNoDataSource        = "window_no_data_source"
 	WarnDailyParticipationRatio   = "daily_participation_ratio_term"
 	WarnRatioNoDataSource         = "ratio_no_data_source"
+	WarnColumnNotInDataSource     = "column_not_in_data_source"
+	WarnCloudMetricConstantKey    = "cloud_metric_on_constant_key_source"
+	WarnUnfilteredConstantKey     = "constant_event_key_unfiltered"
+
+	// Note codes (Result.NoteCodes): reported, never printed per metric.
+	WarnConstantEventKey = "constant_event_key"
+	WarnColumnUnverified = "column_unverified"
+
+	// Set by the command when a create conflicts, not by Convert.
+	WarnExistingEventKeyMismatch = "existing_metric_event_key_mismatch"
+	WarnExistingMetricUnverified = "existing_metric_unverified"
 
 	// Filter conversion.
 	WarnFilterApplied            = "filter_applied"
@@ -146,6 +165,14 @@ type Result struct {
 	WarningCodes []string
 	LossyCodes   []string
 
+	// NoteCodes need no action: reported, not printed. Populated only via addNote.
+	NoteCodes []string
+
+	// BlockingReasons are the warnings that rule the metric out even with --convert-lossy;
+	// BlockingCodes runs parallel to it. Populated only via addBlocking.
+	BlockingReasons []string
+	BlockingCodes   []string
+
 	// FilterOutcomes records one entry per metric term that carried filter
 	// criteria, whether or not a filter was produced.
 	FilterOutcomes []FilterOutcome
@@ -169,6 +196,20 @@ func (r *Result) addLossy(code, format string, args ...any) {
 	r.LossyCodes = append(r.LossyCodes, code)
 }
 
+func (r *Result) addNote(code string) {
+	if !slices.Contains(r.NoteCodes, code) {
+		r.NoteCodes = append(r.NoteCodes, code)
+	}
+}
+
+func (r *Result) addBlocking(code, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	r.Warnings = append(r.Warnings, msg)
+	r.WarningCodes = append(r.WarningCodes, code)
+	r.BlockingReasons = append(r.BlockingReasons, msg)
+	r.BlockingCodes = append(r.BlockingCodes, code)
+}
+
 // addCoded records an already-built warning from a helper that had no Result.
 func (r *Result) addCoded(prefix string, ws ...codedWarning) {
 	for _, w := range ws {
@@ -179,6 +220,9 @@ func (r *Result) addCoded(prefix string, ws ...codedWarning) {
 // IsLossy reports whether the conversion dropped or approximated a Statsig
 // feature. Lossy metrics are skipped by default; --convert-lossy converts them.
 func (r *Result) IsLossy() bool { return len(r.LossyReasons) > 0 }
+
+// IsBlocked reports whether the metric must not be created, even with --convert-lossy.
+func (r *Result) IsBlocked() bool { return len(r.BlockingReasons) > 0 }
 
 // IncompatibleError indicates the Statsig metric type has no LD equivalent.
 // This is a normal outcome, not a failure — the metric should be logged as
@@ -246,14 +290,31 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		}
 	}
 
+	// Statsig selects warehouse rows by filter criteria, not event name, so on a
+	// constant-key data source the event key is the constant, matching every row.
+	boundDS := boundDataSource(sg, opts)
+	constKey, hasConstKey := constantEventKey(boundDS, opts)
+	var valueColumn string
+
 	// Event key resolution:
+	//   0. the bound data source's constant event key (warehouse-native).
 	//   1. metricEvents[0].Name — cloud metrics with explicit events.
 	//   2. warehouse-native value column — the flat warehouseNative.valueColumn or
 	//      metricSources[0].valueColumn (both forms occur; see NumeratorValueColumn).
 	//   3. lineage.events[0] — built-in event_count metrics, which have no
 	//      metricEvents and carry the counted event in lineage.
 	var eventKey string
-	if len(sg.MetricEvents) > 0 {
+	if sg.IsWarehouseNative() && hasConstKey {
+		eventKey = constKey
+		if col := sg.NumeratorValueColumn(); col != "" {
+			if unitAgg == "count_distinct" && unitAggField == "" {
+				unitAggField = col
+			} else if isNumeric {
+				valueColumn = col
+			}
+		}
+		result.addNote(WarnConstantEventKey)
+	} else if len(sg.MetricEvents) > 0 {
 		eventKey = sg.MetricEvents[0].Name
 	} else if sg.IsWarehouseNative() {
 		if col := sg.NumeratorValueColumn(); col != "" {
@@ -442,6 +503,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 
 		WinsorLowerPercentile: winsorLower,
 		WinsorUpperPercentile: winsorUpper,
+		ValueColumn:           valueColumn,
 	}
 
 	result.LDMetric.EventDefault = eventDefault
@@ -469,6 +531,17 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	result.LDMetric.Filters = convertTermCriteria(
 		result, termCriteriaLabel, termCriteria,
 		sg.IsWarehouseNative(), result.LDMetric.DataSource != nil)
+
+	if result.LDMetric.DataSource != nil {
+		m := &result.LDMetric
+		alignTermColumns(result, opts, m.DataSource.Key, "", sg.IsWarehouseNative() && hasConstKey, &m.ValueColumn, &m.UnitAggregationField, m.Filters)
+	}
+
+	if sg.IsWarehouseNative() && hasConstKey {
+		blockUnfilteredTerms(result, boundDS, "warehouse-native", "event")
+	} else if !sg.IsWarehouseNative() && hasConstKey && eventKey != constKey {
+		warnCloudOnConstantKey(result, "", eventKey, boundDS, constKey)
+	}
 
 	// ---------------------------------------------------------------
 	// Windowed metrics: map a Statsig custom rollup window (days) to LD window
@@ -645,6 +718,117 @@ func appendUnique(dst []string, values ...string) []string {
 		}
 	}
 	return dst
+}
+
+func boundDataSource(sg *statsig.Metric, opts Options) string {
+	if src := sg.NumeratorSourceName(); src != "" {
+		return resolveDataSource(src, opts)
+	}
+	return opts.LDDataSource
+}
+
+func constantEventKey(dsKey string, opts Options) (string, bool) {
+	if dsKey == "" {
+		return "", false
+	}
+	k, ok := opts.ConstantEventKeys[dsKey]
+	return k, ok
+}
+
+// alignTermColumns rewrites a term's columns to the data source's stored case. With
+// unknown columns it notes, for a constant-key term, that their case went unchecked.
+func alignTermColumns(result *Result, opts Options, dsKey, label string, constKey bool, valueColumn, field *string, filters *launchdarkly.EventFilter) {
+	cols := opts.DataSourceColumns[dsKey]
+	if len(cols) == 0 {
+		if !constKey {
+			return
+		}
+		names := appendUnique(nil, *valueColumn, *field)
+		names = appendUnique(names, filterAttributes(filters)...)
+		if len(names) > 0 {
+			result.addNote(WarnColumnUnverified)
+		}
+		return
+	}
+	*valueColumn = matchColumn(result, cols, *valueColumn, label+"value column")
+	*field = matchColumn(result, cols, *field, label+"count-distinct column")
+	matchFilterColumns(result, cols, filters)
+}
+
+func filterAttributes(f *launchdarkly.EventFilter) []string {
+	if f == nil {
+		return nil
+	}
+	if f.Type != launchdarkly.EventFilterTypeGroup {
+		return []string{f.Attribute}
+	}
+	var out []string
+	for _, v := range f.Values {
+		switch child := v.(type) {
+		case launchdarkly.EventFilter:
+			out = append(out, filterAttributes(&child)...)
+		case *launchdarkly.EventFilter:
+			out = append(out, filterAttributes(child)...)
+		}
+	}
+	return out
+}
+
+// blockUnfilteredTerms rules the metric out when a constant-key term's filter did not
+// fully convert: the event key matches every row, so it would count the whole source.
+func blockUnfilteredTerms(result *Result, dsKey string, terms ...string) {
+	for _, f := range result.FilterOutcomes {
+		if f.Applied || !slices.Contains(terms, f.Term) {
+			continue
+		}
+		result.addBlocking(WarnUnfilteredConstantKey,
+			"NOT CREATED: %s could not be converted to a LaunchDarkly filter, and data source %q matches every row on its event key, so this metric would count every row of the source instead of the filtered subset. It is skipped even with --convert-lossy; create it by hand in LaunchDarkly with the filter",
+			criteriaPhrase(f.Criteria, f.Term), dsKey)
+	}
+}
+
+func warnCloudOnConstantKey(result *Result, label, eventName, dsKey, constKey string) {
+	result.addWarning(WarnCloudMetricConstantKey,
+		"%sevent %q is bound to data source %q, whose key column holds the constant %q, so it matches no rows. Bind cloud metrics to a data source with an event-name key column, or leave them unbound to read SDK events",
+		label, eventName, dsKey, constKey)
+}
+
+// matchColumn returns col in the data source's case, recording a missing column as lossy.
+func matchColumn(result *Result, cols []string, col, what string) string {
+	if col == "" || len(cols) == 0 {
+		return col
+	}
+	for _, c := range cols {
+		if c == col {
+			return c
+		}
+	}
+	for _, c := range cols {
+		if strings.EqualFold(c, col) {
+			return c
+		}
+	}
+	result.addLossy(WarnColumnNotInDataSource, "%s %q is not a column of the bound LaunchDarkly data source", what, col)
+	return col
+}
+
+func matchFilterColumns(result *Result, cols []string, f *launchdarkly.EventFilter) {
+	if f == nil || len(cols) == 0 {
+		return
+	}
+	if f.Type != launchdarkly.EventFilterTypeGroup {
+		f.Attribute = matchColumn(result, cols, f.Attribute, "filter column")
+		return
+	}
+	for i, v := range f.Values {
+		switch child := v.(type) {
+		case launchdarkly.EventFilter:
+			matchFilterColumns(result, cols, &child)
+			f.Values[i] = child
+		case *launchdarkly.EventFilter:
+			matchFilterColumns(result, cols, child)
+		}
+	}
 }
 
 // resolveDataSource determines the LD data source key for a Statsig metric
@@ -904,8 +1088,10 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		// Top-level Aggregation is "ratio"; each term has its own column,
 		// aggregation, and filters. The numerator uses the shared warehouseNative
 		// value column/criteria; the denominator has denominator* fields.
-		numEv = statsig.MetricEvent{Name: sg.NumeratorValueColumn(), Type: wn.NumeratorAggregation, Criteria: sg.NumeratorCriteria()}
-		denEv = statsig.MetricEvent{Name: wn.DenominatorValueColumn, Type: wn.DenominatorAggregation, Criteria: wn.DenominatorCriteria}
+		// ratioTermSpec reads a count_distinct column from MetadataKey, so set it too.
+		numCol, denCol := sg.NumeratorValueColumn(), wn.DenominatorValueColumn
+		numEv = statsig.MetricEvent{Name: numCol, MetadataKey: numCol, Type: wn.NumeratorAggregation, Criteria: sg.NumeratorCriteria()}
+		denEv = statsig.MetricEvent{Name: denCol, MetadataKey: denCol, Type: wn.DenominatorAggregation, Criteria: wn.DenominatorCriteria}
 		numSrcName = sg.NumeratorSourceName()
 		denSrcName = wn.DenominatorMetricSourceName
 	} else {
@@ -1040,6 +1226,26 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		result.LDMetric.Denominator.DataSource = &launchdarkly.DataSource{Key: denDS}
 	}
 
+	// Constant event keys: each term uses its own data source's key.
+	numConstKey, numHasConst := constantEventKey(numDS, opts)
+	denConstKey, denHasConst := constantEventKey(denDS, opts)
+	if sg.IsWarehouseNative() {
+		if numHasConst {
+			result.LDMetric.EventKey = numConstKey
+			if numSpec.isNumeric && numSpec.unitAgg != "count_distinct" {
+				result.LDMetric.ValueColumn = numEv.Name
+			}
+			result.addNote(WarnConstantEventKey)
+		}
+		if denHasConst && result.LDMetric.Denominator != nil {
+			result.LDMetric.Denominator.EventName = denConstKey
+			if denSpec.isNumeric && denSpec.unitAgg != "count_distinct" {
+				result.LDMetric.Denominator.ValueColumn = denEv.Name
+			}
+			result.addNote(WarnConstantEventKey)
+		}
+	}
+
 	// ---------------------------------------------------------------
 	// Per-term metric filters. Each term carries its own criteria and its own data
 	// source, so each is converted independently: one term can get its filter
@@ -1050,6 +1256,32 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	if result.LDMetric.Denominator != nil {
 		result.LDMetric.Denominator.Filters = convertTermCriteria(
 			result, "denominator", denEv.Criteria, sg.IsWarehouseNative(), denDS != "")
+	}
+
+	whnNumConst := sg.IsWarehouseNative() && numHasConst
+	whnDenConst := sg.IsWarehouseNative() && denHasConst
+	if numDS != "" {
+		m := &result.LDMetric
+		alignTermColumns(result, opts, numDS, "numerator ", whnNumConst, &m.ValueColumn, &m.UnitAggregationField, m.Filters)
+	}
+	if denDS != "" && result.LDMetric.Denominator != nil {
+		d := result.LDMetric.Denominator
+		alignTermColumns(result, opts, denDS, "denominator ", whnDenConst, &d.ValueColumn, &d.UnitAggregationField, d.Filters)
+	}
+
+	if whnNumConst {
+		blockUnfilteredTerms(result, numDS, "numerator")
+	}
+	if whnDenConst {
+		blockUnfilteredTerms(result, denDS, "denominator")
+	}
+	if !sg.IsWarehouseNative() {
+		if numHasConst && numEv.Name != numConstKey {
+			warnCloudOnConstantKey(result, "numerator ", numEv.Name, numDS, numConstKey)
+		}
+		if denHasConst && result.LDMetric.Denominator != nil && denEv.Name != denConstKey {
+			warnCloudOnConstantKey(result, "denominator ", denEv.Name, denDS, denConstKey)
+		}
 	}
 
 	// Custom rollup window applies to the whole ratio metric; resolve after the

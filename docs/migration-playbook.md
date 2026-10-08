@@ -107,8 +107,8 @@ A reasonable order for a real migration. Adjust to your team's tolerance for par
 5. **Recreate segments** (manual) — for any flags you plan to target.
 6. **`statsig-to-ld targeting import --dry-run`** — preview the targeting application. Review the report for `skipped_lossy` entries.
 7. **`statsig-to-ld targeting import`** — apply the targeting. Strict by default; opt in via `--accept-data-loss=...` if needed. Flags now have the same targeting as Statsig, but your app still reads Statsig.
-8. **`statsig-to-ld warehouse`** — *only if you use Statsig warehouse-native experimentation.* Sets up the LaunchDarkly side: data export integration, experimentation integration, and LD metric data sources. **Does not migrate metric definitions** — it writes `source-mapping.json` for step 9 to consume. Skip this step entirely if you're on Statsig Cloud event-based metrics only.
-9. **`statsig-to-ld metrics convert`** — most likely to need manual cleanup (DATA LOSS warnings, unsupported metric types). Doing this after flags + targeting are validated avoids reworking orphan metrics. If you ran step 8, pass `--source-mapping source-mapping.json` so warehouse-native metrics bind to the data sources step 8 created; event-based metrics are converted the same way regardless. Metrics in LD don't affect anything until you reference them, so this step is still order-independent — it's just easier to triage at this point.
+8. **`statsig-to-ld warehouse`** — *only if you use Statsig warehouse-native experimentation.* Sets up the LaunchDarkly side: data export integration, experimentation integration, and LD metric data sources. Each data source projects a constant event key column holding its own key, because LaunchDarkly requires an event key column and Statsig sources have none ([details](cli-reference.md#the-constant-event-key)). Existing data sources are not changed unless you pass `--overwrite`, which updates only those without the constant and refuses any whose bound metrics would stop matching rows; run `--dry-run --overwrite` with LD credentials first to see what it would do. Data source keys are unique per project, so a source whose key is already used in another LD environment fails rather than being shared. **Does not migrate metric definitions** — it writes `source-mapping.json` for step 9 to consume. Skip this step entirely if you're on Statsig Cloud event-based metrics only.
+9. **`statsig-to-ld metrics convert`** — most likely to need manual cleanup (DATA LOSS warnings, unsupported metric types). Doing this after flags + targeting are validated avoids reworking orphan metrics. If you ran step 8, pass `--source-mapping source-mapping.json` so warehouse-native metrics bind to the data sources step 8 created; event-based metrics are converted the same way regardless. Warehouse-native metrics take their event key from those data sources, so the command reads them from LaunchDarkly; pass `--ld-key` and `--ld-project` on the dry run as well. A metric whose filter cannot be converted is not created on these data sources even with `--convert-lossy`, since it would count every row. Metrics in LD don't affect anything until you reference them, so this step is still order-independent — it's just easier to triage at this point.
 10. **Validate** — see [Validation strategy](#validation-strategy).
 11. **Cut over reads** — flip your application to read from LD instead of Statsig. Keep Statsig writes in case of rollback.
 12. **Soak** — let LD serve production for an agreed period.
@@ -157,6 +157,7 @@ For the CLI, the LaunchDarkly token needs to:
 - **Read** flags, environments, metrics in the target project (for analyze, idempotency dedupe, env reconciliation)
 - **Write** flags, metrics (for `flags import`, `metrics convert`, `targeting import`)
 - **Create** environments (only if you let `targeting import` auto-create missing envs; turn off with `--no-create-envs`)
+- **Read** metric data sources (for `metrics convert` when it binds metrics to data sources), and **create** them for `warehouse` (**update** too with `--overwrite`, which also reads the project's metrics)
 
 The built-in **Writer** role covers all of this. If your team uses custom roles, the minimum set is:
 
@@ -164,6 +165,7 @@ The built-in **Writer** role covers all of this. If your team uses custom roles,
 viewFlag, createFlag, updateFlag (for the target project)
 viewMetric, createMetric (for the target project)
 viewEnvironment, createEnvironment (if auto-creating; otherwise just view)
+createMetricDataSource, updateMetricDataSource (for `warehouse`; update only with --overwrite)
 ```
 
 For shared automation (CI, scheduled re-imports), use a **service token** rather than a personal access token so the migration doesn't break when individuals leave.

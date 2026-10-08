@@ -66,6 +66,14 @@ type RunOptions struct {
 	// RegisteredAnalysisUnits is nil when the lookup did not run, meaning no unit
 	// was verified against the project.
 	RegisteredAnalysisUnits []string `json:"registered_analysis_units"`
+
+	// AssumeConstantEventKey records the flag; AssumedConstantKeyDS, where it applied.
+	AssumeConstantEventKey bool     `json:"assume_constant_event_key"`
+	AssumedConstantKeyDS   []string `json:"assumed_constant_key_data_sources,omitempty"`
+
+	// DataSourcesFetched reports a LaunchDarkly read; ConstantKeyDataSources excludes assumed ones.
+	DataSourcesFetched     bool `json:"data_sources_fetched"`
+	ConstantKeyDataSources int  `json:"constant_key_data_sources"`
 }
 
 // TypeBreakdown tallies conversion outcomes for a single Statsig metric type.
@@ -112,6 +120,12 @@ type Diagnostics struct {
 	// the lossy reasons, which silently discarded everything else about it.
 	LossyReasons []string `json:"lossy_reasons,omitempty"`
 	LossyCodes   []string `json:"lossy_codes,omitempty"`
+
+	// BlockingCodes kept the metric from being created even with --convert-lossy.
+	BlockingCodes []string `json:"blocking_codes,omitempty"`
+
+	// NoteCodes need no action and do not count as warnings.
+	NoteCodes []string `json:"note_codes,omitempty"`
 
 	// LDDataSource is the LaunchDarkly data source the metric resolved to, empty
 	// if none. This is the main thing gating filter and window conversion, so it
@@ -168,7 +182,7 @@ func (r *Report) AddConverted(name, typ, id, ldKey, ldProject string, warnings [
 }
 
 // AddSkippedExisting records a metric that already exists in LD. Thread-safe.
-func (r *Report) AddSkippedExisting(name, typ, id, ldKey, ldProject string) {
+func (r *Report) AddSkippedExisting(name, typ, id, ldKey, ldProject string, warnings, warningCodes []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Metrics = append(r.Metrics, MetricEntry{
@@ -178,6 +192,8 @@ func (r *Report) AddSkippedExisting(name, typ, id, ldKey, ldProject string) {
 		Status:      StatusSkippedExisting,
 		LDKey:       ldKey,
 		LDProject:   ldProject,
+		Warnings:    warnings,
+		Diagnostics: Diagnostics{WarningCodes: warningCodes},
 	})
 }
 
@@ -211,6 +227,21 @@ func (r *Report) AddSkippedLossy(name, typ, id string, warnings []string, diag D
 		StatsigID:   id,
 		Status:      StatusSkippedLossy,
 		Reason:      "lossy conversion — skipped; re-run with --convert-lossy to convert it anyway",
+		Warnings:    warnings,
+		Diagnostics: diag,
+	})
+}
+
+// AddSkippedBlocked records a blocked metric as incompatible. Thread-safe.
+func (r *Report) AddSkippedBlocked(name, typ, id, reason string, warnings []string, diag Diagnostics) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Metrics = append(r.Metrics, MetricEntry{
+		StatsigName: name,
+		StatsigType: typ,
+		StatsigID:   id,
+		Status:      StatusSkippedIncompatible,
+		Reason:      reason,
 		Warnings:    warnings,
 		Diagnostics: diag,
 	})
@@ -313,6 +344,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 		"statsig_name", "statsig_type", "statsig_id", "status", "ld_key", "ld_project", "warnings", "reason",
 		"warning_codes", "lossy_codes", "ld_data_source", "analysis_units",
 		"statsig_rollup_time_window", "statsig_source_name", "filters_applied", "filters_blocked",
+		"blocking_codes",
 	}
 	if err := cw.Write(header); err != nil {
 		return err
@@ -331,7 +363,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 		row := []string{m.StatsigName, m.StatsigType, m.StatsigID, m.Status, m.LDKey, m.LDProject, warnings, m.Reason,
 			strings.Join(m.WarningCodes, " "), strings.Join(m.LossyCodes, " "), m.LDDataSource,
 			strings.Join(m.AnalysisUnits, " "), m.StatsigRollupTimeWindow, m.StatsigSourceName,
-			strconv.Itoa(applied), strconv.Itoa(blocked)}
+			strconv.Itoa(applied), strconv.Itoa(blocked), strings.Join(m.BlockingCodes, " ")}
 		if err := cw.Write(row); err != nil {
 			return err
 		}

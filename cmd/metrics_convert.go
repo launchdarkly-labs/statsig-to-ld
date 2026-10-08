@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -17,9 +18,11 @@ import (
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/converter"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/report"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/warehouse"
 	"github.com/spf13/cobra"
 )
 
@@ -82,6 +85,7 @@ var (
 	flagConvertLossy    bool
 	flagList            bool
 	flagDumpRaw         string
+	flagAssumeConstKey  bool
 )
 
 func init() {
@@ -106,6 +110,7 @@ func init() {
 	convertCmd.Flags().StringVar(&flagLDDataSource, "ld-data-source", "", "LD data source for warehouse-native and ratio metrics")
 	convertCmd.Flags().StringVar(&flagSourceMapping, "source-mapping", "", "JSON file mapping Statsig sources to LD data sources")
 	convertCmd.Flags().StringVar(&flagUnitTypeMapping, "unit-type-mapping", "", "JSON file mapping unit types to LD context kinds")
+	convertCmd.Flags().BoolVar(&flagAssumeConstKey, "assume-constant-event-key", false, "Treat mapped data sources LD cannot report on as constant-key")
 
 	convertCmd.Flags().StringVar(&flagExtraUnits, "extra-analysis-units", "", "Extra LD context kinds added to every metric's analysis units (comma-separated, additive)")
 	convertCmd.Flags().BoolVar(&flagWidenUnits, "widen-analysis-units", false, "Add every id type a metric's Statsig source declares to its analysis units, not just the unit types on the metric. Off by default: it widens most warehouse-native metrics, and each added unit must be registered on the LD project")
@@ -308,6 +313,18 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Warehouse-native metrics take their event key from a data source's constant key
+	// column; read it from LaunchDarkly rather than assume how the source was created.
+	var dsInfo dataSourceInfo
+	if len(sourceMapping) > 0 || flagLDDataSource != "" {
+		var err error
+		dsInfo, err = fetchDataSourceKeys(ctx, ldClient, sourceMapping, flagLDDataSource, flagAssumeConstKey, flagDryRun)
+		if err != nil {
+			return err
+		}
+		convOpts.ConstantEventKeys, convOpts.DataSourceColumns = dsInfo.keys, dsInfo.cols
+	}
+
 	// Fetch metrics
 	var metrics []statsig.Metric
 	var err error
@@ -368,6 +385,10 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		UnitTypeMappingEntries:  len(unitTypeMapping),
 		MetricSourcesFetched:    len(convOpts.SourceUnitTypes) > 0,
 		RegisteredAnalysisUnits: sortedKeys(convOpts.RegisteredAnalysisUnits),
+		AssumeConstantEventKey:  flagAssumeConstKey,
+		AssumedConstantKeyDS:    dsInfo.assumed,
+		DataSourcesFetched:      dsInfo.fetched,
+		ConstantKeyDataSources:  dsInfo.constant,
 	}
 	total := len(metrics)
 	var needsDataSource int64 // converted WHN/ratio metrics with no data source bound
@@ -421,6 +442,25 @@ func runConvert(cmd *cobra.Command, args []string) error {
 
 	// Print summary table to stdout
 	rpt.PrintSummaryTable(os.Stdout)
+
+	// Existing metrics are skipped, so name the stale ones: nothing else in this run fixes them.
+	if stale := existingMetricsWithCode(rpt, converter.WarnExistingEventKeyMismatch); len(stale) > 0 {
+		fmt.Printf("\n⚠  %d existing metric(s) were skipped but use an event key their data source's\n", len(stale))
+		fmt.Println("   key column never holds, so they match no rows. Set each one's event key to its")
+		fmt.Println("   data source key in LaunchDarkly, or delete it and run again:")
+		for _, name := range stale {
+			fmt.Printf("     - %s\n", name)
+		}
+	}
+	if unread := existingMetricsWithCode(rpt, converter.WarnExistingMetricUnverified); len(unread) > 0 {
+		fmt.Printf("\n⚠  %d existing metric(s) could not be read back from LaunchDarkly, so their event keys\n", len(unread))
+		fmt.Println("   were not checked. Rerun to check them.")
+	}
+	if n := metricsWithNoteCode(rpt, converter.WarnColumnUnverified); n > 0 {
+		fmt.Printf("\n⚠  %d metric(s) use columns that could not be checked against their data source, because\n", n)
+		fmt.Println("   LaunchDarkly did not report its columns. LaunchDarkly matches column names exactly, so")
+		fmt.Println("   rerun with --ld-key and --ld-project once `warehouse` has created the data sources.")
+	}
 
 	// Warehouse-native and ratio metrics need a LaunchDarkly data source. Call
 	// this out prominently: on a dry run the report shows them as converted, but
@@ -543,6 +583,148 @@ func fetchRegisteredAnalysisUnits(ctx context.Context, ldClient *launchdarkly.Cl
 	return registered, true
 }
 
+type dataSourceInfo struct {
+	// keys maps a data source key to the constant event key it projects.
+	keys    map[string]string
+	cols    map[string][]string
+	fetched bool
+	// constant counts data sources read back as constant-key, not assumed ones.
+	constant int
+	assumed  []string
+}
+
+// fetchDataSourceKeys reads each LD data source's constant event key and columns. With
+// assume, mapped data sources LaunchDarkly cannot report on count as constant-key.
+func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sourceMapping map[string]string, defaultDS string, assume, dryRun bool) (dataSourceInfo, error) {
+	info := dataSourceInfo{keys: map[string]string{}, cols: map[string][]string{}}
+	listed := map[string]bool{}
+	if ldClient != nil {
+		list, err := ldClient.ListMetricDataSources(ctx)
+		switch {
+		case err != nil && !dryRun:
+			return dataSourceInfo{}, fmt.Errorf("%w\n  warehouse-native metrics take their event key and column names from their LaunchDarkly data source, so the run stopped before creating any. Check that the token can read this project's metric data sources", err)
+		case err != nil:
+			log.Printf("WARNING: %v. A real run stops here; this dry run continues with Statsig event keys for warehouse-native metrics. Check that the token can read the project's metric data sources, or add --assume-constant-event-key.", err)
+		default:
+			info.fetched = true
+			for _, ds := range list {
+				key := jsonutil.GetStr(ds, "key")
+				listed[key] = true
+				cm := jsonutil.GetMap(ds, "columnMappings")
+				whType := warehouse.WarehouseTypeForIntegration(jsonutil.GetStr(ds, "integrationKey"))
+				// An edited wrapper still counts: every row it returns carries the constant.
+				if w, state := warehouse.ClassifyConstantKey(jsonutil.GetStr(ds, "sqlQuery"), jsonutil.GetStr(cm, "keyColumn"), key, whType); state != warehouse.NoConstantKey {
+					info.keys[key] = w.EventKey
+					info.constant++
+				}
+				for _, c := range jsonutil.GetSlice(cm, "columns") {
+					if m, ok := c.(map[string]any); ok {
+						if name := jsonutil.GetStr(m, "name"); name != "" {
+							info.cols[key] = append(info.cols[key], name)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var missing, withoutKey []string
+	for _, ds := range mappedDataSources(sourceMapping, defaultDS) {
+		switch {
+		case listed[ds]:
+			if _, ok := info.keys[ds]; !ok {
+				withoutKey = append(withoutKey, ds)
+			}
+		case assume:
+			info.keys[ds] = ds
+			info.assumed = append(info.assumed, ds)
+		case info.fetched:
+			missing = append(missing, ds)
+		}
+	}
+	if len(missing) > 0 {
+		log.Printf("WARNING: %d mapped data source(s) do not exist in the LaunchDarkly project: %s. LaunchDarkly rejects metrics bound to them. Run `warehouse` first, or preview with --dry-run --assume-constant-event-key.",
+			len(missing), strings.Join(missing, ", "))
+	}
+	if len(withoutKey) > 0 {
+		log.Printf("WARNING: %d mapped data source(s) do not have the constant event key: %s. Warehouse-native metrics on them keep Statsig event keys, which usually match none of their rows. Run `warehouse --overwrite` first to add it.",
+			len(withoutKey), strings.Join(withoutKey, ", "))
+	}
+	return info, nil
+}
+
+func mappedDataSources(sourceMapping map[string]string, defaultDS string) []string {
+	set := map[string]bool{}
+	for _, ds := range sourceMapping {
+		if ds != "" {
+			set[ds] = true
+		}
+	}
+	if defaultDS != "" {
+		set[defaultDS] = true
+	}
+	return sortedKeys(set)
+}
+
+// existingMetricWarning returns a warning and its code when an existing metric's event
+// key is not its constant-key data source's constant, or "" twice.
+func existingMetricWarning(ctx context.Context, ldClient *launchdarkly.Client, key string, constKeys map[string]string) (string, string) {
+	m, err := ldClient.GetMetricRaw(ctx, key)
+	if err != nil {
+		return fmt.Sprintf("metric %q already exists and could not be read back (%v), so its event key was not checked against its data source's constant event key", key, err), converter.WarnExistingMetricUnverified
+	}
+	var problems []string
+	check := func(term, eventKey string, ds map[string]any) {
+		dsKey := jsonutil.GetStr(ds, "key")
+		if k, ok := constKeys[dsKey]; ok && eventKey != k {
+			problems = append(problems, fmt.Sprintf("%s %q on data source %q, whose key column holds only %q", term, eventKey, dsKey, k))
+		}
+	}
+	check("event key", jsonutil.GetStr(m, "eventKey"), jsonutil.GetMap(m, "dataSource"))
+	if den := jsonutil.GetMap(m, "denominator"); den != nil {
+		check("denominator event name", jsonutil.GetStr(den, "eventName"), jsonutil.GetMap(den, "dataSource"))
+	}
+	if len(problems) == 0 {
+		return "", ""
+	}
+	return fmt.Sprintf("metric %q already exists with %s, so it matches no rows. It was skipped because it exists; set its event key to the data source key in LaunchDarkly, or delete it and run again", key, strings.Join(problems, "; ")), converter.WarnExistingEventKeyMismatch
+}
+
+func readsConstantKeySource(m launchdarkly.MetricPost, constKeys map[string]string) bool {
+	if m.DataSource != nil {
+		if _, ok := constKeys[m.DataSource.Key]; ok {
+			return true
+		}
+	}
+	if m.Denominator != nil && m.Denominator.DataSource != nil {
+		if _, ok := constKeys[m.Denominator.DataSource.Key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func metricsWithNoteCode(rpt *report.Report, code string) int {
+	n := 0
+	for _, m := range rpt.Metrics {
+		if slices.Contains(m.NoteCodes, code) {
+			n++
+		}
+	}
+	return n
+}
+
+func existingMetricsWithCode(rpt *report.Report, code string) []string {
+	var names []string
+	for _, m := range rpt.Metrics {
+		if m.Status == report.StatusSkippedExisting && slices.Contains(m.WarningCodes, code) {
+			names = append(names, fmt.Sprintf("%s (%s)", m.StatsigName, m.LDKey))
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // needsSourceUnitTypes reports whether any metric's analysis units depend on
 // the metric sources' id-type mappings.
 func needsSourceUnitTypes(metrics []statsig.Metric, opts converter.Options) bool {
@@ -621,6 +803,18 @@ func processMetric(
 
 	diag := buildDiagnostics(sg, result)
 
+	// Blocked conversions (e.g. an unconverted filter on a data source whose event key
+	// matches every row) are skipped even with --convert-lossy.
+	if result.IsBlocked() {
+		rpt.AddSkippedBlocked(sg.Name, effType, sg.ID, strings.Join(result.BlockingReasons, "; "), result.Warnings, diag)
+		if flagVerbose {
+			log.Printf("%s SKIP   %-45s  %s", progress, sg.Name, strings.Join(result.BlockingReasons, "; "))
+		} else {
+			fmt.Fprint(os.Stderr, "S")
+		}
+		return
+	}
+
 	// Lossy conversions (a Statsig feature dropped or approximated) are skipped
 	// by default; --convert-lossy opts into the imperfect conversion.
 	if result.IsLossy() && !flagConvertLossy {
@@ -663,9 +857,18 @@ func processMetric(
 	_, createErr := ldClient.CreateMetric(ctx, result.LDMetric)
 	if createErr != nil {
 		if launchdarkly.IsConflict(createErr) {
-			rpt.AddSkippedExisting(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject)
+			var warnings, codes []string
+			if readsConstantKeySource(result.LDMetric, convOpts.ConstantEventKeys) {
+				if w, code := existingMetricWarning(ctx, ldClient, result.LDMetric.Key, convOpts.ConstantEventKeys); w != "" {
+					warnings, codes = []string{w}, []string{code}
+				}
+			}
+			rpt.AddSkippedExisting(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, warnings, codes)
 			if flagVerbose {
 				log.Printf("%s EXIST  %-45s  → %s (already exists)", progress, sg.Name, result.LDMetric.Key)
+				for _, w := range warnings {
+					log.Printf("         WARNING: %s", w)
+				}
 			} else {
 				fmt.Fprint(os.Stderr, "E")
 			}
@@ -821,6 +1024,8 @@ func buildDiagnostics(sg statsig.Metric, result *converter.Result) report.Diagno
 		WarningCodes:            result.WarningCodes,
 		LossyReasons:            result.LossyReasons,
 		LossyCodes:              result.LossyCodes,
+		BlockingCodes:           result.BlockingCodes,
+		NoteCodes:               result.NoteCodes,
 		AnalysisUnits:           result.LDMetric.AnalysisUnits,
 		StatsigRollupTimeWindow: sg.EffectiveRollupTimeWindow(),
 		StatsigSourceName:       sg.NumeratorSourceName(),

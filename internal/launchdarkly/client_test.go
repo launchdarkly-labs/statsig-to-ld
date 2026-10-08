@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -401,5 +405,165 @@ func readAll(r interface{ Read(p []byte) (int, error) }) ([]byte, error) {
 			}
 			return buf, err
 		}
+	}
+}
+
+// fakeMetricList mimics LaunchDarkly's metric list: ordered by creation time only, with
+// keyset-cursor next links and offset paging. reverseTies(n) reverses ties on request n.
+type fakeMetricList struct {
+	t           *testing.T
+	metrics     []fakeMetric
+	reverseTies func(req int) bool
+	failOffset  int
+	requests    []string
+}
+
+type fakeMetric struct {
+	key     string
+	created int
+	id      string
+}
+
+func (f *fakeMetricList) handler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.URL.Path != "/api/v2/metrics/my-project" {
+		f.t.Errorf("unexpected path %s", r.URL.Path)
+	}
+	f.requests = append(f.requests, r.URL.RawQuery)
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > 50 {
+		limit = 50
+	}
+	ordered := slices.Clone(f.metrics)
+	reverse := f.reverseTies != nil && f.reverseTies(len(f.requests))
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].created != ordered[j].created {
+			return ordered[i].created < ordered[j].created
+		}
+		return (ordered[i].key < ordered[j].key) != reverse
+	})
+	var page []fakeMetric
+	if c := q.Get("cursor"); c != "" {
+		createdAfter, afterID, _ := strings.Cut(c, "Z")
+		after, _ := strconv.Atoi(createdAfter)
+		for _, m := range ordered {
+			if m.created >= after && m.id > afterID && len(page) < limit {
+				page = append(page, m)
+			}
+		}
+	} else {
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		if q.Has("offset") && offset == f.failOffset && f.failOffset > 0 {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"code":"forbidden"}`))
+			return
+		}
+		page = ordered[min(offset, len(ordered)):min(offset+limit, len(ordered))]
+	}
+	items := make([]map[string]any, len(page))
+	for i, m := range page {
+		items[i] = map[string]any{"key": m.key}
+	}
+	links := map[string]any{}
+	if len(page) == limit {
+		last := page[len(page)-1]
+		links["next"] = map[string]any{"href": fmt.Sprintf("/api/v2/metrics/my-project?cursor=%dZ%s&limit=%d", last.created, last.id, limit)}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "_links": links, "totalCount": len(f.metrics)})
+}
+
+func followNextLinks(t *testing.T, client *Client) map[string]bool {
+	t.Helper()
+	got := map[string]bool{}
+	for path := "/api/v2/metrics/my-project?limit=50"; path != ""; {
+		_, body, err := client.requestJSON(context.Background(), "GET", path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range body["items"].([]any) {
+			got[m.(map[string]any)["key"].(string)] = true
+		}
+		next, _ := body["_links"].(map[string]any)["next"].(map[string]any)
+		path, _ = next["href"].(string)
+	}
+	return got
+}
+
+func TestListMetricsRaw_DoesNotMissMetricsTheCursorSkips(t *testing.T) {
+	f := &fakeMetricList{t: t}
+	for i := 0; i < 60; i++ {
+		f.metrics = append(f.metrics, fakeMetric{key: fmt.Sprintf("m%02d", i), created: i, id: fmt.Sprintf("%024d", 100+i)})
+	}
+	f.metrics[50].id = fmt.Sprintf("%024d", 1)
+	_, client := newTestServer(t, f.handler)
+
+	if got := followNextLinks(t, client); len(got) != 59 || got["m50"] {
+		t.Fatalf("the fake should reproduce the cursor skip: got %d metrics, m50=%v", len(got), got["m50"])
+	}
+
+	f.requests = nil
+	got, err := client.ListMetricsRaw(context.Background())
+	if err != nil || len(got) != 60 {
+		t.Fatalf("got %d metrics, %v; want all 60", len(got), err)
+	}
+	want := []string{"limit=50&offset=0", "limit=50&offset=50"}
+	if !slices.Equal(f.requests, want) {
+		t.Errorf("requests = %q, want %q (offset pages, no cursor)", f.requests, want)
+	}
+}
+
+func TestListMetricsRaw_RereadsWhenTiesShuffleBetweenPages(t *testing.T) {
+	f := &fakeMetricList{t: t}
+	for i := 0; i < 60; i++ {
+		created := i
+		if i >= 45 && i < 55 {
+			created = 45
+		}
+		f.metrics = append(f.metrics, fakeMetric{key: fmt.Sprintf("m%02d", i), created: created, id: fmt.Sprintf("%024d", i)})
+	}
+	_, client := newTestServer(t, f.handler)
+
+	f.reverseTies = func(req int) bool { return req == 2 }
+	got, err := client.ListMetricsRaw(context.Background())
+	if err != nil || len(got) != 60 || len(f.requests) != 4 {
+		t.Fatalf("got %d metrics in %d requests, %v; want all 60 after one re-read", len(got), len(f.requests), err)
+	}
+
+	f.requests = nil
+	f.reverseTies = func(req int) bool { return req%2 == 0 }
+	got, err = client.ListMetricsRaw(context.Background())
+	if err == nil || err.Error() != "could not read a complete list of the project's metrics: got 55 of 60" || got != nil {
+		t.Errorf("got %d metrics, %v; want the short-list error", len(got), err)
+	}
+	if len(f.requests) != 4 {
+		t.Errorf("read the list %d times, want twice", len(f.requests)/2)
+	}
+}
+
+func TestListMetricsRaw_FailedPageIsAnError(t *testing.T) {
+	f := &fakeMetricList{t: t, failOffset: 50}
+	for i := 0; i < 60; i++ {
+		f.metrics = append(f.metrics, fakeMetric{key: fmt.Sprintf("m%02d", i), created: i, id: fmt.Sprintf("%024d", i)})
+	}
+	_, client := newTestServer(t, f.handler)
+	if got, err := client.ListMetricsRaw(context.Background()); err == nil || !strings.Contains(err.Error(), "403") {
+		t.Errorf("got %v, %v; want the second page's 403", got, err)
+	}
+}
+
+func TestUpdateMetricDataSource_PatchNotAppliedIsDistinct(t *testing.T) {
+	status, msg := http.StatusBadRequest, "Error applying json-patch document"
+	_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": "invalid_request", "message": msg})
+	})
+	ops := []JSONPatchOp{{Op: "test", Path: "/sqlQuery", Value: "SELECT 1"}}
+	if _, err := client.UpdateMetricDataSource(context.Background(), "k", ops); !errors.Is(err, ErrPatchNotApplied) {
+		t.Errorf("err = %v, want ErrPatchNotApplied", err)
+	}
+	msg = "Event key column is required"
+	if _, err := client.UpdateMetricDataSource(context.Background(), "k", ops); errors.Is(err, ErrPatchNotApplied) || err == nil || !strings.Contains(err.Error(), msg) {
+		t.Errorf("err = %v, want the validation error itself", err)
 	}
 }

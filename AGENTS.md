@@ -252,6 +252,8 @@ EOF
 
 The keys are each metric's `metricSourceName` (from the Statsig metrics API / console; a `warehouse --dry-run` also writes every source name to its export file); the values are the keys of the existing LD data sources. A warehouse-native metric resolved by neither flag is created without a data source binding (a `no LD data source specified` warning), and ratio metrics are rejected by LD without one.
 
+**Event keys come from the data source.** LaunchDarkly reads only the rows whose event key column equals the metric's event key, and Statsig sources have no event key, so `warehouse` creates each data source with a constant `LD_EVENT_KEY` column holding the data source key (see [The constant event key](docs/cli-reference.md#the-constant-event-key)). When `--ld-data-source` or `--source-mapping` is set, `metrics convert` reads the bound data sources from LaunchDarkly, so **pass `--ld-key` and `--ld-project` on dry runs too**. For each data source that projects the constant (including one whose wrapper was edited in LD but still opens with `SELECT *, '<its key>' AS <its key column> FROM (`), warehouse-native metrics get the data source key as their event key, the Statsig value column as `valueColumn`, and columns in the data source's case. A data source without the constant (for example one built by hand) keeps the legacy event key, which usually matches nothing. A real run stops if the data sources cannot be read. Before `warehouse` has created them, preview with `--dry-run --assume-constant-event-key`.
+
 Warehouse-native conversion is newer and less battle-tested than the cloud path. If a warehouse-native metric isn't recognized or converts wrong, capture its raw Statsig definition with `--dump-raw <file>` (Statsig key only) and share it — redacted — with the LaunchDarkly team; the tool sees a metric only through that JSON, so it's exactly what conversion works from.
 
 ### Custom unit types (company-level experiments)
@@ -308,6 +310,14 @@ Many of these mark a conversion **lossy**: by default the metric is skipped (`sk
 | `custom rollup window` | Low | Lossy only when no data source is bound; pass `--ld-data-source` (snowflake) to apply the window. |
 | `daily participation rate ... loses the per-day rate` | Medium | Lossy — the participation-rate default (unset rollup, `daily`, or `daily_participation_rate`) on `event_user`/`daily_participation` metrics, approximated as a binary metric. Explicit one-time (`max`) and windowed (`custom`) rollups convert cleanly and are not flagged. |
 | `unitType ... may not match an LD context kind` | Medium | Use `--unit-type-mapping` to map explicitly. |
+| `NOT CREATED: ... could not be converted to a LaunchDarkly filter` (code `constant_event_key_unfiltered`) | High | Skipped even with `--convert-lossy`, reported as `skipped_incompatible`. The metric reads a constant-key data source, where only its filter selects rows, and the filter did not convert, so it would count every row. Create it by hand in LD with the filter. |
+| `metric ... already exists with event key ... so it matches no rows` (code `existing_metric_event_key_mismatch`) | High | On a `skipped_existing` entry, and listed under the run summary. The metric predates its data source's constant event key. Set its event key to the data source key in LD, or delete it and rerun. |
+| `metric ... already exists and could not be read back` (code `existing_metric_unverified`) | Medium | On a `skipped_existing` entry; counted separately in the run summary, not as a mismatch. Its event key was not checked against its data source's constant. Check that the token can read metrics, or check the metric in LD. |
+| `N metric(s) use columns that could not be checked against their data source` (note code `column_unverified`) | Medium | One line in the run summary; each affected metric carries the code in `note_codes`, not a warning. The data source's columns are unknown (`--assume-constant-event-key`, or it does not exist yet), so columns keep Statsig's case. Rerun with LD credentials once the data source exists. |
+| `event ... is bound to data source ..., whose key column holds the constant` (code `cloud_metric_on_constant_key_source`) | Medium | A cloud metric bound to a constant-key data source (usually through `--ld-data-source`) matches no rows. Bind it to a data source with an event-name key column, or leave it unbound. |
+| `N mapped data source(s) do not have the constant event key` | High | One line at the start of the run. Warehouse-native metrics on those data sources keep their Statsig event keys, which usually match none of their rows. Run `warehouse --overwrite` first to add the constant event key, then rerun `metrics convert`. |
+| `... is not a column of the bound LaunchDarkly data source` (code `column_not_in_data_source`) | Medium | Lossy — skipped by default. A value, count-distinct, or filter column from Statsig is not in the data source's column list. Check the Statsig column name against the data source's columns in LD. |
+| (note code `constant_event_key`) | Info | Not printed; in `note_codes` only. The term's event key is its data source's constant event key, the expected outcome on a constant-key data source. |
 | `no LD data source specified` | Medium | Warehouse-native metric is being created without a data source binding. Fix: run `statsig-to-ld warehouse` first (it creates the data sources and writes `source-mapping.json`), then re-run `metrics convert --source-mapping source-mapping.json`. If the data sources already exist (set up by hand or via Terraform), pass `--ld-data-source` or `--source-mapping` directly. |
 
 ## Subcommand: warehouse
@@ -315,7 +325,8 @@ Many of these mark a conversion **lossy**: by default the metric is skipped (`sk
 Sets up the LaunchDarkly side of a Statsig warehouse-native experimentation project: data export integration, experimentation integration, and LD metric data sources. **It does not migrate metric definitions** — `metrics convert` does that, using the `source-mapping.json` this subcommand writes. Full operator detail (interactive SQL wizards per warehouse type, resume semantics, the `migration_state.json` lifecycle) is in [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md); this section is enough to drive the basic flow and decide when to run it.
 
 ```bash
-# Dry-run from live Statsig API (only Statsig key needed)
+# Dry-run from live Statsig API (only Statsig key needed). Add --ld-key and
+# --ld-project to list which data sources would be created, updated, skipped, or refused.
 ./statsig-to-ld warehouse --statsig-key console-... --dry-run
 
 # Full warehouse setup (integrations + data sources)
@@ -346,7 +357,17 @@ Sets up the LaunchDarkly side of a Statsig warehouse-native experimentation proj
 
 1. **Export** — Fetches `wh_connections` and `metric_source/list` from Statsig (or loads from `--statsig-export-file`). Writes `statsig_export_<timestamp>.json`. (Metric definitions are not fetched here — `metrics convert` re-fetches them itself.)
 2. **Warehouse setup** (interactive) — Checks for existing data-export and experimentation integrations in LD; if absent, runs the wizard. Snowflake / BigQuery / Databricks / Redshift each have their own setup path. Auto-skips if integrations already exist.
-3. **Data sources** — Creates LD data sources (calling the warehouse preview API to discover real column schemas first), then writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key it created. The subcommand prints the recommended `metrics convert --source-mapping source-mapping.json` hand-off command at the end of a successful run.
+3. **Data sources** — Creates LD data sources (calling the warehouse preview API to discover real column schemas first), each wrapped to project a constant `LD_EVENT_KEY` column holding the data source key, which becomes its event key column (`--constant-event-key=false` turns this off). An existing data source that already has that column is never rewritten, nor is one whose wrapper was edited in LD (skipped as "kept: edited in LaunchDarkly"). One without it is skipped, and the run prints one line counting them; `--overwrite` updates its query, key column, and column list in place, keeping its timestamp, value, and context mappings while the new query returns them, but refuses (fails the source) when metrics bound to it use other event keys, since they would match no rows afterwards. `--force-overwrite` updates it anyway and lists them. With `--constant-event-key=false`, `--overwrite` keeps the existing key column instead and fails the source if the new query does not return it. Each update is a JSON Patch that first tests the query and column mappings the run listed, so a data source changed in LD during the run fails rather than being overwritten. A key already used by a data source in another LD environment fails that source. Statsig sources whose names map to the same key all fail and are left out of `source-mapping.json`, as are sources whose key is used in another environment. It then writes `source-mapping.json` mapping each Statsig metric source name to the LD data source key it created. The subcommand prints the recommended `metrics convert --source-mapping source-mapping.json` hand-off command at the end of a successful run.
+
+### Report notes
+
+`migration_report_<timestamp>.json` keeps data source outcomes that need no action as `notes` (`{code, data_source}`), not as warnings:
+
+| Note code | Meaning |
+|---|---|
+| `exists_without_constant_key` | The data source exists without the constant event key and `--overwrite` was not set, so it was skipped. The run prints one line counting these. |
+| `constant_key_edited_in_launchdarkly` | The data source opens with the constant event-key wrapper but was edited in LD after creation, so it was kept as is. |
+| `constant_key_kept` | `--constant-event-key=false` did not remove the constant from a data source that has it. |
 
 ### Relationship to `metrics convert`
 
@@ -375,7 +396,7 @@ Every subcommand writes a structured JSON report:
 | `flags import` | `flag-import-report.json` |
 | `targeting import` | `targeting-import-report.json` |
 | `metrics convert` | `migration-report.json` |
-| `warehouse` | `statsig_export_<timestamp>.json` (Phase 1 export) + `migration_state.json` (Phase 2/3 progress, for `--resume`) |
+| `warehouse` | `statsig_export_<timestamp>.json` (Phase 1 export) + `migration_state.json` (Phase 2/3 progress, for `--resume`) + `migration_report_<timestamp>.json` (counts, warnings, errors, and [notes](#report-notes)) + `source-mapping.json`. A `--dry-run` also writes `data-source-bodies.json`: the data source bodies a real run would send, with the wrapped SQL, before the preview (an `error` field marks a source that cannot be created). |
 
 Useful `jq` queries:
 
@@ -397,6 +418,14 @@ cat migration-report.json | jq '.metrics[] | select(.warnings[]? | contains("DAT
 cat migration-report.json | jq -r '.metrics[].warning_codes[]?' | sort | uniq -c | sort -rn
 # just the codes that caused a skip
 cat migration-report.json | jq -r '.metrics[].lossy_codes[]?' | sort | uniq -c | sort -rn
+# metrics never created whatever --convert-lossy says, and why
+cat migration-report.json | jq '.metrics[] | select(.blocking_codes != null) | {name: .statsig_name, reason}'
+# existing metrics whose event key their constant-key data source never holds
+cat migration-report.json | jq -r '.metrics[] | select(.warning_codes[]? == "existing_metric_event_key_mismatch") | .ld_key'
+# note codes (recorded, never printed per metric) by frequency
+cat migration-report.json | jq -r '.metrics[].note_codes[]?' | sort | uniq -c | sort -rn
+# warehouse: data source outcomes kept as notes (codes in the table below)
+cat migration_report_*.json | jq -r '.notes[]? | "\(.code)\t\(.data_source)"' | sort
 
 # metric filters: how many terms converted vs were blocked
 cat migration-report.json | jq '[.metrics[].filters[]?] | group_by(.applied) | map({applied: .[0].applied, terms: length, criteria: (map(.criteria) | add)})'
@@ -443,13 +472,31 @@ LaunchDarkly rate-limiting. Throttled requests are retried automatically, but a 
 `--metric` requires an exact name match. Run `metrics convert --list` to print the available metric names and types (Statsig key only), or `--all --dry-run` to preview full conversions in the report.
 
 ### All metrics or flags show "skipped_existing"
-Already created in a previous run — expected and safe. The tool is idempotent.
+Already created in a previous run — expected and safe. The tool is idempotent. Existing metrics are not updated, so one created before its data source got the constant event key is flagged with `existing_metric_event_key_mismatch`; fix its event key in LD.
+
+### `warehouse` warns "N data source(s) already exist without the constant event key"
+Those data sources were created before the constant event key, or by hand; each is listed in the progress output as "exists without the constant event key". If this tool created them, rerun `warehouse --dry-run` with LD credentials and `--overwrite` to see what would happen, then rerun with `--overwrite` to update them in place (LD cannot delete metric data sources). If one was built by hand and its key column holds real event names, leave it.
+
+### `warehouse --overwrite` fails a data source with "bound to it use an event key other than"
+Those metrics would match no rows once the key column holds only the data source key. Metrics created by older versions of this tool usually match nothing already. Rerun with `--force-overwrite` to update it anyway, then set each listed metric's event key to the data source key in LD.
+
+### `warehouse --overwrite` fails a data source with "changed in LaunchDarkly after this run read it" or "could not read a complete list of the project's metrics"
+Nothing was changed. The first means someone edited the data source during the run; the second means LD's metric list came back short twice, so the bound metrics could not be checked. Rerun.
+
+### `warehouse` fails a data source with "is taken by a data source in LaunchDarkly environment"
+Data source keys are unique per project, and that key belongs to a data source in another environment, which this run will not change or map. Rename the source in Statsig, or run against that environment with `--ld-environment`.
+
+### `warehouse --constant-event-key=false --overwrite` fails a data source with "its key column ... is not in the updated query"
+In that mode an update keeps the existing key column, and the new Statsig SQL no longer returns it, so metrics on the data source would filter a different column. Keep the column in the Statsig SQL, or update the data source by hand.
+
+### `metrics convert` stops with "listing metric data sources"
+A real run will not convert warehouse-native metrics without reading their data sources, since the event keys come from them. Check that the token can read the project's metric data sources, or use `--dry-run` to preview.
 
 ### `targeting import` skips a flag with `skipped_lossy`
 The Statsig source uses a lossy feature (segments, gate prerequisites, custom unit_id, multi-variant overrides, unreachable rules). Either accept the loss with `--accept-data-loss=...` or address the lossy condition first (recreate the segment in LD, set up an LD flag prerequisite, etc.).
 
-### "key collision" warnings
-Two Statsig sources with different names (e.g. `revenue (gross)` and `revenue/gross`) sanitize to the same LD key. Only the first is created. Rename one in Statsig or in LD if both are needed.
+### "key collision" warnings and failures
+Two Statsig entities with different names (e.g. `revenue (gross)` and `revenue/gross`) sanitize to the same LD key. `flags import` and `metrics convert` create only the first and skip the other. `warehouse` fails every metric source in the group instead: none of them is created, updated, or written to `source-mapping.json`. Rename all but one in Statsig and rerun (for `warehouse`, or create those data sources by hand with distinct keys and bind them with `metrics convert --source-mapping`).
 
 ### LD environment auto-creation failed
 Either the LD token lacks `createEnvironment` permission (run `targeting import --no-create-envs` to skip auto-create) or the env already exists with a different name. Check the report's `notes` field for the specific reason.

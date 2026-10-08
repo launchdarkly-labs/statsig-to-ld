@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
 	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
@@ -183,13 +185,36 @@ func (c *Client) PreviewDataSource(ctx context.Context, integrationConfigID, sql
 	return body, nil
 }
 
-// ListMetricDataSources lists metric data sources for a project.
-func (c *Client) ListMetricDataSources(ctx context.Context) []map[string]any {
-	status, body, _ := c.requestJSON(ctx, "GET", fmt.Sprintf("/internal/projects/%s/metric-data-sources", c.projectKey), nil)
-	if status == 200 && body != nil {
-		return j.ExtractItemsList(body)
+// ListMetricDataSources lists the project's unarchived metric data sources.
+func (c *Client) ListMetricDataSources(ctx context.Context) ([]map[string]any, error) {
+	status, body, err := c.requestJSON(ctx, "GET", fmt.Sprintf("/internal/projects/%s/metric-data-sources", c.projectKey), nil)
+	if err != nil {
+		return nil, fmt.Errorf("listing metric data sources: %w", err)
 	}
-	return nil
+	if status != 200 || body == nil {
+		return nil, fmt.Errorf("listing metric data sources: %d\n%s", status, j.ToJSON(body))
+	}
+	return j.ExtractItemsList(body), nil
+}
+
+// ErrPatchNotApplied means a JSON Patch, e.g. one with a failed "test" op, did not apply.
+var ErrPatchNotApplied = errors.New("the JSON Patch does not apply to the data source as it is now")
+
+// UpdateMetricDataSource applies a JSON Patch to a metric data source. LaunchDarkly
+// answers 400 "Error applying json-patch document" for any patch that does not apply.
+func (c *Client) UpdateMetricDataSource(ctx context.Context, key string, ops []JSONPatchOp) (map[string]any, error) {
+	path := fmt.Sprintf("/internal/projects/%s/metric-data-sources/%s", c.projectKey, url.PathEscape(key))
+	status, body, err := c.requestJSON(ctx, "PATCH", path, ops)
+	if err != nil {
+		return nil, err
+	}
+	if status == 400 && strings.Contains(strings.ToLower(j.GetStr(body, "message")), "applying json-patch") {
+		return nil, fmt.Errorf("updating metric data source %s: %w", key, ErrPatchNotApplied)
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("failed to update metric data source %s: %d\n%s", key, status, j.ToJSON(body))
+	}
+	return body, nil
 }
 
 // CreateMetricDataSource creates a metric data source.
@@ -206,30 +231,73 @@ func (c *Client) CreateMetricDataSource(ctx context.Context, payload map[string]
 
 // -- Metrics (raw, for warehouse flow) --
 
-// ListMetricsRaw lists all metrics as raw maps (paginated).
-func (c *Client) ListMetricsRaw(ctx context.Context) []map[string]any {
+// metricsPageSize is the largest page LaunchDarkly's metric list returns.
+const metricsPageSize = 50
+
+// ListMetricsRaw lists every metric in the project. It pages by offset: the next-link
+// cursor resumes by creation time and id but the list is ordered by creation time
+// alone, so it can skip metrics. Offset pages can reorder ties too, so metrics are
+// deduplicated by key and checked against totalCount, rereading once if short.
+func (c *Client) ListMetricsRaw(ctx context.Context) ([]map[string]any, error) {
+	metrics, total, err := c.readMetricPages(ctx)
+	if err == nil && len(metrics) < total {
+		metrics, total, err = c.readMetricPages(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(metrics) < total {
+		return nil, fmt.Errorf("could not read a complete list of the project's metrics: got %d of %d", len(metrics), total)
+	}
+	return metrics, nil
+}
+
+func (c *Client) readMetricPages(ctx context.Context) ([]map[string]any, int, error) {
 	var all []map[string]any
-	status, body, _ := c.requestJSON(ctx, "GET", fmt.Sprintf("/api/v2/metrics/%s?limit=50", c.projectKey), nil)
-	if status == 200 && body != nil {
-		all = append(all, j.ExtractItemsList(body)...)
-		for {
-			links := j.GetMap(body, "_links")
-			next := j.GetMap(links, "next")
-			if next == nil {
-				break
+	seen := map[string]bool{}
+	total := -1
+	for offset := 0; ; offset += metricsPageSize {
+		path := fmt.Sprintf("/api/v2/metrics/%s?limit=%d&offset=%d", c.projectKey, metricsPageSize, offset)
+		status, body, err := c.requestJSON(ctx, "GET", path, nil)
+		if err != nil {
+			return nil, 0, fmt.Errorf("listing metrics: %w", err)
+		}
+		if status != 200 || body == nil {
+			return nil, 0, fmt.Errorf("listing metrics: %d\n%s", status, j.ToJSON(body))
+		}
+		if total < 0 {
+			n, ok := body["totalCount"].(float64)
+			if !ok {
+				return nil, 0, fmt.Errorf("could not read a complete list of the project's metrics: the response has no totalCount")
 			}
-			href := j.GetStr(next, "href")
-			if href == "" {
-				break
+			total = int(n)
+		}
+		items := j.ExtractItemsList(body)
+		for _, m := range items {
+			if key := j.GetStr(m, "key"); key != "" {
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
 			}
-			status, body, _ = c.requestJSON(ctx, "GET", href, nil)
-			if status != 200 {
-				break
-			}
-			all = append(all, j.ExtractItemsList(body)...)
+			all = append(all, m)
+		}
+		if len(items) < metricsPageSize || offset+metricsPageSize >= total {
+			return all, total, nil
 		}
 	}
-	return all
+}
+
+// GetMetricRaw fetches one metric as a raw map.
+func (c *Client) GetMetricRaw(ctx context.Context, key string) (map[string]any, error) {
+	status, body, err := c.requestJSON(ctx, "GET", fmt.Sprintf("/api/v2/metrics/%s/%s", c.projectKey, url.PathEscape(key)), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("failed to get metric %s: %d\n%s", key, status, j.ToJSON(body))
+	}
+	return body, nil
 }
 
 // CreateMetricRaw creates a metric using a raw map payload.

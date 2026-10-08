@@ -59,6 +59,12 @@ func SanitizeTags(tags []string) []string {
 	return result
 }
 
+// FallbackColumn is a column guessed from the Statsig mapping when the preview is unavailable.
+type FallbackColumn struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
 // MapMetricSourceToDataSource converts a Statsig metric source to an LD data source request body.
 // An empty maintainerID omits the field.
 func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey, maintainerID string) map[string]any {
@@ -156,15 +162,11 @@ func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey, 
 	}
 
 	// Build fallback columns list (used when preview is unavailable)
-	type colDef struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-	}
 	seen := map[string]bool{}
-	var columns []colDef
+	var columns []FallbackColumn
 	addCol := func(name, colType string) {
 		if name != "" && !seen[name] {
-			columns = append(columns, colDef{Name: name, Type: colType})
+			columns = append(columns, FallbackColumn{Name: name, Type: colType})
 			seen[name] = true
 		}
 	}
@@ -194,12 +196,16 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
-	if ts := j.GetStr(preview, "timestampColumn"); ts != "" {
-		cm["timestampColumn"] = ts
-	} else if v, ok := cm["timestampColumn"].(string); ok {
+	// Statsig's configured column wins; the preview only guesses the first timestamp-typed column.
+	tsMapped := false
+	if v, ok := cm["timestampColumn"].(string); ok {
 		if real, found := actual[strings.ToLower(v)]; found {
 			cm["timestampColumn"] = real
+			tsMapped = true
 		}
+	}
+	if ts := j.GetStr(preview, "timestampColumn"); ts != "" && !tsMapped {
+		cm["timestampColumn"] = ts
 	}
 
 	if kc := j.GetStr(preview, "keyColumn"); kc != "" {
@@ -210,12 +216,15 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
-	if vc := j.GetStr(preview, "valueColumn"); vc != "" {
-		cm["valueColumn"] = vc
-	} else if v, ok := cm["valueColumn"].(string); ok {
+	vcMapped := false
+	if v, ok := cm["valueColumn"].(string); ok && v != "" {
 		if real, found := actual[strings.ToLower(v)]; found {
 			cm["valueColumn"] = real
+			vcMapped = true
 		}
+	}
+	if vc := j.GetStr(preview, "valueColumn"); vc != "" && !vcMapped {
+		cm["valueColumn"] = vc
 	}
 
 	if contexts, ok := cm["contexts"].(map[string]string); ok {
