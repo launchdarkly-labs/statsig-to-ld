@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -26,7 +28,14 @@ func mappingSource() map[string]any {
 func mappingColumns() []any {
 	var cols []any
 	for _, name := range []string{"TS", "CREATED_AT", "USER_ID", "UID", "ACCOUNT_ID", "ORDER_TOTAL", "LD_EVENT_KEY"} {
-		cols = append(cols, map[string]any{"name": name, "type": "TEXT"})
+		typ := "TEXT"
+		switch name {
+		case "TS", "CREATED_AT":
+			typ = "TIMESTAMP_NTZ"
+		case "ORDER_TOTAL":
+			typ = "NUMBER"
+		}
+		cols = append(cols, map[string]any{"name": name, "type": typ})
 	}
 	return cols
 }
@@ -101,8 +110,8 @@ replace /columnMappings/contexts/user "UID"`
 		t.Errorf("test /columnMappings value = %s, want the listed mappings", got)
 	}
 	wantNote := reportNote{Code: noteMappingsUpdated, DataSource: "checkout-events",
-		Changes: "timestamp: TS → CREATED_AT; value column: (none) → ORDER_TOTAL; context account: (none) → ACCOUNT_ID; context user: USER_ID → UID"}
-	if len(e.report.Notes) != 1 || e.report.Notes[0] != wantNote {
+		Changes: []string{"timestamp: TS → CREATED_AT", "value column: (none) → ORDER_TOTAL", "context account: (none) → ACCOUNT_ID", "context user: USER_ID → UID"}}
+	if len(e.report.Notes) != 1 || !reflect.DeepEqual(e.report.Notes[0], wantNote) {
 		t.Errorf("notes = %+v\nwant %+v", e.report.Notes, wantNote)
 	}
 	if len(e.report.Warnings) != 0 {
@@ -138,31 +147,23 @@ func TestUpdateMappings_NoChangesSkipsThePatch(t *testing.T) {
 	}
 }
 
-// Units are listed per metric, so a ratio bound only through its denominator counts.
-func TestUpdateMappings_RefusesToRemoveAContextKindBoundMetricsUse(t *testing.T) {
+// A kind the export does not name may have been fixed by hand: it is kept, whatever binds it.
+func TestUpdateMappings_KeepsContextKindsTheExportDoesNotMap(t *testing.T) {
 	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID", "account": "ACCOUNT_ID"}}
-	metrics := `[
-		{"key":"accounts-converted","analysisUnits":["account"],"randomizationUnits":["account"],"dataSource":{"key":"checkout-events"}},
-		{"key":"ratio-by-account","randomizationUnits":["user","account"],"dataSource":{"key":"orders"},"denominator":{"dataSource":{"key":"checkout-events"}}},
-		{"key":"user-only","analysisUnits":["user"],"dataSource":{"key":"checkout-events"}},
-		{"key":"elsewhere","analysisUnits":["account"],"dataSource":{"key":"page-views"}}]`
-	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm), metrics: metrics}
+	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm), metrics: `[{"key":"accounts-converted","analysisUnits":["account"],"dataSource":{"key":"checkout-events"}}]`}
 	e := runMappings(t, f, func(e *migrationEngine) {
 		e.metricSources[0]["idTypeMapping"] = []any{map[string]any{"statsigUnitID": "userID", "column": "uid"}}
 	})
-	if f.patchCount != 0 || e.report.DataSources.Failed != 1 {
-		t.Fatalf("patches=%d report %+v, want a refusal", f.patchCount, e.report.DataSources)
+	want := `test /sqlQuery
+test /columnMappings
+replace /columnMappings/timestampColumn "CREATED_AT"
+add /columnMappings/valueColumn "ORDER_TOTAL"
+replace /columnMappings/contexts/user "UID"`
+	if got := opLines(f.patches["checkout-events"]); got != want || e.report.DataSources.Updated != 1 || f.metricsReads != 0 {
+		t.Errorf("ops:\n%s\nwant:\n%s\nreport %+v metricsReads=%d errors=%q", got, want, e.report.DataSources, f.metricsReads, e.report.Errors)
 	}
-	want := `Data source "Checkout Events": not updated: the Statsig export no longer maps context kind(s) "account", which bound metrics use as analysis units: accounts-converted (account), ratio-by-account (account). Change those metrics' analysis units in LaunchDarkly, or map the kind in the Statsig source, then rerun`
-	if len(e.report.Errors) != 1 || e.report.Errors[0] != want {
-		t.Errorf("errors = %q\nwant %q", e.report.Errors, want)
-	}
-
-	// Changing a kind's column is allowed.
-	f2 := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm), metrics: metrics}
-	e = runMappings(t, f2, nil)
-	if e.report.DataSources.Updated != 1 || f2.metricsReads != 0 {
-		t.Errorf("report %+v metricsReads=%d errors=%q, want an update without reading metrics", e.report.DataSources, f2.metricsReads, e.report.Errors)
+	if len(e.report.Notes) != 2 || e.report.Notes[1].Code != noteContextKindNotInExport || len(e.report.Warnings) != 0 {
+		t.Errorf("notes=%+v warnings=%q, want a context_kind_not_in_export note and no console line", e.report.Notes, e.report.Warnings)
 	}
 }
 
@@ -184,9 +185,12 @@ func TestUpdateMappings_KeepsAValueColumnBoundNumericMetricsRead(t *testing.T) {
 	if got := opLines(f.patches["checkout-events"]); got != "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/timestampColumn \"CREATED_AT\"" {
 		t.Errorf("ops:\n%s\nwant the timestamp change only", got)
 	}
-	want := `Data source "checkout-events": its value column "ORDER_TOTAL" was kept: the Statsig export maps none, but bound numeric metrics without their own value column read it (avg-order-value (denominator), order-total-sum, ratio-inherited (denominator)). Set their value column, then rerun to remove it.`
+	want := `1 data source(s) kept a value column the Statsig export does not map, because bound numeric metrics with no value column of their own read it: avg-order-value (denominator), order-total-sum, ratio-inherited (denominator) on checkout-events. Set those metrics' value column in LaunchDarkly and refresh them on running experiments, then rerun to remove it.`
 	if e.report.DataSources.Updated != 1 || len(e.report.Warnings) != 1 || e.report.Warnings[0] != want {
 		t.Errorf("report %+v warnings = %q\nwant %q", e.report.DataSources, e.report.Warnings, want)
+	}
+	if codes := noteCodes(e.report.Notes); codes != "mappings_updated value_column_kept" {
+		t.Errorf("note codes = %q", codes)
 	}
 
 	f2 := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm), metrics: `[{"key":"order-total-own","isNumeric":true,"valueColumn":"ORDER_TOTAL","dataSource":{"key":"checkout-events"}}]`}
@@ -222,9 +226,12 @@ replace /columnMappings/contexts/user "UID"`
 	if got := opLines(f.patches["checkout-events"]); got != want {
 		t.Errorf("ops:\n%s\nwant:\n%s", got, want)
 	}
-	wantWarn := `Data source "checkout-events": its query does not return the columns the Statsig export maps for timestamp ("event_time"), context account ("acct"), so those mappings were not taken from the export; correct them in Statsig or add them to its query, then rerun.`
+	wantWarn := `1 data source(s) did not take some mappings from the Statsig export, because their columns do not include the export's: timestamp "event_time", context account "acct" on checkout-events. Correct the columns in Statsig, or add them to the data source's query, then rerun.`
 	if len(e.report.Warnings) != 1 || e.report.Warnings[0] != wantWarn {
 		t.Errorf("warnings = %q\nwant %q", e.report.Warnings, wantWarn)
+	}
+	if codes := noteCodes(e.report.Notes); codes != "mappings_updated export_column_not_in_query" {
+		t.Errorf("note codes = %q", codes)
 	}
 }
 
@@ -250,7 +257,7 @@ func TestUpdateMappings_WithOverwriteTakesMappingsFromTheExport(t *testing.T) {
 	if ops[2].Value != wantCheckoutSQL || ops[3].Value != "LD_EVENT_KEY" || ops[5].Value != "CREATED_AT" || ops[6].Value != "ACCOUNT_ID" || ops[7].Value != "UID" {
 		t.Errorf("values: %v / %v / %v / %v / %v", ops[2].Value, ops[3].Value, ops[5].Value, ops[6].Value, ops[7].Value)
 	}
-	if len(e.report.Notes) != 1 || e.report.Notes[0].Changes != "timestamp: TS → CREATED_AT; context account: account_id → ACCOUNT_ID; context user: USER_ID → UID" {
+	if len(e.report.Notes) != 1 || strings.Join(e.report.Notes[0].Changes, "; ") != "timestamp: TS → CREATED_AT; context account: account_id → ACCOUNT_ID; context user: USER_ID → UID" {
 		t.Errorf("notes = %+v", e.report.Notes)
 	}
 
@@ -271,7 +278,9 @@ func TestUpdateMappings_WithOverwriteFallsBackForMissingColumns(t *testing.T) {
 	if strings.Contains(got, "timestampColumn") || strings.Contains(got, "contexts") || strings.Contains(got, "valueColumn") {
 		t.Errorf("ops:\n%s\nwant the existing mappings kept", got)
 	}
-	if len(e.report.Warnings) != 2 || !strings.Contains(e.report.Warnings[0], `timestamp ("created_at"), value ("order_total"), context account ("account_id"), context user ("uid")`) {
+	// The value column is reported once, by the create path's line.
+	if len(e.report.Warnings) != 2 || !strings.HasPrefix(e.report.Warnings[0], "1 data source(s) did not get the value column") ||
+		!strings.Contains(e.report.Warnings[1], `export's: timestamp "created_at", context account "account_id", context user "uid" on checkout-events.`) {
 		t.Errorf("warnings = %q", e.report.Warnings)
 	}
 }
@@ -343,7 +352,7 @@ func TestUpdateMappings_DryRun(t *testing.T) {
 	l := e.dryRunDataSources("snowflake")
 	want := []string{
 		"Checkout Events (query): would update mappings\n        timestamp: TS → CREATED_AT\n        context user: USER_ID → UID",
-		"Refunds (query): would refuse (removes context kind(s) \"account\", used by bound metrics: refund-accounts (account))",
+		"Refunds (query): would update mappings\n        value column: (none) → ORDER_TOTAL",
 		"Page Views (query): would create",
 		"1 existing data source(s): would skip (no mapping changes)",
 	}
@@ -351,8 +360,9 @@ func TestUpdateMappings_DryRun(t *testing.T) {
 		t.Errorf("total=%d lines:\n%s\nwant:\n%s", l.total, strings.Join(l.lines, "\n"), strings.Join(want, "\n"))
 	}
 	wantWarnings := []string{
-		`Data source "checkout-events": its query does not return the columns the Statsig export maps for context account ("acct"), so those mappings were not taken from the export; correct them in Statsig or add them to its query, then rerun. Its value column "ORDER_TOTAL" was kept: the Statsig export maps none, but bound numeric metrics without their own value column read it (order-total-sum). Set their value column, then rerun to remove it.`,
-		withoutConstantKeySummary(1),
+		withoutConstantKeySummary(2),
+		`1 data source(s) kept a value column the Statsig export does not map, because bound numeric metrics with no value column of their own read it: order-total-sum on checkout-events. Set those metrics' value column in LaunchDarkly and refresh them on running experiments, then rerun to remove it.`,
+		`1 data source(s) did not take some mappings from the Statsig export, because their columns do not include the export's: context account "acct" on checkout-events. Correct the columns in Statsig, or add them to the data source's query, then rerun.`,
 	}
 	if strings.Join(l.warnings, "\n") != strings.Join(wantWarnings, "\n") {
 		t.Errorf("warnings:\n%s\nwant:\n%s", strings.Join(l.warnings, "\n"), strings.Join(wantWarnings, "\n"))
@@ -385,10 +395,13 @@ func TestUpdateMappings_DryRunWithOverwriteEstimatesTheChanges(t *testing.T) {
 }
 
 func TestDiffMappings_EscapesContextKinds(t *testing.T) {
-	old := map[string]any{"timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID", "a/b~c": "X"}}
-	d := diffMappings(old, warehouse.ExportMappings{Contexts: map[string]string{"user": "USER_ID"}}, newColumnSet([]any{map[string]any{"name": "USER_ID"}}), false)
-	if got := opLines(d.ops); got != "remove /columnMappings/contexts/a~1b~0c" || fmt.Sprint(d.removedKinds) != "[a/b~c]" {
-		t.Errorf("ops = %q removed=%v", got, d.removedKinds)
+	old := map[string]any{"timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}}
+	d := diffMappings(old, warehouse.ExportMappings{Contexts: map[string]string{"user": "USER_ID", "a/b~c": "x"}}, newColumnSet([]any{map[string]any{"name": "USER_ID"}, map[string]any{"name": "X"}}), false)
+	if got := opLines(d.ops); got != `add /columnMappings/contexts/a~1b~0c "X"` {
+		t.Errorf("ops = %q", got)
+	}
+	if value, contexts := mappingsAfter(old, d.ops); value != "" || fmt.Sprint(contexts) != "map[a/b~c:X user:USER_ID]" {
+		t.Errorf("mappingsAfter = %q %v", value, contexts)
 	}
 }
 
@@ -413,5 +426,208 @@ func TestUpdateMappings_EditedWrapperKeepsItsQuery(t *testing.T) {
 	}
 	if e.report.DataSources.Updated != 1 || len(e.report.Notes) != 2 || e.report.Notes[0].Code != noteEditedConstantKey || e.report.Notes[1].Code != noteMappingsUpdated {
 		t.Errorf("report %+v notes=%+v", e.report.DataSources, e.report.Notes)
+	}
+}
+
+func noteCodes(notes []reportNote) string {
+	var codes []string
+	for _, n := range notes {
+		codes = append(codes, n.Code)
+	}
+	return strings.Join(codes, " ")
+}
+
+func typedCols(cols ...[2]string) []any {
+	var out []any
+	for _, c := range cols {
+		out = append(out, map[string]any{"name": c[0], "type": c[1]})
+	}
+	return out
+}
+
+// A kind renamed by hand in LaunchDarkly is kept, and the export's name for it is not
+// added back on the same column; the source's other corrections still apply.
+func TestUpdateMappings_KeepsAKindRenamedByHand(t *testing.T) {
+	cols := typedCols([2]string{"TS", "TIMESTAMP_NTZ"}, [2]string{"CREATED_AT", "TIMESTAMP_NTZ"}, [2]string{"UID", "TEXT"},
+		[2]string{"COMPANY_ID", "TEXT"}, [2]string{"ORDER_TOTAL", "NUMBER"}, [2]string{"LD_EVENT_KEY", "TEXT"})
+	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "valueColumn": "ORDER_TOTAL",
+		"contexts": map[string]any{"user": "UID", "company": "COMPANY_ID"}, "columns": cols}
+	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm), metrics: `[{"key":"orders-per-company","analysisUnits":["user","company"],"dataSource":{"key":"checkout-events"}}]`}
+	e := runMappings(t, f, func(e *migrationEngine) {
+		e.metricSources[0]["idTypeMapping"] = []any{
+			map[string]any{"statsigUnitID": "userID", "column": "uid"},
+			map[string]any{"statsigUnitID": "companyID", "column": "company_id"},
+		}
+	})
+	if got := opLines(f.patches["checkout-events"]); got != "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/timestampColumn \"CREATED_AT\"" {
+		t.Errorf("ops:\n%s\nwant only the timestamp change", got)
+	}
+	if e.report.DataSources.Updated != 1 || f.metricsReads != 0 || len(e.report.Warnings) != 0 || noteCodes(e.report.Notes) != "mappings_updated context_kind_not_in_export" {
+		t.Errorf("report %+v metricsReads=%d warnings=%q notes=%+v", e.report.DataSources, f.metricsReads, e.report.Warnings, e.report.Notes)
+	}
+}
+
+// Kinds are named as metrics convert names analysis units, so another unit ID that
+// contains "user" no longer re-points the user context.
+func TestUpdateMappings_UnitIDsContainingUserGetTheirOwnKind(t *testing.T) {
+	cols := typedCols([2]string{"CREATED_AT", "TIMESTAMP_NTZ"}, [2]string{"USER_ID", "TEXT"}, [2]string{"ANON_USER_ID", "TEXT"},
+		[2]string{"ORDER_TOTAL", "NUMBER"}, [2]string{"LD_EVENT_KEY", "TEXT"})
+	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "CREATED_AT", "valueColumn": "ORDER_TOTAL",
+		"contexts": map[string]any{"user": "USER_ID"}, "columns": cols}
+	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm)}
+	runMappings(t, f, func(e *migrationEngine) {
+		e.metricSources[0]["idTypeMapping"] = []any{
+			map[string]any{"statsigUnitID": "userID", "column": "user_id"},
+			map[string]any{"statsigUnitID": "anonymousUserID", "column": "anon_user_id"},
+		}
+	})
+	if got := opLines(f.patches["checkout-events"]); got != "test /sqlQuery\ntest /columnMappings\nadd /columnMappings/contexts/anonymoususerid \"ANON_USER_ID\"" {
+		t.Errorf("ops:\n%s", got)
+	}
+}
+
+func TestPhase3_UnitIDsThatShareAKindFailTheSource(t *testing.T) {
+	shared := func(e *migrationEngine) {
+		e.metricSources[0]["idTypeMapping"] = []any{
+			map[string]any{"statsigUnitID": "userID", "column": "user_id"},
+			map[string]any{"statsigUnitID": "user", "column": "uid"},
+		}
+	}
+	const conflict = `Statsig unit IDs "userID", "user" all map to context kind "user", with different columns ("user_id", "uid")`
+	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}}
+	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm)}
+	e := runMappings(t, f, shared)
+	want := `Data source "Checkout Events": not updated: ` + conflict + `. Keep one of them in the Statsig source's id-type mapping and rerun, or correct the data source's contexts in LaunchDarkly by hand`
+	if f.patchCount != 0 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+		t.Errorf("patches=%d errors=%q\nwant %q", f.patchCount, e.report.Errors, want)
+	}
+
+	f = &fakeLD{t: t}
+	e = runMappings(t, f, shared)
+	want = `Data source "Checkout Events": not created: ` + conflict + `. Keep one of them in the Statsig source's id-type mapping and rerun, or create the data source by hand`
+	if len(f.created) != 0 || len(f.previews) != 0 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+		t.Errorf("created=%d previews=%d errors=%q\nwant %q", len(f.created), len(f.previews), e.report.Errors, want)
+	}
+
+	// The same column in another case is no conflict.
+	f = &fakeLD{t: t}
+	e = runMappings(t, f, func(e *migrationEngine) {
+		e.metricSources[0]["idTypeMapping"] = []any{
+			map[string]any{"statsigUnitID": "userID", "column": "user_id"},
+			map[string]any{"statsigUnitID": "UserId", "column": "USER_ID"},
+		}
+	})
+	if len(f.created) != 1 || len(e.report.Errors) != 0 {
+		t.Errorf("created=%d errors=%q", len(f.created), e.report.Errors)
+	}
+
+	e.metricSources[0]["idTypeMapping"] = []any{
+		map[string]any{"statsigUnitID": "userID", "column": "user_id"},
+		map[string]any{"statsigUnitID": "user", "column": "uid"},
+	}
+	e.writeDryRunBodies("snowflake")
+	raw, _ := os.ReadFile("data-source-bodies.json")
+	if !strings.Contains(string(raw), `"error": "not created: Statsig unit IDs`) {
+		t.Errorf("data-source-bodies.json:\n%s", raw)
+	}
+}
+
+func TestUpdateMappings_ChecksColumnTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name, tsType, valueType, wantOps, wantWarn string
+	}{
+		{"wrong types", "TEXT", "VARCHAR(16)", "",
+			`1 data source(s) did not take some mappings from the Statsig export, because the export's column has the wrong type: timestamp "CREATED_AT" (TEXT), value "ORDER_TOTAL" (VARCHAR(16)) on checkout-events. A timestamp column needs a timestamp or date type, and a value column a numeric one; correct the column in Statsig, or cast it in the query, then rerun.`},
+		{"parameterized types", "timestamp_ntz(9)", "NUMBER(38,2)", "replace /columnMappings/timestampColumn \"CREATED_AT\"\nadd /columnMappings/valueColumn \"ORDER_TOTAL\"", ""},
+		{"BigQuery types", "DATETIME", "FLOAT64", "replace /columnMappings/timestampColumn \"CREATED_AT\"\nadd /columnMappings/valueColumn \"ORDER_TOTAL\"", ""},
+		{"unknown types", "", "", "replace /columnMappings/timestampColumn \"CREATED_AT\"\nadd /columnMappings/valueColumn \"ORDER_TOTAL\"", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cols := typedCols([2]string{"TS", "TIMESTAMP_NTZ"}, [2]string{"CREATED_AT", tc.tsType}, [2]string{"UID", "TEXT"},
+				[2]string{"ORDER_TOTAL", tc.valueType}, [2]string{"LD_EVENT_KEY", "TEXT"})
+			cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "UID"}, "columns": cols}
+			f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm)}
+			e := runMappings(t, f, func(e *migrationEngine) {
+				e.metricSources[0]["idTypeMapping"] = []any{map[string]any{"statsigUnitID": "userID", "column": "uid"}}
+			})
+			got := strings.TrimPrefix(opLines(f.patches["checkout-events"]), "test /sqlQuery\ntest /columnMappings\n")
+			if got != tc.wantOps || strings.Join(e.report.Warnings, "\n") != tc.wantWarn {
+				t.Errorf("ops:\n%s\nwant:\n%s\nwarnings=%q\nwant %q", got, tc.wantOps, e.report.Warnings, tc.wantWarn)
+			}
+			if tc.wantWarn != "" && (e.report.DataSources.Skipped != 1 || noteCodes(e.report.Notes) != noteExportColumnWrongType) {
+				t.Errorf("report %+v notes=%+v, want a skip with an export_column_wrong_type note", e.report.DataSources, e.report.Notes)
+			}
+		})
+	}
+}
+
+func TestDiffMappings_AddsContextsWhenNoneAreListed(t *testing.T) {
+	cols := newColumnSet(typedCols([2]string{"UID", "TEXT"}))
+	for _, old := range []map[string]any{{"timestampColumn": "TS"}, {"timestampColumn": "TS", "contexts": nil}} {
+		d := diffMappings(old, warehouse.ExportMappings{Contexts: map[string]string{"user": "uid"}}, cols, false)
+		if got := opLines(d.ops); got != `add /columnMappings/contexts {"user":"UID"}` || strings.Join(d.changes, "; ") != "context user: (none) → UID" {
+			t.Errorf("ops = %q changes = %q", got, d.changes)
+		}
+	}
+}
+
+func TestReportNote_ChangesIsAList(t *testing.T) {
+	raw, _ := json.Marshal(reportNote{Code: noteMappingsUpdated, DataSource: "k", Changes: []string{"timestamp: TS → CREATED_AT", "context user: (none) → UID"}})
+	if string(raw) != `{"code":"mappings_updated","data_source":"k","changes":["timestamp: TS → CREATED_AT","context user: (none) → UID"]}` {
+		t.Errorf("note = %s", raw)
+	}
+	if raw, _ := json.Marshal(reportNote{Code: noteKeptConstantKey, DataSource: "k"}); strings.Contains(string(raw), "changes") {
+		t.Errorf("note = %s, want no changes field", raw)
+	}
+}
+
+// The guards run on the ops sent, after the --overwrite fallback, not on the plan's estimate.
+func TestUpdateMappings_WithOverwriteGuardsTheFinalOps(t *testing.T) {
+	cm := map[string]any{"keyColumn": "EVENT_KEY", "timestampColumn": "TS", "valueColumn": "AMT",
+		"contexts": map[string]any{"user": "USER_ID", "account": "ACCOUNT_ID"}, "columns": []any{}}
+	metrics := `[{"key":"revenue","isNumeric":true,"analysisUnits":["user","account"],"eventKey":"checkout-events","dataSource":{"key":"checkout-events"}}]`
+	f := &fakeLD{t: t, list: dsList(t, "SELECT * FROM analytics.events", cm), metrics: metrics}
+	e := runMappings(t, f, func(e *migrationEngine) {
+		e.overwrite = true
+		s := e.metricSources[0]
+		delete(s, "customFieldMapping")
+		s["idTypeMapping"] = []any{map[string]any{"statsigUnitID": "userID", "column": "user_id"}, map[string]any{"statsigUnitID": "account", "column": "account_id"}}
+	})
+	want := `Data source "Checkout Events": not updated: its value column "AMT" is not in the updated query, and 1 bound numeric metric(s) with no value column of their own read it: revenue. Keep that column in the Statsig SQL, or set those metrics' value column in LaunchDarkly and refresh them on running experiments, then rerun; the updated query does not return the column of its context kind(s) "account", which bound metrics use as analysis or randomization units: revenue (account). Keep the column in the Statsig SQL, or change those metrics' units in LaunchDarkly and refresh them on running experiments, then rerun`
+	if f.patchCount != 0 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+		t.Errorf("patches=%d errors=%q\nwant %q", f.patchCount, e.report.Errors, want)
+	}
+	// Nothing was applied, so no mapping outcome is reported.
+	if len(e.report.Notes) != 0 || len(e.report.Warnings) != 0 {
+		t.Errorf("notes=%+v warnings=%q", e.report.Notes, e.report.Warnings)
+	}
+}
+
+// A refusal keeps what the plan had already found: its note and its warning.
+func TestUpdateMappings_RefusalKeepsTheNoteAndWarning(t *testing.T) {
+	cm := map[string]any{"keyColumn": "EVENT_NAME", "timestampColumn": "TS", "valueColumn": "ORDER_TOTAL", "contexts": map[string]any{"user": "UID"}}
+	f := &fakeLD{t: t, list: dsList(t, "SELECT * FROM analytics.events", cm), metricsStatus: http.StatusForbidden}
+	e := runMappings(t, f, func(e *migrationEngine) { delete(e.metricSources[0], "customFieldMapping") })
+	if e.report.DataSources.Failed != 1 || noteCodes(e.report.Notes) != noteExistsWithoutConstantKey || len(e.report.Warnings) != 1 || e.report.Warnings[0] != withoutConstantKeySummary(1) {
+		t.Errorf("report %+v notes=%+v warnings=%q", e.report.DataSources, e.report.Notes, e.report.Warnings)
+	}
+
+	wrapped := strings.Replace(wantCheckoutSQL, "kind = 'checkout'", "kind = 'purchase'", 1)
+	f = &fakeLD{t: t, list: dsList(t, wrapped, map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "UID"}})}
+	e = runMappings(t, f, func(e *migrationEngine) {
+		e.metricSources[0]["idTypeMapping"] = []any{
+			map[string]any{"statsigUnitID": "userID", "column": "user_id"},
+			map[string]any{"statsigUnitID": "user", "column": "uid"},
+		}
+	})
+	if e.report.DataSources.Failed != 1 || len(e.report.Warnings) != 1 || !strings.Contains(e.report.Warnings[0], "kept its query, but its Statsig SQL has changed") {
+		t.Errorf("report %+v warnings=%q", e.report.DataSources, e.report.Warnings)
+	}
+
+	// An applied mapping update keeps it too.
+	f = &fakeLD{t: t, list: dsList(t, wrapped, map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "UID"}})}
+	e = runMappings(t, f, nil)
+	if e.report.DataSources.Updated != 1 || len(e.report.Warnings) != 1 || !strings.Contains(e.report.Warnings[0], "kept its query, but its Statsig SQL has changed") {
+		t.Errorf("report %+v warnings=%q", e.report.DataSources, e.report.Warnings)
 	}
 }
