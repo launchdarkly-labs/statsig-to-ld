@@ -9,7 +9,6 @@ import (
 	"maps"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -115,9 +114,9 @@ func init() {
 	warehouseCmd.Flags().BoolVar(&whFlagDryRun, "dry-run", false, "Export and preview data source mapping without writing to LD")
 	warehouseCmd.Flags().BoolVar(&whFlagResume, "resume", false, "Resume from migration_state.json")
 	warehouseCmd.Flags().StringVar(&whFlagOnly, "only", "", "Run only 'warehouse' (Phase 2) or 'data-sources' (Phase 3)")
-	warehouseCmd.Flags().BoolVar(&whFlagOverwrite, "overwrite", false, "Update existing LD metric data sources that lack the constant event key in place: their query, key column, and column list (timestamp, value, and context mappings are kept while the new query returns them). Refuses a data source whose bound metrics use other event keys, whose value column the new query drops while bound numeric metrics read it, or, with --constant-event-key=false, whose key column the new query no longer returns")
+	warehouseCmd.Flags().BoolVar(&whFlagOverwrite, "overwrite", false, "Update existing LD metric data sources that lack the constant event key in place: their query, key column, and column list (timestamp, value, and context mappings are kept while the new query returns them). Refuses a data source whose bound metrics use other event keys, whose value column or context kind columns the new query drops while bound metrics use them, or, with --constant-event-key=false, whose key column the new query no longer returns")
 	warehouseCmd.Flags().BoolVar(&whFlagForceOverwrite, "force-overwrite", false, "Like --overwrite, but also updates data sources whose bound metrics use other event keys and would match no rows afterwards; the run still lists those metrics")
-	warehouseCmd.Flags().BoolVar(&whFlagUpdateMappings, "update-mappings", false, "Correct existing LD metric data sources' timestamp, value, and context mappings in place from the Statsig export, keeping their key, query, key column, columns, and bound metrics. Refuses to drop a context kind bound metrics use, and keeps a value column bound numeric metrics read. With --overwrite, an updated query takes its mappings from the export too")
+	warehouseCmd.Flags().BoolVar(&whFlagUpdateMappings, "update-mappings", false, "Correct existing LD metric data sources' timestamp, value, and context mappings from the Statsig export")
 	warehouseCmd.Flags().BoolVar(&whFlagVerbose, "verbose", false, "Show detailed API request/response info")
 	warehouseCmd.Flags().BoolVar(&whFlagNoColor, "no-color", false, "Disable colored output")
 	warehouseCmd.Flags().BoolVar(&whFlagConstantEventKey, "constant-event-key", true, "Wrap each source's SQL to add a constant event-key column (value = the data source key) and use it as the key column, so migrated metrics can use the data source key as their event key")
@@ -147,8 +146,8 @@ type migrationReport struct {
 type reportNote struct {
 	Code       string `json:"code"`
 	DataSource string `json:"data_source"`
-	// Changes lists changed fields as "field: old → new", joined by "; ".
-	Changes string `json:"changes,omitempty"`
+	// Changes lists changed fields as "field: old → new".
+	Changes []string `json:"changes,omitempty"`
 }
 
 const (
@@ -188,6 +187,8 @@ type migrationEngine struct {
 
 	// unmapped holds keys taken in another environment, left out of source-mapping.json.
 	unmapped map[string]bool
+	// issues are printed once per code at the end of the phase.
+	issues []sourceIssue
 
 	whConnections map[string]any
 	whPrefilled   map[string]string
@@ -695,8 +696,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 		output.Progress(i+1, total, name, "")
 
 		// Planned before the preview so a source that is not written costs no warehouse query.
-		plan := e.planDataSource(body, existing, collisions, whType)
-		plan = e.planMappings(plan, existing[key], source)
+		plan := e.planSource(source, body, existing, collisions, whType)
 		e.recordPlan(key, plan)
 		if plan.note == noteExistsWithoutConstantKey {
 			withoutConstantKey++
@@ -707,6 +707,9 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 			if plan.warning != "" {
 				e.warn(plan.warning)
 			}
+			if plan.mappings != nil {
+				e.recordIssues(plan.mappings.issues)
+			}
 			if plan.markDone && !e.state.IsDataSourceDone(key) {
 				e.state.MarkDataSourceDone(key)
 			}
@@ -714,9 +717,15 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 			continue
 		case planRefuse:
 			e.failDataSource(key, name, plan.err)
+			if plan.warning != "" {
+				e.warn(plan.warning)
+			}
 			continue
 		case planUpdateMappings:
 			e.patchMappings(existing[key], name, plan)
+			if plan.warning != "" {
+				e.warn(plan.warning)
+			}
 			continue
 		}
 
@@ -783,6 +792,9 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 	if len(droppedValue) > 0 {
 		e.warn(fmt.Sprintf("%d data source(s) did not get the value column their Statsig source defines, because their query does not return it: %s. Add the column to the Statsig source's query and to the data source's in LaunchDarkly, or set a value column on their numeric metrics.",
 			len(droppedValue), strings.Join(droppedValue, ", ")))
+	}
+	for _, msg := range issueSummaries(e.issues) {
+		e.warn(msg)
 	}
 	return nil
 }
@@ -855,6 +867,39 @@ type dataSourcePlan struct {
 	stale []string
 	// mappings is set by --update-mappings.
 	mappings *mappingPlan
+}
+
+// refuse turns p into a refusal, keeping its note and warning.
+func (p dataSourcePlan) refuse(reason string, err error) dataSourcePlan {
+	p.action, p.reason, p.err = planRefuse, reason, err
+	p.markDone, p.stale, p.mappings = false, nil, nil
+	return p
+}
+
+// planSource plans one Statsig source; the run and the dry run share it.
+func (e *migrationEngine) planSource(source, body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string) dataSourcePlan {
+	plan := e.planDataSource(body, existing, collisions, whType)
+	ds := existing[jsonutil.GetStr(body, "key")]
+	takesExport := plan.action == planCreate || plan.action == planUpdate || (e.updateMappings && ds != nil && plan.action == planSkip)
+	if conflicts := warehouse.ContextKindConflicts(source); takesExport && len(conflicts) > 0 {
+		var kinds []string
+		for _, c := range conflicts {
+			kinds = append(kinds, c.Kind)
+		}
+		return plan.refuse("Statsig unit IDs share context kind(s) "+quoteAll(kinds), kindConflictError(conflicts, ds != nil))
+	}
+	return e.planMappings(plan, ds, source)
+}
+
+func kindConflictError(conflicts []warehouse.KindConflict, exists bool) error {
+	var parts []string
+	for _, c := range conflicts {
+		parts = append(parts, fmt.Sprintf("Statsig unit IDs %s all map to context kind %q, with different columns (%s)", quoteAll(c.Units), c.Kind, quoteAll(c.Columns)))
+	}
+	if exists {
+		return fmt.Errorf("not updated: %s. Keep one of them in the Statsig source's id-type mapping and rerun, or correct the data source's contexts in LaunchDarkly by hand", strings.Join(parts, "; "))
+	}
+	return fmt.Errorf("not created: %s. Keep one of them in the Statsig source's id-type mapping and rerun, or create the data source by hand", strings.Join(parts, "; "))
 }
 
 func (e *migrationEngine) planDataSource(body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string) dataSourcePlan {
@@ -954,66 +999,26 @@ func (e *migrationEngine) projectMetrics() ([]map[string]any, error) {
 	return e.metrics, e.metricsErr
 }
 
-// staleBoundMetrics names metrics whose term on dsKey has an event key other than constKey.
+// staleBoundMetrics names bound metrics whose term on dsKey has an event key other than constKey.
 func (e *migrationEngine) staleBoundMetrics(dsKey, constKey string) ([]string, error) {
-	metrics, err := e.projectMetrics()
+	bound, err := e.boundMetrics(dsKey)
 	if err != nil {
 		return nil, err
 	}
 	var stale []string
-	for _, m := range metrics {
+	for _, b := range bound {
 		var terms []string
-		if jsonutil.GetStr(jsonutil.GetMap(m, "dataSource"), "key") == dsKey {
-			if ek := jsonutil.GetStr(m, "eventKey"); ek != constKey {
-				terms = append(terms, fmt.Sprintf("event key %q", ek))
-			}
+		if ek := jsonutil.GetStr(b.num, "eventKey"); b.num != nil && ek != constKey {
+			terms = append(terms, fmt.Sprintf("event key %q", ek))
 		}
-		if den := jsonutil.GetMap(m, "denominator"); den != nil && jsonutil.GetStr(jsonutil.GetMap(den, "dataSource"), "key") == dsKey {
-			if ev := jsonutil.GetStr(den, "eventName"); ev != constKey {
-				terms = append(terms, fmt.Sprintf("denominator event name %q", ev))
-			}
+		if ev := jsonutil.GetStr(b.den, "eventName"); b.den != nil && ev != constKey {
+			terms = append(terms, fmt.Sprintf("denominator event name %q", ev))
 		}
 		if len(terms) > 0 {
-			stale = append(stale, fmt.Sprintf("%s (%s)", jsonutil.GetStr(m, "key"), strings.Join(terms, ", ")))
+			stale = append(stale, fmt.Sprintf("%s (%s)", b.key, strings.Join(terms, ", ")))
 		}
 	}
-	sort.Strings(stale)
 	return stale, nil
-}
-
-// valueColumnUsers names metrics with a numeric term that reads dsKey's value column,
-// having none of its own. A denominator with no data source of its own reads the
-// numerator's; a plain count_distinct metric counts another column.
-func (e *migrationEngine) valueColumnUsers(dsKey string) ([]string, error) {
-	metrics, err := e.projectMetrics()
-	if err != nil {
-		return nil, err
-	}
-	readsValue := func(term map[string]any) bool {
-		return jsonutil.GetBool(term, "isNumeric") && strings.TrimSpace(jsonutil.GetStr(term, "valueColumn")) == ""
-	}
-	var users []string
-	for _, m := range metrics {
-		numDS := jsonutil.GetStr(jsonutil.GetMap(m, "dataSource"), "key")
-		den := jsonutil.GetMap(m, "denominator")
-		num := numDS == dsKey && readsValue(m) && (den != nil || jsonutil.GetStr(m, "unitAggregationType") != "count_distinct")
-		denDS := jsonutil.GetStr(jsonutil.GetMap(den, "dataSource"), "key")
-		if denDS == "" || denDS == "launchdarkly-hosted" {
-			denDS = numDS
-		}
-		inDen := den != nil && denDS == dsKey && readsValue(den)
-		key := jsonutil.GetStr(m, "key")
-		switch {
-		case num && inDen:
-			users = append(users, key+" (numerator and denominator)")
-		case num:
-			users = append(users, key)
-		case inDen:
-			users = append(users, key+" (denominator)")
-		}
-	}
-	sort.Strings(users)
-	return users, nil
 }
 
 func boundMetricsUnchecked(err error) error {
@@ -1038,25 +1043,16 @@ func (e *migrationEngine) warn(msg string) {
 // sources and keeps keys unique after archiving.
 func (e *migrationEngine) updateDataSource(existing, body map[string]any, name string, plan dataSourcePlan) {
 	key := jsonutil.GetStr(body, "key")
-	ops, changes, mapped, err := e.overwritePatch(existing, body, plan)
-	// LaunchDarkly does not check bound metrics on this PATCH; those reading the column would fail at run time.
-	if err == nil && slices.ContainsFunc(ops, func(op launchdarkly.JSONPatchOp) bool {
-		return op.Op == "remove" && op.Path == "/columnMappings/valueColumn"
-	}) {
-		vc := jsonutil.GetStr(jsonutil.GetMap(existing, "columnMappings"), "valueColumn")
-		users, uerr := e.valueColumnUsers(key)
-		if uerr != nil {
-			err = boundMetricsUnchecked(uerr)
-		} else if len(users) > 0 {
-			err = fmt.Errorf("not updated: its value column %q is not in the updated query, and %d bound numeric metric(s) with no value column of their own read it: %s. Set their value column in LaunchDarkly, or keep that column in the Statsig SQL",
-				vc, len(users), strings.Join(users, ", "))
-		}
+	cm := jsonutil.GetMap(body, "columnMappings")
+	res, err := e.overwritePatch(existing, body, plan)
+	if err == nil {
+		_, err = e.guardRemovals(key, jsonutil.GetMap(existing, "columnMappings"), res.ops, newColumnSet(cm["columns"]))
 	}
 	if err != nil {
 		e.failDataSource(key, name, err)
 		return
 	}
-	ops = append(patchPreconditions(existing), ops...)
+	ops := append(patchPreconditions(existing), res.ops...)
 	if _, err := e.ld.UpdateMetricDataSource(e.ctx, key, ops); err != nil {
 		if errors.Is(err, launchdarkly.ErrPatchNotApplied) {
 			err = fmt.Errorf("not updated: it changed in LaunchDarkly after this run read it; rerun to pick up the change")
@@ -1069,15 +1065,26 @@ func (e *migrationEngine) updateDataSource(existing, body map[string]any, name s
 		e.state.MarkDataSourceDone(key)
 	}
 	e.report.DataSources.Updated++
-	if len(changes) > 0 {
-		e.warn(fmt.Sprintf("Data source %q was updated, but the new query does not return all of its mapped columns: %s. Check its mappings in LaunchDarkly.", key, strings.Join(changes, "; ")))
+	if len(res.changes) > 0 {
+		e.warn(fmt.Sprintf("Data source %q was updated, but the new query does not return all of its mapped columns: %s. Check its mappings in LaunchDarkly.", key, strings.Join(res.changes, "; ")))
 	}
 	if len(plan.stale) > 0 {
 		e.warn(fmt.Sprintf("Data source %q was updated with --force-overwrite. Until their event key is set to %q in LaunchDarkly, these bound metrics match no rows: %s.", key, key, strings.Join(plan.stale, ", ")))
 	}
-	if plan.mappings != nil {
-		e.finishMappings(key, mapped.changes, mappingWarning(plan.warning, key, missingColumns(mapped.missing)))
+	d, readers := mappingDiff{}, []string(nil)
+	if res.mapped != nil {
+		d, readers = *res.mapped, plan.mappings.readers
+		if plan.mappings.target.Value != "" && jsonutil.GetStr(cm, "valueColumn") == "" {
+			// Already reported as statsig_value_column_not_in_query.
+			d.missing = slices.DeleteFunc(d.missing, func(m string) bool { return strings.HasPrefix(m, "value ") })
+		}
 	}
+	for _, w := range res.wrongType {
+		if !slices.Contains(d.wrongType, w) {
+			d.wrongType = append(d.wrongType, w)
+		}
+	}
+	e.finishMappings(key, d.changes, mappingIssues(key, d, readers))
 }
 
 // patchPreconditions returns "test" ops so LaunchDarkly applies the patch only if the
@@ -1095,12 +1102,23 @@ func patchPreconditions(existing map[string]any) []launchdarkly.JSONPatchOp {
 	return ops
 }
 
+// overwriteResult is an --overwrite patch.
+type overwriteResult struct {
+	ops []launchdarkly.JSONPatchOp
+	// changes describe mappings that changed beyond case, as "field: old → new".
+	changes []string
+	// wrongType names fallback columns not used for their type, as `value "NOTE" (TEXT)`.
+	wrongType []string
+	// mapped is the --update-mappings part.
+	mapped *mappingDiff
+}
+
 // dataSourcePatch builds the JSON Patch from existing to body. Existing mappings are
 // kept while the new columns include them (case-insensitively, in the new case), so
 // edits made in LaunchDarkly survive. LaunchDarkly requires exactly one of tableName,
 // viewName, and sqlQuery, and omits unset keyColumn and valueColumn, hence "add".
-// The []string describes mappings that changed beyond case.
-func dataSourcePatch(existing, body map[string]any, constantKey bool) ([]launchdarkly.JSONPatchOp, []string, error) {
+func dataSourcePatch(existing, body map[string]any, constantKey bool) (overwriteResult, error) {
+	var res overwriteResult
 	cm, _ := body["columnMappings"].(map[string]any)
 	old := jsonutil.GetMap(existing, "columnMappings")
 	cols := newColumnSet(cm["columns"])
@@ -1110,7 +1128,7 @@ func dataSourcePatch(existing, body map[string]any, constantKey bool) ([]launchd
 	if !constantKey && oldKey != "" {
 		real, ok := cols.find(oldKey)
 		if !ok {
-			return nil, nil, fmt.Errorf("not updated: its key column %q is not in the updated query; metrics on it would filter a different column. Keep that column in the Statsig SQL, or update the data source by hand", oldKey)
+			return res, fmt.Errorf("not updated: its key column %q is not in the updated query; metrics on it would filter a different column. Keep that column in the Statsig SQL, or update the data source by hand", oldKey)
 		}
 		newKey = real
 	}
@@ -1126,7 +1144,8 @@ func dataSourcePatch(existing, body map[string]any, constantKey bool) ([]launchd
 	}
 
 	if old == nil {
-		return append(ops, launchdarkly.JSONPatchOp{Op: "add", Path: "/columnMappings", Value: cm}), nil, nil
+		res.ops = append(ops, launchdarkly.JSONPatchOp{Op: "add", Path: "/columnMappings", Value: cm})
+		return res, nil
 	}
 
 	var changes []string
@@ -1146,21 +1165,30 @@ func dataSourcePatch(existing, body map[string]any, constantKey bool) ([]launchd
 			set("replace", "timestampColumn", real)
 		}
 	} else if ts := jsonutil.GetStr(cm, "timestampColumn"); ts != "" && ts != oldTS {
+		// The old one cannot stay: LaunchDarkly requires the timestamp column in the column list.
+		if typ := cols.typeOf(ts); typ != "" && !warehouse.IsTimestampType(typ) {
+			return res, fmt.Errorf("not updated: its timestamp column %q is not in the updated query, and the Statsig source's %q is %s, not a timestamp or date. Keep %q in the Statsig SQL, or correct the Statsig source's timestamp column, then rerun", oldTS, ts, typ, oldTS)
+		}
 		set("replace", "timestampColumn", ts)
-		changes = append(changes, fmt.Sprintf("timestamp column %q is now %q", oldTS, ts))
+		changes = append(changes, mappingChange("timestamp", oldTS, ts))
 	}
 
 	if oldVC := jsonutil.GetStr(old, "valueColumn"); oldVC != "" {
+		vc, found := cols.find(jsonutil.GetStr(cm, "valueColumn"))
+		typ := cols.typeOf(vc)
 		if real, ok := cols.find(oldVC); ok {
 			if real != oldVC {
 				set("add", "valueColumn", real)
 			}
-		} else if vc, ok := cols.find(jsonutil.GetStr(cm, "valueColumn")); ok {
+		} else if found && (typ == "" || warehouse.IsNumericType(typ)) {
 			set("add", "valueColumn", vc)
-			changes = append(changes, fmt.Sprintf("value column %q is now %q", oldVC, vc))
+			changes = append(changes, mappingChange("value column", oldVC, vc))
 		} else {
+			if found {
+				res.wrongType = append(res.wrongType, fmt.Sprintf("value %q (%s)", vc, typ))
+			}
 			set("remove", "valueColumn", nil)
-			changes = append(changes, fmt.Sprintf("value column %q was removed", oldVC))
+			changes = append(changes, mappingChange("value column", oldVC, ""))
 		}
 	}
 
@@ -1182,35 +1210,49 @@ func dataSourcePatch(existing, body map[string]any, constantKey bool) ([]launchd
 		if real, ok := cols.find(newCtx[kind]); ok {
 			kept++
 			ctxOps = append(ctxOps, launchdarkly.JSONPatchOp{Op: "add", Path: path, Value: real})
-			ctxChanges = append(ctxChanges, fmt.Sprintf("context %q column %q is now %q", kind, col, real))
+			ctxChanges = append(ctxChanges, mappingChange("context "+kind, col, real))
 			continue
 		}
 		ctxOps = append(ctxOps, launchdarkly.JSONPatchOp{Op: "remove", Path: path})
-		ctxChanges = append(ctxChanges, fmt.Sprintf("context %q (column %q) was removed", kind, col))
+		ctxChanges = append(ctxChanges, mappingChange("context "+kind, col, ""))
 	}
 	if kept == 0 && len(newCtx) > 0 {
 		set("replace", "contexts", newCtx)
-		changes = append(changes, fmt.Sprintf("contexts %v are now %v", oldCtx, newCtx))
+		for _, kind := range slices.Sorted(maps.Keys(union(oldCtx, newCtx))) {
+			if oldCtx[kind] != newCtx[kind] {
+				changes = append(changes, mappingChange("context "+kind, oldCtx[kind], newCtx[kind]))
+			}
+		}
 	} else {
 		ops = append(ops, ctxOps...)
 		changes = append(changes, ctxChanges...)
 	}
-	return ops, changes, nil
+	res.ops, res.changes = ops, changes
+	return res, nil
+}
+
+func union(a, b map[string]string) map[string]string {
+	out := maps.Clone(a)
+	maps.Copy(out, b)
+	return out
 }
 
 // columnSet matches names exactly, then case-insensitively, returning the list's case.
 type columnSet struct {
 	exact map[string]bool
 	lower map[string]string
+	// types holds each listed column's type by name; "" when unknown.
+	types map[string]string
 }
 
 func newColumnSet(columns any) columnSet {
-	s := columnSet{exact: map[string]bool{}, lower: map[string]string{}}
-	add := func(name string) {
+	s := columnSet{exact: map[string]bool{}, lower: map[string]string{}, types: map[string]string{}}
+	add := func(name, typ string) {
 		if name == "" {
 			return
 		}
 		s.exact[name] = true
+		s.types[name] = typ
 		if _, ok := s.lower[strings.ToLower(name)]; !ok {
 			s.lower[strings.ToLower(name)] = name
 		}
@@ -1218,20 +1260,26 @@ func newColumnSet(columns any) columnSet {
 	switch cols := columns.(type) {
 	case []map[string]any:
 		for _, c := range cols {
-			add(jsonutil.GetStr(c, "name"))
+			add(jsonutil.GetStr(c, "name"), jsonutil.GetStr(c, "type"))
 		}
 	case []warehouse.FallbackColumn:
 		for _, c := range cols {
-			add(c.Name)
+			add(c.Name, c.Type)
 		}
 	case []any:
 		for _, c := range cols {
 			if m, ok := c.(map[string]any); ok {
-				add(jsonutil.GetStr(m, "name"))
+				add(jsonutil.GetStr(m, "name"), jsonutil.GetStr(m, "type"))
 			}
 		}
 	}
 	return s
+}
+
+// typeOf returns the type of the column name matches, or "".
+func (s columnSet) typeOf(name string) string {
+	real, _ := s.find(name)
+	return s.types[real]
 }
 
 func (s columnSet) find(name string) (string, bool) {
@@ -1352,15 +1400,18 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 	collisions := keyCollisions(e.metricSources)
 	integrationKey := warehouse.WarehouseTypes[whType]
 	withoutConstantKey, unchanged := 0, 0
+	var issues []sourceIssue
 	for _, source := range e.metricSources {
 		st := jsonutil.GetStr(source, "sourceType")
 		if st == "" {
 			st = "query"
 		}
 		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, "")
-		plan := e.planDataSource(body, existing, collisions, whType)
-		plan = e.planMappings(plan, existing[jsonutil.GetStr(body, "key")], source)
+		plan := e.planSource(source, body, existing, collisions, whType)
 		e.recordPlan(jsonutil.GetStr(body, "key"), plan)
+		if plan.mappings != nil {
+			issues = append(issues, plan.mappings.issues...)
+		}
 		if plan.note == noteExistsWithoutConstantKey {
 			withoutConstantKey++
 		}
@@ -1379,6 +1430,7 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 	if msg := withoutConstantKeySummary(withoutConstantKey); msg != "" {
 		out.warnings = append(out.warnings, msg)
 	}
+	out.warnings = append(out.warnings, issueSummaries(issues)...)
 	out.total = len(e.metricSources)
 	return out
 }
@@ -1429,6 +1481,9 @@ func (e *migrationEngine) writeDryRunBodies(whType string) {
 		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, e.maintainerID)
 		if names, ok := collisions[jsonutil.GetStr(body, "key")]; ok {
 			body["error"] = fmt.Sprintf("Statsig sources %s all map to this data source key; none of them is created", quoteAll(names))
+			problems++
+		} else if conflicts := warehouse.ContextKindConflicts(source); len(conflicts) > 0 {
+			body["error"] = kindConflictError(conflicts, false).Error()
 			problems++
 		} else if _, err := warehouse.ApplyConstantEventKey(body, whType, nil); err != nil {
 			body["error"] = err.Error()

@@ -684,11 +684,8 @@ func mapUnitTypes(unitTypes []string, opts Options) (units []string, warnings []
 			units = appendUnique(units, mapped)
 			continue
 		}
-		switch strings.ToLower(u) {
-		case "userid":
-			units = appendUnique(units, "user")
-		default:
-			units = appendUnique(units, strings.ToLower(u))
+		units = appendUnique(units, statsig.ContextKind(u))
+		if !strings.EqualFold(u, "userID") {
 			warnings = appendCodedUnique(warnings, codedWarning{WarnUnitTypeUnmapped,
 				fmt.Sprintf("Statsig unitType %q may not match an LD context kind — verify in LD or use --unit-type-mapping", u)})
 		}
