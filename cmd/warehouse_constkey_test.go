@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -216,6 +217,9 @@ func TestPhase3_ValueColumnOnlyWhenStatsigMapsOne(t *testing.T) {
 			if got, present := cm["valueColumn"]; got != tc.want || present != (tc.want != nil) {
 				t.Errorf("POSTed valueColumn = %v (present %v), want %v", got, present, tc.want)
 			}
+			if len(e.report.Warnings) != 0 || len(e.report.Notes) != 0 {
+				t.Errorf("warnings=%q notes=%+v, want none", e.report.Warnings, e.report.Notes)
+			}
 
 			e.writeDryRunBodies("snowflake")
 			raw, err := os.ReadFile("data-source-bodies.json")
@@ -267,6 +271,137 @@ func TestPhase3_OverwriteAddsNoGuessedValueColumn(t *testing.T) {
 				t.Errorf("valueColumn ops = %+v, want none added, and a column the query no longer returns removed", ops)
 			}
 		})
+	}
+}
+
+// valueColumnList is an unwrapped data source whose value column the new query does not return.
+const valueColumnList = `{"items":[{"key":"checkout-events","sqlQuery":"SELECT * FROM analytics.events","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","valueColumn":"AMT","contexts":{"user":"USER_ID"},"columns":[]}}]}`
+
+func TestPhase3_OverwriteKeepsValueColumnBoundMetricsRead(t *testing.T) {
+	t.Run("refused", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		f := &fakeLD{t: t, list: valueColumnList, metrics: `[
+			{"key":"order-total","eventKey":"checkout-events","isNumeric":true,"unitAggregationType":"sum","dataSource":{"key":"checkout-events"}},
+			{"key":"items-per-checkout","eventKey":"checkout-events","isNumeric":true,"unitAggregationType":"sum","dataSource":{"key":"checkout-events"},
+			 "denominator":{"eventName":"checkout","isNumeric":true,"unitAggregationType":"sum","dataSource":{"key":"launchdarkly-hosted"}}},
+			{"key":"revenue-per-order","eventKey":"orders","isNumeric":true,"valueColumn":"AMOUNT","dataSource":{"key":"orders"},
+			 "denominator":{"eventName":"checkout-events","isNumeric":true,"unitAggregationType":"sum","dataSource":{"key":"checkout-events"}}},
+			{"key":"checkouts","eventKey":"checkout-events","isNumeric":false,"dataSource":{"key":"checkout-events"}}]`}
+		srv := f.server()
+		defer srv.Close()
+
+		e := newPhase3Engine(t, srv.URL, false)
+		e.overwrite, e.forceOverwrite = true, true
+		if err := e.phase3aMigrateDataSources(); err != nil {
+			t.Fatal(err)
+		}
+		want := `Data source "Checkout Events": not updated: its value column "AMT" is not in the updated query, and 3 bound numeric metric(s) with no value column of their own read it: items-per-checkout (numerator and denominator), order-total, revenue-per-order (denominator). Set their value column in LaunchDarkly, or keep that column in the Statsig SQL`
+		if f.patchCount != 0 || e.report.DataSources.Failed != 1 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+			t.Errorf("patches=%d report %+v errors=%q\nwant %q", f.patchCount, e.report.DataSources, e.report.Errors, want)
+		}
+		if f.metricsReads != 1 {
+			t.Errorf("metrics read %d times, want once per run", f.metricsReads)
+		}
+	})
+
+	for _, tc := range []struct{ name, metrics string }{
+		{"no numeric metric", `[{"key":"checkouts","eventKey":"checkout-events","isNumeric":false,"dataSource":{"key":"checkout-events"}}]`},
+		{"count_distinct", `[{"key":"buyers","eventKey":"checkout-events","isNumeric":true,"unitAggregationType":"count_distinct","unitAggregationField":"USER_ID","dataSource":{"key":"checkout-events"}}]`},
+		{"own value column", `[{"key":"order-total","eventKey":"checkout-events","isNumeric":true,"unitAggregationType":"sum","valueColumn":"ORDER_TOTAL","dataSource":{"key":"checkout-events"}}]`},
+		{"denominator inherits another data source", `[{"key":"revenue-per-order","eventKey":"orders","isNumeric":true,"valueColumn":"AMOUNT","dataSource":{"key":"orders"},
+			"denominator":{"eventName":"orders","isNumeric":true,"unitAggregationType":"sum","dataSource":{"key":"launchdarkly-hosted"}}}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: valueColumnList, metrics: tc.metrics}
+			srv := f.server()
+			defer srv.Close()
+
+			e := newPhase3Engine(t, srv.URL, false)
+			e.overwrite = true
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if e.report.DataSources.Updated != 1 || f.patchCount != 1 {
+				t.Fatalf("report %+v errors=%q patches=%d, want one update", e.report.DataSources, e.report.Errors, f.patchCount)
+			}
+			if !slices.ContainsFunc(f.patches["checkout-events"], func(op launchdarkly.JSONPatchOp) bool {
+				return op.Op == "remove" && op.Path == "/columnMappings/valueColumn"
+			}) {
+				t.Errorf("ops = %+v, want the value column removed", f.patches["checkout-events"])
+			}
+		})
+	}
+}
+
+// With --constant-event-key=false, metrics are read only when the value column would be removed.
+func TestPhase3_ValueColumnRemovalFailsClosedWhenMetricsCannotBeRead(t *testing.T) {
+	for _, tc := range []struct {
+		name, previewCols string
+		wantRefused       bool
+	}{
+		{"value column removed", `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"EVENT_NAME","type":"TEXT"}`, true},
+		{"value column kept", `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"EVENT_NAME","type":"TEXT"},{"name":"AMT","type":"NUMBER"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: valueColumnList, previewCols: tc.previewCols, metricsStatus: http.StatusForbidden}
+			srv := f.server()
+			defer srv.Close()
+
+			e := newPhase3Engine(t, srv.URL, false)
+			e.overwrite, e.constantEventKey = true, false
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantRefused {
+				if e.report.DataSources.Updated != 1 || f.metricsReads != 0 {
+					t.Errorf("report %+v errors=%q metricsReads=%d, want an update without reading metrics", e.report.DataSources, e.report.Errors, f.metricsReads)
+				}
+				return
+			}
+			if f.patchCount != 0 || e.report.DataSources.Failed != 1 || f.metricsReads != 1 {
+				t.Fatalf("patches=%d report %+v metricsReads=%d, want a refusal", f.patchCount, e.report.DataSources, f.metricsReads)
+			}
+			if !strings.Contains(e.report.Errors[0], "not updated, because its bound metrics could not be checked") || !strings.Contains(e.report.Errors[0], "403") {
+				t.Errorf("error = %q", e.report.Errors[0])
+			}
+		})
+	}
+}
+
+func TestPhase3_DroppedStatsigValueColumnsOneSummaryLine(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t}
+	srv := f.server()
+	defer srv.Close()
+
+	e := newPhase3Engine(t, srv.URL, false)
+	amount := []any{map[string]any{"fieldName": "amount", "column": "amount"}}
+	e.metricSources[0]["customFieldMapping"] = amount
+	orders := checkoutSource()
+	orders["name"], orders["customFieldMapping"] = "Orders", amount
+	views := checkoutSource()
+	views["name"] = "Page Views"
+	e.metricSources = append(e.metricSources, orders, views)
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if e.report.DataSources.Created != 3 {
+		t.Fatalf("report %+v errors=%q, want three created", e.report.DataSources, e.report.Errors)
+	}
+	for _, body := range f.created {
+		if vc, ok := body["columnMappings"].(map[string]any)["valueColumn"]; ok {
+			t.Errorf("%v POSTed valueColumn %v, want none", body["key"], vc)
+		}
+	}
+	want := "2 data source(s) did not get the value column their Statsig source defines, because their query does not return it: checkout-events, orders. Add the column to the Statsig source's query and to the data source's in LaunchDarkly, or set a value column on their numeric metrics."
+	if len(e.report.Warnings) != 1 || e.report.Warnings[0] != want {
+		t.Errorf("warnings = %q\nwant [%q]", e.report.Warnings, want)
+	}
+	wantNotes := []reportNote{{noteValueColumnNotInQuery, "checkout-events"}, {noteValueColumnNotInQuery, "orders"}}
+	if !slices.Equal(e.report.Notes, wantNotes) {
+		t.Errorf("notes = %+v, want %+v", e.report.Notes, wantNotes)
 	}
 }
 

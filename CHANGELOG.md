@@ -103,16 +103,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `warehouse` then posted every source again, and `metrics convert` fell back to legacy event keys. A real run of
   either now stops with the error; a `metrics convert` dry run warns and continues.
 
-- `warehouse`: the warehouse preview's timestamp and value-column guesses (the first timestamp-typed and the first
-  numeric column) replaced the columns configured in Statsig. Statsig's columns now win whenever the warehouse
-  returns them, in the warehouse's case.
-
-- `warehouse`: a data source got a value column even when the Statsig export defined none, because the CLI copied the
-  one LaunchDarkly's preview guesses (an `event_value` column, else the first numeric column). A data source now gets
-  a value column only when its Statsig source defines one and the query returns it, and `--overwrite` no longer puts
-  the guess in place of an existing value column the new query lacks. Numeric metrics then take their value column
-  from the metric, which `metrics convert` sets on constant-key data sources; on one created with
-  `--constant-event-key=false`, a numeric metric needs a value column set by hand.
+- `warehouse`: the warehouse preview's column guesses (the first timestamp-typed column as the timestamp column; an
+  `event_value` column, else the first numeric column, as the value column) replaced the columns configured in
+  Statsig, and a data source got the value-column guess even when its Statsig source defined none. Statsig's timestamp
+  column now wins whenever the warehouse returns it, in the warehouse's case, and the value-column guess is never
+  used: a data source gets a value column only when its Statsig source defines one and the query returns it. The run
+  prints one line naming the data sources whose query does not return their Statsig value column (note code
+  `statsig_value_column_not_in_query`). `--overwrite` no longer puts the guess in place of an existing value column
+  the new query lacks, and refuses a data source whose bound numeric metrics read that column without a value column
+  of their own, naming them. Numeric metrics then take their value column from the metric, which `metrics convert`
+  sets on constant-key data sources; on one created with `--constant-event-key=false`, a numeric metric needs a value
+  column set by hand.
 
 - `warehouse`: Statsig sources whose names sanitize to the same LaunchDarkly key (for example `Checkout Events` and
   `checkout events`) were written to one data source, the last one winning, and `source-mapping.json` bound all of

@@ -109,7 +109,7 @@ func init() {
 	warehouseCmd.Flags().BoolVar(&whFlagDryRun, "dry-run", false, "Export and preview data source mapping without writing to LD")
 	warehouseCmd.Flags().BoolVar(&whFlagResume, "resume", false, "Resume from migration_state.json")
 	warehouseCmd.Flags().StringVar(&whFlagOnly, "only", "", "Run only 'warehouse' (Phase 2) or 'data-sources' (Phase 3)")
-	warehouseCmd.Flags().BoolVar(&whFlagOverwrite, "overwrite", false, "Update existing LD metric data sources that lack the constant event key in place: their query, key column, and column list (timestamp, value, and context mappings are kept while the new query returns them). Refuses a data source whose bound metrics use other event keys, or, with --constant-event-key=false, whose key column the new query no longer returns")
+	warehouseCmd.Flags().BoolVar(&whFlagOverwrite, "overwrite", false, "Update existing LD metric data sources that lack the constant event key in place: their query, key column, and column list (timestamp, value, and context mappings are kept while the new query returns them). Refuses a data source whose bound metrics use other event keys, whose value column the new query drops while bound numeric metrics read it, or, with --constant-event-key=false, whose key column the new query no longer returns")
 	warehouseCmd.Flags().BoolVar(&whFlagForceOverwrite, "force-overwrite", false, "Like --overwrite, but also updates data sources whose bound metrics use other event keys and would match no rows afterwards; the run still lists those metrics")
 	warehouseCmd.Flags().BoolVar(&whFlagVerbose, "verbose", false, "Show detailed API request/response info")
 	warehouseCmd.Flags().BoolVar(&whFlagNoColor, "no-color", false, "Disable colored output")
@@ -146,6 +146,7 @@ const (
 	noteEditedConstantKey        = "constant_key_edited_in_launchdarkly"
 	noteKeptConstantKey          = "constant_key_kept"
 	noteExistsWithoutConstantKey = "exists_without_constant_key"
+	noteValueColumnNotInQuery    = "statsig_value_column_not_in_query"
 )
 
 // -- Migration Engine --
@@ -674,6 +675,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 
 	total := len(e.metricSources)
 	withoutConstantKey := 0
+	var droppedValue []string
 	for i, source := range e.metricSources {
 		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, e.maintainerID)
 		key := jsonutil.GetStr(body, "key")
@@ -702,6 +704,8 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 			e.failDataSource(key, name, plan.err)
 			continue
 		}
+
+		statsigValue := jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn")
 
 		// Use preview to get real columns from the warehouse
 		var sourceColumns []string
@@ -732,6 +736,11 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 			}
 		}
 
+		if statsigValue != "" && jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn") == "" {
+			droppedValue = append(droppedValue, key)
+			e.report.Notes = append(e.report.Notes, reportNote{Code: noteValueColumnNotInQuery, DataSource: key})
+		}
+
 		if plan.action == planUpdate {
 			e.updateDataSource(existing[key], body, name, plan)
 			continue
@@ -755,6 +764,10 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 	}
 	if msg := withoutConstantKeySummary(withoutConstantKey); msg != "" {
 		e.warn(msg)
+	}
+	if len(droppedValue) > 0 {
+		e.warn(fmt.Sprintf("%d data source(s) did not get the value column their Statsig source defines, because their query does not return it: %s. Add the column to the Statsig source's query and to the data source's in LaunchDarkly, or set a value column on their numeric metrics.",
+			len(droppedValue), strings.Join(droppedValue, ", ")))
 	}
 	return nil
 }
@@ -892,11 +905,7 @@ func (e *migrationEngine) planDataSource(body map[string]any, existing map[strin
 	// After the update the key column holds only the data source key, so check bound metrics first.
 	stale, err := e.staleBoundMetrics(key, key)
 	if err != nil {
-		return dataSourcePlan{
-			action: planRefuse,
-			reason: "could not check bound metrics",
-			err:    fmt.Errorf("not updated, because its bound metrics could not be checked: %w. Rerun to try again", err),
-		}
+		return dataSourcePlan{action: planRefuse, reason: "could not check bound metrics", err: boundMetricsUnchecked(err)}
 	}
 	if len(stale) > 0 && !e.forceOverwrite {
 		return dataSourcePlan{
@@ -953,6 +962,45 @@ func (e *migrationEngine) staleBoundMetrics(dsKey, constKey string) ([]string, e
 	return stale, nil
 }
 
+// valueColumnUsers names metrics with a numeric term that reads dsKey's value column,
+// having none of its own. A denominator with no data source of its own reads the
+// numerator's; a plain count_distinct metric counts another column.
+func (e *migrationEngine) valueColumnUsers(dsKey string) ([]string, error) {
+	metrics, err := e.projectMetrics()
+	if err != nil {
+		return nil, err
+	}
+	readsValue := func(term map[string]any) bool {
+		return jsonutil.GetBool(term, "isNumeric") && strings.TrimSpace(jsonutil.GetStr(term, "valueColumn")) == ""
+	}
+	var users []string
+	for _, m := range metrics {
+		numDS := jsonutil.GetStr(jsonutil.GetMap(m, "dataSource"), "key")
+		den := jsonutil.GetMap(m, "denominator")
+		num := numDS == dsKey && readsValue(m) && (den != nil || jsonutil.GetStr(m, "unitAggregationType") != "count_distinct")
+		denDS := jsonutil.GetStr(jsonutil.GetMap(den, "dataSource"), "key")
+		if denDS == "" || denDS == "launchdarkly-hosted" {
+			denDS = numDS
+		}
+		inDen := den != nil && denDS == dsKey && readsValue(den)
+		key := jsonutil.GetStr(m, "key")
+		switch {
+		case num && inDen:
+			users = append(users, key+" (numerator and denominator)")
+		case num:
+			users = append(users, key)
+		case inDen:
+			users = append(users, key+" (denominator)")
+		}
+	}
+	sort.Strings(users)
+	return users, nil
+}
+
+func boundMetricsUnchecked(err error) error {
+	return fmt.Errorf("not updated, because its bound metrics could not be checked: %w. Rerun to try again", err)
+}
+
 // failDataSource prints only the error's first line; the report keeps the full error.
 func (e *migrationEngine) failDataSource(key, name string, err error) {
 	first, _, _ := strings.Cut(err.Error(), "\n")
@@ -972,6 +1020,19 @@ func (e *migrationEngine) warn(msg string) {
 func (e *migrationEngine) updateDataSource(existing, body map[string]any, name string, plan dataSourcePlan) {
 	key := jsonutil.GetStr(body, "key")
 	ops, changes, err := dataSourcePatch(existing, body, e.constantEventKey)
+	// LaunchDarkly does not check bound metrics on this PATCH; those reading the column would fail at run time.
+	if err == nil && slices.ContainsFunc(ops, func(op launchdarkly.JSONPatchOp) bool {
+		return op.Op == "remove" && op.Path == "/columnMappings/valueColumn"
+	}) {
+		vc := jsonutil.GetStr(jsonutil.GetMap(existing, "columnMappings"), "valueColumn")
+		users, uerr := e.valueColumnUsers(key)
+		if uerr != nil {
+			err = boundMetricsUnchecked(uerr)
+		} else if len(users) > 0 {
+			err = fmt.Errorf("not updated: its value column %q is not in the updated query, and %d bound numeric metric(s) with no value column of their own read it: %s. Set their value column in LaunchDarkly, or keep that column in the Statsig SQL",
+				vc, len(users), strings.Join(users, ", "))
+		}
+	}
 	if err != nil {
 		e.failDataSource(key, name, err)
 		return

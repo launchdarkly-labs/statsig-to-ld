@@ -216,9 +216,7 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
-	// The preview's valueColumn is a guess (event_value, else the first numeric column),
-	// so only Statsig's is kept, and only if the query returns it: LaunchDarkly rejects
-	// a value column missing from the column list.
+	// Keep Statsig's value column only if the query returns it; the preview's is just a guess.
 	if v, ok := cm["valueColumn"].(string); ok {
 		if real, found := actual[strings.ToLower(v)]; found {
 			cm["valueColumn"] = real
