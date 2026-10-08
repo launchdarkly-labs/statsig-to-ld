@@ -399,7 +399,7 @@ func TestPhase3_DroppedStatsigValueColumnsOneSummaryLine(t *testing.T) {
 	if len(e.report.Warnings) != 1 || e.report.Warnings[0] != want {
 		t.Errorf("warnings = %q\nwant [%q]", e.report.Warnings, want)
 	}
-	wantNotes := []reportNote{{noteValueColumnNotInQuery, "checkout-events"}, {noteValueColumnNotInQuery, "orders"}}
+	wantNotes := []reportNote{{Code: noteValueColumnNotInQuery, DataSource: "checkout-events"}, {Code: noteValueColumnNotInQuery, DataSource: "orders"}}
 	if !slices.Equal(e.report.Notes, wantNotes) {
 		t.Errorf("notes = %+v, want %+v", e.report.Notes, wantNotes)
 	}
@@ -932,7 +932,7 @@ func TestWarehouseCmd_FlagsBound(t *testing.T) {
 		"statsig-key", "statsig-url", "statsig-export-file",
 		"ld-key", "ld-url", "ld-project", "ld-environment", "ld-maintainer",
 		"warehouse-type", "dry-run", "resume", "only",
-		"overwrite", "force-overwrite", "constant-event-key", "verbose", "no-color",
+		"overwrite", "force-overwrite", "update-mappings", "constant-event-key", "verbose", "no-color",
 	} {
 		if warehouseCmd.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s not registered on `warehouse`", name)
