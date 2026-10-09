@@ -136,7 +136,7 @@ The tool loads `migration_state.json` and skips already-created data sources / c
 | `--dry-run` | Preview without writing to LD; still writes `source-mapping.json` and `data-source-bodies.json` for review. With `--ld-key` and `--ld-project` it lists each source as would create / update / skip / refuse |
 | `--resume` | Resume from `migration_state.json` |
 | `--only` | Run only `warehouse` (Phase 2) or `data-sources` (Phase 3) |
-| `--overwrite` | Update existing LD data sources that lack the constant event key in place: query, key column, and column list; timestamp, value, and context mappings are kept while the new query returns them. With the constant event key on (the default), refuses a data source whose bound metrics use other event keys; with `--constant-event-key=false` it keeps the existing key column and refuses when the new query does not return it |
+| `--overwrite` | Update existing LD data sources that lack the constant event key in place: query, key column, and column list; timestamp, value, and context mappings are kept while the new query returns them. With the constant event key on (the default), refuses a data source whose bound metrics use other event keys; either way, refuses one whose value column the new query drops while bound numeric metrics read it; with `--constant-event-key=false` it keeps the existing key column and refuses when the new query does not return it |
 | `--force-overwrite` | Implies `--overwrite`, and also updates data sources whose bound metrics would match no rows afterwards, listing them |
 | `--constant-event-key` | Default `true`. Wrap each source's SQL to project the data source key as a constant event key column; `=false` sends the Statsig SQL unchanged |
 | `--verbose` | Show detailed API info |
@@ -172,7 +172,7 @@ If integrations already exist, both are skipped automatically without prompting.
 
 For each Statsig metric source:
 1. Calls the LD preview API to discover real warehouse columns (types, nullable, length)
-2. Reconciles column names (Snowflake returns uppercase; Statsig config uses lowercase). Statsig's timestamp column wins over the preview's guess whenever the warehouse returns it.
+2. Reconciles column names (Snowflake returns uppercase; Statsig config uses lowercase). Statsig's timestamp column wins over the preview's guess whenever the warehouse returns it. The value column comes only from Statsig's mapping, never the preview's guess, so a source that defines none gets none; with `--constant-event-key=false`, a numeric metric on it then needs a value column set by hand.
 3. Wraps the SQL as `SELECT *, '<data-source-key>' AS LD_EVENT_KEY FROM (<source SQL>) AS ld_src` (`ld_event_key` outside Snowflake; on Redshift the literal is cast to `VARCHAR(256)`), previews the wrapped query, and makes that column the event key column. LaunchDarkly requires an event key column and Statsig sources have none; with the constant, `metrics convert` can give every metric the data source key as its event key. See [The constant event key](../../docs/cli-reference.md#the-constant-event-key).
 4. Creates the LD data source with the wrapped query's column schema
 
@@ -220,6 +220,12 @@ Nothing was changed: the data source was edited in LD during the run, or LD's me
 
 ### "is taken by a data source in LaunchDarkly environment"
 Data source keys are unique per project; that key belongs to a data source in another environment, which this run neither changes nor maps. Rename the source in Statsig, or run against that environment with `--ld-environment`.
+
+### "its value column ... is not in the updated query"
+`--overwrite` refused the data source: the new Statsig SQL no longer returns its value column, and the listed numeric metrics read it because they set no value column of their own. Set their value column in LD, or keep the column in the Statsig SQL.
+
+### "did not get the value column their Statsig source defines"
+The Statsig source maps a value column its query does not return, so the data source was saved without it. Add the column to the Statsig source's query and to the data source's in LD, or set a value column on the numeric metrics bound to it.
 
 ### "its key column ... is not in the updated query"
 With `--constant-event-key=false --overwrite`, an update keeps the existing key column, and the new Statsig SQL no longer returns it. Keep the column in the Statsig SQL, or update the data source by hand.
