@@ -123,8 +123,8 @@ func diffMappings(old map[string]any, t warehouse.ExportMappings, cols columnSet
 		if _, had := d.contexts[kind]; had {
 			continue
 		}
-		// A column another kind already maps keeps that kind.
-		if real, ok := resolve("context "+kind, t.Contexts[kind], nil); ok && !mapsColumn(final, real) {
+		// Added even when another kind maps the same column: metrics analyze by the export's kind name.
+		if real, ok := resolve("context "+kind, t.Contexts[kind], nil); ok {
 			final[kind] = real
 		}
 	}
@@ -142,15 +142,6 @@ func diffMappings(old map[string]any, t warehouse.ExportMappings, cols columnSet
 	d.ops = append(d.ops, ctxOps...)
 	d.contexts = final
 	return d
-}
-
-func mapsColumn(contexts map[string]string, col string) bool {
-	for _, c := range contexts {
-		if strings.EqualFold(c, col) {
-			return true
-		}
-	}
-	return false
 }
 
 func mappingChange(label, from, to string) string {

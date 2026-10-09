@@ -867,6 +867,8 @@ type dataSourcePlan struct {
 	stale []string
 	// mappings is set by --update-mappings.
 	mappings *mappingPlan
+	// kindConflicts refuse a plain --overwrite only if its fallback takes one of these kinds from the export.
+	kindConflicts []warehouse.KindConflict
 }
 
 // refuse turns p into a refusal, keeping its note and warning.
@@ -880,8 +882,13 @@ func (p dataSourcePlan) refuse(reason string, err error) dataSourcePlan {
 func (e *migrationEngine) planSource(source, body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string) dataSourcePlan {
 	plan := e.planDataSource(body, existing, collisions, whType)
 	ds := existing[jsonutil.GetStr(body, "key")]
+	conflicts := warehouse.ContextKindConflicts(source)
+	if plan.action == planUpdate && !e.updateMappings {
+		plan.kindConflicts = conflicts
+		return e.planMappings(plan, ds, source)
+	}
 	takesExport := plan.action == planCreate || plan.action == planUpdate || (e.updateMappings && ds != nil && plan.action == planSkip)
-	if conflicts := warehouse.ContextKindConflicts(source); takesExport && len(conflicts) > 0 {
+	if takesExport && len(conflicts) > 0 {
 		var kinds []string
 		for _, c := range conflicts {
 			kinds = append(kinds, c.Kind)
@@ -891,13 +898,32 @@ func (e *migrationEngine) planSource(source, body map[string]any, existing map[s
 	return e.planMappings(plan, ds, source)
 }
 
+// conflictsTaken refuses when ops give a conflicting kind a column from the export.
+func conflictsTaken(old map[string]any, ops []launchdarkly.JSONPatchOp, conflicts []warehouse.KindConflict) error {
+	if len(conflicts) == 0 {
+		return nil
+	}
+	before := stringMap(old["contexts"])
+	_, after := mappingsAfter(old, ops)
+	var taken []warehouse.KindConflict
+	for _, c := range conflicts {
+		if col, ok := after[c.Kind]; ok && !strings.EqualFold(col, before[c.Kind]) {
+			taken = append(taken, c)
+		}
+	}
+	if len(taken) == 0 {
+		return nil
+	}
+	return kindConflictError(taken, true)
+}
+
 func kindConflictError(conflicts []warehouse.KindConflict, exists bool) error {
 	var parts []string
 	for _, c := range conflicts {
 		parts = append(parts, fmt.Sprintf("Statsig unit IDs %s all map to context kind %q, with different columns (%s)", quoteAll(c.Units), c.Kind, quoteAll(c.Columns)))
 	}
 	if exists {
-		return fmt.Errorf("not updated: %s. Keep one of them in the Statsig source's id-type mapping and rerun, or correct the data source's contexts in LaunchDarkly by hand", strings.Join(parts, "; "))
+		return fmt.Errorf("not updated: %s. Keep one of them in the Statsig source's id-type mapping, then rerun", strings.Join(parts, "; "))
 	}
 	return fmt.Errorf("not created: %s. Keep one of them in the Statsig source's id-type mapping and rerun, or create the data source by hand", strings.Join(parts, "; "))
 }
@@ -1044,9 +1070,13 @@ func (e *migrationEngine) warn(msg string) {
 func (e *migrationEngine) updateDataSource(existing, body map[string]any, name string, plan dataSourcePlan) {
 	key := jsonutil.GetStr(body, "key")
 	cm := jsonutil.GetMap(body, "columnMappings")
+	old := jsonutil.GetMap(existing, "columnMappings")
 	res, err := e.overwritePatch(existing, body, plan)
 	if err == nil {
-		_, err = e.guardRemovals(key, jsonutil.GetMap(existing, "columnMappings"), res.ops, newColumnSet(cm["columns"]))
+		err = conflictsTaken(old, res.ops, plan.kindConflicts)
+	}
+	if err == nil {
+		_, err = e.guardRemovals(key, old, res.ops, newColumnSet(cm["columns"]))
 	}
 	if err != nil {
 		e.failDataSource(key, name, err)

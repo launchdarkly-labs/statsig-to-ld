@@ -237,7 +237,7 @@ With `--constant-event-key=false --overwrite`, an update keeps the existing key 
 `--overwrite` refused the data source because those metrics would match no rows once its key column holds only the data source key. Metrics created by older versions of this tool usually match nothing already. Rerun with `--force-overwrite` to update it anyway, then set each listed metric's event key to the data source key.
 
 ### "all map to context kind"
-Two of the source's Statsig unit IDs (for example `userID` and `user`) map to one LD context kind with different columns, so the source was not created or updated. Keep one of them in the Statsig source's id-type mapping and rerun, or set the data source's contexts by hand.
+Two of the source's Statsig unit IDs (for example `userID` and `user`) map to one LD context kind with different columns, so the source was not created or updated. Keep one of them in the Statsig source's id-type mapping and rerun; editing the data source in LD does not clear it. A plain `--overwrite` fails only when it would take that kind's column from the export.
 
 ### "kept a value column" / "their columns do not include the export's" / "the export's column has the wrong type" (`--update-mappings`)
 One line each per run; the rest of each data source's mappings were applied. For the first, set the listed metrics' own value column in LD and refresh them on running experiments, then rerun to remove the data source's. For the second, correct the column in Statsig or add it to the data source's query in LD. For the third, a timestamp column needs a timestamp or date type and a value column a numeric one; correct the column in Statsig or cast it in the query.

@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the data source's listed columns, and only fields that differ are patched, after the same `test` ops as
   `--overwrite`; a data source that already matches gets no PATCH. Context kinds are only added or moved to another
   column, never removed: a kind the export does not map, such as one renamed by hand in LaunchDarkly, is kept (note
-  code `context_kind_not_in_export`), and an export kind whose column another kind already maps is not added. A
+  code `context_kind_not_in_export`), and an export kind is added even when another kind maps the same column. A
   mapping is left as it is when the data source's columns do not include the export's column
   (`export_column_not_in_query`), when the column's type does not fit (a timestamp column needs a timestamp or date
   type and a value column a numeric one; a column with no type passes; `export_column_wrong_type`), or, for a value
@@ -120,7 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   became `user`, the last one silently winning, and other unit IDs were sanitized like keys. A new data source now
   gets `anonymoususerid` or `user_id` for those; `--update-mappings` adds them to an existing one, moving `user` to
   the `userID` column if another unit ID had taken it. A source whose unit IDs still map to one kind with different columns (for
-  example `userID` and `user`) fails, naming them, whether it would be created or updated. `warehouse` takes no
+  example `userID` and `user`) fails, naming them, on create and with `--update-mappings`; a plain `--overwrite` fails it
+  only when its fallback would take that kind's column from the export. Kinds that share a column all stay on create;
+  before, one of them was dropped at random. `warehouse` takes no
   unit-type mapping, so a kind renamed with `metrics convert --unit-type-mapping` must be renamed on the data source in
   LaunchDarkly too.
 

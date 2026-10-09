@@ -261,16 +261,11 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
+	// Kinds sharing a column all stay: metrics analyze by each kind's name, and LaunchDarkly allows it.
 	if contexts, ok := cm["contexts"].(map[string]string); ok {
-		seen := map[string]bool{}
 		for kind, col := range contexts {
 			if real, found := actual[strings.ToLower(col)]; found {
-				if seen[real] {
-					delete(contexts, kind)
-				} else {
-					contexts[kind] = real
-					seen[real] = true
-				}
+				contexts[kind] = real
 			}
 		}
 	}

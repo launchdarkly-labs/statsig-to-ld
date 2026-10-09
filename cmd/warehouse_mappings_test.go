@@ -445,8 +445,8 @@ func typedCols(cols ...[2]string) []any {
 	return out
 }
 
-// A kind renamed by hand in LaunchDarkly is kept, and the export's name for it is not
-// added back on the same column; the source's other corrections still apply.
+// A kind renamed by hand in LaunchDarkly is kept, and the export's name for it is added
+// beside it on the same column, since metrics convert names analysis units the export's way.
 func TestUpdateMappings_KeepsAKindRenamedByHand(t *testing.T) {
 	cols := typedCols([2]string{"TS", "TIMESTAMP_NTZ"}, [2]string{"CREATED_AT", "TIMESTAMP_NTZ"}, [2]string{"UID", "TEXT"},
 		[2]string{"COMPANY_ID", "TEXT"}, [2]string{"ORDER_TOTAL", "NUMBER"}, [2]string{"LD_EVENT_KEY", "TEXT"})
@@ -459,11 +459,31 @@ func TestUpdateMappings_KeepsAKindRenamedByHand(t *testing.T) {
 			map[string]any{"statsigUnitID": "companyID", "column": "company_id"},
 		}
 	})
-	if got := opLines(f.patches["checkout-events"]); got != "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/timestampColumn \"CREATED_AT\"" {
-		t.Errorf("ops:\n%s\nwant only the timestamp change", got)
+	want := "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/timestampColumn \"CREATED_AT\"\nadd /columnMappings/contexts/companyid \"COMPANY_ID\""
+	if got := opLines(f.patches["checkout-events"]); got != want {
+		t.Errorf("ops:\n%s\nwant\n%s", got, want)
 	}
 	if e.report.DataSources.Updated != 1 || f.metricsReads != 0 || len(e.report.Warnings) != 0 || noteCodes(e.report.Notes) != "mappings_updated context_kind_not_in_export" {
 		t.Errorf("report %+v metricsReads=%d warnings=%q notes=%+v", e.report.DataSources, f.metricsReads, e.report.Warnings, e.report.Notes)
+	}
+}
+
+// A source the previous CLI created named a lone "user"-like unit ID `user`; the export's
+// kind for it is added on the same column, so metrics convert's analysis units resolve.
+func TestUpdateMappings_AddsTheExportKindBesideALegacyUserKind(t *testing.T) {
+	for _, unit := range []string{"user_id", "anonymousUserID"} {
+		cols := typedCols([2]string{"CREATED_AT", "TIMESTAMP_NTZ"}, [2]string{"UID", "TEXT"},
+			[2]string{"ORDER_TOTAL", "NUMBER"}, [2]string{"LD_EVENT_KEY", "TEXT"})
+		cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "CREATED_AT", "valueColumn": "ORDER_TOTAL",
+			"contexts": map[string]any{"user": "UID"}, "columns": cols}
+		f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm)}
+		runMappings(t, f, func(e *migrationEngine) {
+			e.metricSources[0]["idTypeMapping"] = []any{map[string]any{"statsigUnitID": unit, "column": "uid"}}
+		})
+		want := "test /sqlQuery\ntest /columnMappings\nadd /columnMappings/contexts/" + strings.ToLower(unit) + " \"UID\""
+		if got := opLines(f.patches["checkout-events"]); got != want {
+			t.Errorf("%s: ops:\n%s\nwant\n%s", unit, got, want)
+		}
 	}
 }
 
@@ -486,6 +506,32 @@ func TestUpdateMappings_UnitIDsContainingUserGetTheirOwnKind(t *testing.T) {
 	}
 }
 
+// A plain --overwrite takes the export's contexts only as a fallback, so conflicting unit
+// IDs refuse it only when the fallback would take the conflicting kind's column.
+func TestPhase3_OverwriteRefusesAKindConflictOnlyWhenItsFallbackIsUsed(t *testing.T) {
+	conflicting := func(e *migrationEngine) {
+		e.overwrite, e.updateMappings = true, false
+		e.metricSources[0]["idTypeMapping"] = []any{
+			map[string]any{"statsigUnitID": "userID", "column": "user_id"},
+			map[string]any{"statsigUnitID": "user", "column": "uid"},
+		}
+	}
+	list := `{"items":[{"key":"checkout-events","sqlQuery":"SELECT * FROM analytics.events","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","contexts":{"user":"USER_ID"},"columns":[]}}]}`
+
+	f := &fakeLD{t: t, list: list, previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"UID","type":"TEXT"}`}
+	e := runMappings(t, f, conflicting)
+	if f.patchCount != 1 || e.report.DataSources.Updated != 1 || len(e.report.Errors) != 0 {
+		t.Errorf("user column kept: patches=%d report=%+v errors=%q, want the update to go ahead", f.patchCount, e.report.DataSources, e.report.Errors)
+	}
+
+	f = &fakeLD{t: t, list: list, previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"UID","type":"TEXT"}`}
+	e = runMappings(t, f, conflicting)
+	want := `Data source "Checkout Events": not updated: Statsig unit IDs "userID", "user" all map to context kind "user", with different columns ("user_id", "uid"). Keep one of them in the Statsig source's id-type mapping, then rerun`
+	if f.patchCount != 0 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+		t.Errorf("user column gone: patches=%d errors=%q\nwant %q", f.patchCount, e.report.Errors, want)
+	}
+}
+
 func TestPhase3_UnitIDsThatShareAKindFailTheSource(t *testing.T) {
 	shared := func(e *migrationEngine) {
 		e.metricSources[0]["idTypeMapping"] = []any{
@@ -497,7 +543,7 @@ func TestPhase3_UnitIDsThatShareAKindFailTheSource(t *testing.T) {
 	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}}
 	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm)}
 	e := runMappings(t, f, shared)
-	want := `Data source "Checkout Events": not updated: ` + conflict + `. Keep one of them in the Statsig source's id-type mapping and rerun, or correct the data source's contexts in LaunchDarkly by hand`
+	want := `Data source "Checkout Events": not updated: ` + conflict + `. Keep one of them in the Statsig source's id-type mapping, then rerun`
 	if f.patchCount != 0 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
 		t.Errorf("patches=%d errors=%q\nwant %q", f.patchCount, e.report.Errors, want)
 	}
