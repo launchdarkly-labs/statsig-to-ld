@@ -427,3 +427,20 @@ func TestReconcileColumnMappings_IgnoresPreviewValueColumnGuess(t *testing.T) {
 		t.Errorf("valueColumn = %v, want Statsig's order_total in the preview's case", cm["valueColumn"])
 	}
 }
+
+// Two unit IDs on one column both keep their kind, so metrics analyzing by either resolve.
+func TestReconcileColumnMappings_KeepsKindsSharingAColumn(t *testing.T) {
+	real := []map[string]any{{"name": "TS", "type": "TIMESTAMP_NTZ"}, {"name": "USER_ID", "type": "TEXT"}}
+	src := map[string]any{"name": "Checkout Events", "sql": "SELECT * FROM analytics.orders", "timestampColumn": "ts",
+		"idTypeMapping": []any{
+			map[string]any{"statsigUnitID": "userID", "column": "user_id"},
+			map[string]any{"statsigUnitID": "stableID", "column": "user_id"},
+		}}
+	for range 20 {
+		cm := MapMetricSourceToDataSource(src, "production", "snowflake-experimentation", "")["columnMappings"].(map[string]any)
+		ReconcileColumnMappings(cm, map[string]any{}, real)
+		if got := cm["contexts"].(map[string]string); len(got) != 2 || got["user"] != "USER_ID" || got["stableid"] != "USER_ID" {
+			t.Fatalf("contexts = %v, want user and stableid both on USER_ID", got)
+		}
+	}
+}

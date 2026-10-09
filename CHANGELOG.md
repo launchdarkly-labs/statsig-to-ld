@@ -27,6 +27,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `data_sources_fetched` (whether the data sources were read from LaunchDarkly) and `constant_key_data_sources` (how
   many of them project the constant).
 
+- `warehouse`: `--update-mappings` corrects the timestamp, value, and context mappings of existing metric data
+  sources in place from the Statsig export, keeping their keys, queries, key columns, column lists, and bound
+  metrics, on data sources with or without the constant event key. Each mapping the export defines itself (its
+  timestamp column, its id-type mappings, and a value column only when it names one) is matched case-insensitively
+  to the data source's listed columns, and only fields that differ are patched, after the same `test` ops as
+  `--overwrite`; a data source that already matches gets no PATCH. Context kinds are only added or moved to another
+  column, never removed: a kind the export does not map, such as one renamed by hand in LaunchDarkly, is kept (note
+  code `context_kind_not_in_export`), and an export kind is added even when another kind maps the same column. A
+  mapping is left as it is when the data source's columns do not include the export's column
+  (`export_column_not_in_query`), when the column's type does not fit (a timestamp column needs a timestamp or date
+  type and a value column a numeric one; a column with no type passes; `export_column_wrong_type`), or, for a value
+  column the export no longer maps, while bound numeric metrics without their own value column read it
+  (`value_column_kept`); each prints one line per run naming the data sources. With `--overwrite`, a data source
+  without the constant event key still gets the wrapped query and new column list, but takes its mappings from the
+  export instead of keeping its old ones. Every update, with `--overwrite`, `--update-mappings`, or both, is refused,
+  naming the metrics, when the patch it would send removes a value column bound numeric metrics read or a context
+  kind bound metrics use as an analysis or randomization unit. A metric is bound through its numerator's data source
+  or its denominator's, and a denominator with no data source of its own reads the numerator's, which
+  `--overwrite`'s event-key check now counts too. `--overwrite` also checks the type of a fallback timestamp or value
+  column. A `--dry-run` with LD credentials prints each changed field (`timestamp: TS → CREATED_AT`), and the report
+  records each update as note code `mappings_updated` with a `changes` list in the same form, which `--overwrite`'s
+  warnings now use too.
+
 
 ### Added
 
@@ -90,6 +113,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sources that lack the constant are skipped, and the run prints one line counting them and saying what
   `--overwrite` would do; the report's new `notes` list names them. A `--dry-run` with `--ld-key` and `--ld-project`
   reports, per source, whether a real run would create, update, skip, or refuse it.
+
+- `warehouse`: data source context kinds are now named the way `metrics convert` names analysis units without
+  `--unit-type-mapping`, so a data source has the kinds its metrics analyze by: `userID` is `user`, and any other
+  Statsig unit ID is lowercased. Before, every unit ID containing "user" (such as `anonymousUserID` or `user_id`)
+  became `user`, the last one silently winning, and other unit IDs were sanitized like keys. A new data source now
+  gets `anonymoususerid` or `user_id` for those; `--update-mappings` adds them to an existing one, moving `user` to
+  the `userID` column if another unit ID had taken it. A source whose unit IDs still map to one kind with different columns (for
+  example `userID` and `user`) fails, naming them, on create and with `--update-mappings`; a plain `--overwrite` fails it
+  only when its fallback would take that kind's column from the export. Kinds that share a column all stay on create;
+  before, one of them was dropped at random. `warehouse` takes no
+  unit-type mapping, so a kind renamed with `metrics convert --unit-type-mapping` must be renamed on the data source in
+  LaunchDarkly too.
 
 - `metrics convert`: `--widen-analysis-units` now defaults to **off**. Real data settled it: in a customer's
   warehouse export, 60 of 100 metric sources map two or more id types and one maps nine, so widening is not a

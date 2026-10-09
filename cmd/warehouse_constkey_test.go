@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -295,7 +296,7 @@ func TestPhase3_OverwriteKeepsValueColumnBoundMetricsRead(t *testing.T) {
 		if err := e.phase3aMigrateDataSources(); err != nil {
 			t.Fatal(err)
 		}
-		want := `Data source "Checkout Events": not updated: its value column "AMT" is not in the updated query, and 3 bound numeric metric(s) with no value column of their own read it: items-per-checkout (numerator and denominator), order-total, revenue-per-order (denominator). Set their value column in LaunchDarkly, or keep that column in the Statsig SQL`
+		want := `Data source "Checkout Events": not updated: its value column "AMT" is not in the updated query, and 3 bound numeric metric(s) with no value column of their own read it: items-per-checkout (numerator and denominator), order-total, revenue-per-order (denominator). Keep that column in the Statsig SQL, or set those metrics' value column in LaunchDarkly and refresh them on running experiments, then rerun`
 		if f.patchCount != 0 || e.report.DataSources.Failed != 1 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
 			t.Errorf("patches=%d report %+v errors=%q\nwant %q", f.patchCount, e.report.DataSources, e.report.Errors, want)
 		}
@@ -399,8 +400,8 @@ func TestPhase3_DroppedStatsigValueColumnsOneSummaryLine(t *testing.T) {
 	if len(e.report.Warnings) != 1 || e.report.Warnings[0] != want {
 		t.Errorf("warnings = %q\nwant [%q]", e.report.Warnings, want)
 	}
-	wantNotes := []reportNote{{noteValueColumnNotInQuery, "checkout-events"}, {noteValueColumnNotInQuery, "orders"}}
-	if !slices.Equal(e.report.Notes, wantNotes) {
+	wantNotes := []reportNote{{Code: noteValueColumnNotInQuery, DataSource: "checkout-events"}, {Code: noteValueColumnNotInQuery, DataSource: "orders"}}
+	if !reflect.DeepEqual(e.report.Notes, wantNotes) {
 		t.Errorf("notes = %+v, want %+v", e.report.Notes, wantNotes)
 	}
 }
@@ -443,7 +444,7 @@ func TestPhase3_ExistingUnwrappedSource_WarnsWhatOverwriteWouldDo(t *testing.T) 
 			t.Errorf("warning %q does not contain %q", w, want)
 		}
 	}
-	if len(e.report.Notes) != 1 || e.report.Notes[0] != (reportNote{Code: noteExistsWithoutConstantKey, DataSource: "checkout-events"}) {
+	if len(e.report.Notes) != 1 || !reflect.DeepEqual(e.report.Notes[0], reportNote{Code: noteExistsWithoutConstantKey, DataSource: "checkout-events"}) {
 		t.Errorf("notes = %+v, want the source recorded", e.report.Notes)
 	}
 }
@@ -648,10 +649,11 @@ func TestDataSourcePatch_FallsBackWhenExistingColumnsAreGone(t *testing.T) {
 		"contexts": map[string]string{"user": "USER_ID"},
 		"columns":  []map[string]any{{"name": "TS", "type": "TIMESTAMP_NTZ"}, {"name": "USER_ID", "type": "TEXT"}, {"name": "LD_EVENT_KEY", "type": "TEXT"}},
 	}}
-	ops, notes, err := dataSourcePatch(existing, body, true)
+	res, err := dataSourcePatch(existing, body, true)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ops, notes := res.ops, res.changes
 	want := []launchdarkly.JSONPatchOp{
 		{Op: "remove", Path: "/tableName"},
 		{Op: "add", Path: "/sqlQuery", Value: "SELECT 1"},
@@ -676,7 +678,8 @@ func TestDataSourcePatch_FallsBackWhenExistingColumnsAreGone(t *testing.T) {
 
 	// No existing context column survives: the contexts are replaced whole.
 	existing["columnMappings"].(map[string]any)["contexts"] = map[string]any{"account": "ACCT"}
-	ops, _, _ = dataSourcePatch(existing, body, true)
+	res, _ = dataSourcePatch(existing, body, true)
+	ops = res.ops
 	last := ops[len(ops)-1]
 	if last.Op != "replace" || last.Path != "/columnMappings/contexts" {
 		t.Errorf("last op = %+v, want replace /columnMappings/contexts", last)
@@ -691,10 +694,11 @@ func TestDataSourcePatch_ConstantKeyOffKeepsKeyColumn(t *testing.T) {
 		"keyColumn": "EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]string{"user": "USER_ID"},
 		"columns": []map[string]any{{"name": "TS"}, {"name": "USER_ID"}, {"name": "EVENT_NAME"}, {"name": "EVENT_KEY"}},
 	}}
-	ops, _, err := dataSourcePatch(existing, body, false)
+	res, err := dataSourcePatch(existing, body, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ops := res.ops
 	found := false
 	for _, op := range ops {
 		if op.Path == "/columnMappings/keyColumn" {
@@ -709,8 +713,8 @@ func TestDataSourcePatch_ConstantKeyOffKeepsKeyColumn(t *testing.T) {
 	}
 
 	body["columnMappings"].(map[string]any)["columns"] = []map[string]any{{"name": "TS"}, {"name": "USER_ID"}, {"name": "EVENT_KEY"}}
-	ops, _, err = dataSourcePatch(existing, body, false)
-	if ops != nil || err == nil || err.Error() != `not updated: its key column "event_name" is not in the updated query; metrics on it would filter a different column. Keep that column in the Statsig SQL, or update the data source by hand` {
+	res, err = dataSourcePatch(existing, body, false)
+	if ops = res.ops; ops != nil || err == nil || err.Error() != `not updated: its key column "event_name" is not in the updated query; metrics on it would filter a different column. Keep that column in the Statsig SQL, or update the data source by hand` {
 		t.Errorf("ops=%v err=%v, want no ops and the key column refusal", ops, err)
 	}
 }
@@ -910,7 +914,8 @@ func TestDataSourcePatch_SwitchesTableSourceToSQL(t *testing.T) {
 	existing := map[string]any{"key": "k", "tableName": "DB.ORDERS", "columnMappings": map[string]any{"timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}}}
 	body := map[string]any{"key": "k", "sqlQuery": "SELECT 1", "columnMappings": map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS",
 		"columns": []map[string]any{{"name": "TS"}, {"name": "USER_ID"}, {"name": "LD_EVENT_KEY"}}}}
-	ops, _, _ := dataSourcePatch(existing, body, true)
+	res, _ := dataSourcePatch(existing, body, true)
+	ops := res.ops
 	want := []launchdarkly.JSONPatchOp{
 		{Op: "remove", Path: "/tableName"},
 		{Op: "add", Path: "/sqlQuery", Value: "SELECT 1"},
@@ -932,7 +937,7 @@ func TestWarehouseCmd_FlagsBound(t *testing.T) {
 		"statsig-key", "statsig-url", "statsig-export-file",
 		"ld-key", "ld-url", "ld-project", "ld-environment", "ld-maintainer",
 		"warehouse-type", "dry-run", "resume", "only",
-		"overwrite", "force-overwrite", "constant-event-key", "verbose", "no-color",
+		"overwrite", "force-overwrite", "update-mappings", "constant-event-key", "verbose", "no-color",
 	} {
 		if warehouseCmd.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s not registered on `warehouse`", name)
@@ -1038,7 +1043,7 @@ func TestPhase3_EditedWrapperIsKeptWithoutWarning(t *testing.T) {
 			if len(e.report.Warnings) != 0 || len(e.report.Errors) != 0 {
 				t.Errorf("warnings=%q errors=%q, want none", e.report.Warnings, e.report.Errors)
 			}
-			if len(e.report.Notes) != 1 || e.report.Notes[0] != (reportNote{Code: noteEditedConstantKey, DataSource: "checkout-events"}) {
+			if len(e.report.Notes) != 1 || !reflect.DeepEqual(e.report.Notes[0], reportNote{Code: noteEditedConstantKey, DataSource: "checkout-events"}) {
 				t.Errorf("notes = %+v", e.report.Notes)
 			}
 		})
@@ -1131,5 +1136,114 @@ func TestPhase3_ConstantKeyOffRefusesWhenKeyColumnIsGone(t *testing.T) {
 		if op.Path == "/columnMappings/keyColumn" {
 			t.Errorf("keyColumn changed to %v, want EVENT_NAME kept", op.Value)
 		}
+	}
+}
+
+// accountList is an unwrapped data source with an account context the new query does not return.
+const accountList = `{"items":[{"key":"checkout-events","sqlQuery":"SELECT * FROM analytics.events","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","contexts":{"user":"USER_ID","account":"ACCOUNT_ID"},"columns":[]}}]}`
+
+func runOverwrite(t *testing.T, f *fakeLD) *migrationEngine {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	srv := f.server()
+	t.Cleanup(srv.Close)
+	e := newPhase3Engine(t, srv.URL, false)
+	e.overwrite = true
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestPhase3_OverwriteRefusesToDropAContextKindBoundMetricsUse(t *testing.T) {
+	for _, units := range []string{`"analysisUnits":["user","account"]`, `"randomizationUnits":["account"]`} {
+		f := &fakeLD{t: t, list: accountList, metrics: `[{"key":"accounts-converted","eventKey":"checkout-events",` + units + `,"dataSource":{"key":"checkout-events"}}]`}
+		e := runOverwrite(t, f)
+		want := `Data source "Checkout Events": not updated: the updated query does not return the column of its context kind(s) "account", which bound metrics use as analysis or randomization units: accounts-converted (account). Keep the column in the Statsig SQL, or change those metrics' units in LaunchDarkly and refresh them on running experiments, then rerun`
+		if f.patchCount != 0 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+			t.Errorf("%s: patches=%d errors=%q\nwant %q", units, f.patchCount, e.report.Errors, want)
+		}
+	}
+
+	f := &fakeLD{t: t, list: accountList, metrics: `[{"key":"users-converted","eventKey":"checkout-events","analysisUnits":["user"],"dataSource":{"key":"checkout-events"}}]`}
+	e := runOverwrite(t, f)
+	want := `Data source "checkout-events" was updated, but the new query does not return all of its mapped columns: context account: ACCOUNT_ID → (none). Check its mappings in LaunchDarkly.`
+	if e.report.DataSources.Updated != 1 || len(e.report.Warnings) != 1 || e.report.Warnings[0] != want {
+		t.Errorf("report %+v warnings=%q\nwant %q", e.report.DataSources, e.report.Warnings, want)
+	}
+}
+
+func TestPhase3_OverwriteFallbackChecksColumnTypes(t *testing.T) {
+	cols := `{"name":"CREATED_AT","type":"TEXT"},{"name":"NOTE","type":"TEXT"},{"name":"USER_ID","type":"TEXT"},{"name":"EVENT_KEY","type":"TEXT"}`
+	list := `{"items":[{"key":"checkout-events","sqlQuery":"SELECT * FROM analytics.events","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","valueColumn":"AMT","contexts":{"user":"USER_ID"},"columns":[]}}]}`
+	source := func(e *migrationEngine) {
+		e.metricSources[0]["timestampColumn"] = "created_at"
+		e.metricSources[0]["customFieldMapping"] = []any{map[string]any{"fieldName": "value", "column": "note"}}
+	}
+
+	// The old timestamp column is gone too, and LaunchDarkly requires one in the column list.
+	f := &fakeLD{t: t, list: list, previewCols: cols}
+	e := runMappings(t, f, func(e *migrationEngine) { e.overwrite, e.updateMappings = true, false; source(e) })
+	want := `Data source "Checkout Events": not updated: its timestamp column "TS" is not in the updated query, and the Statsig source's "CREATED_AT" is TEXT, not a timestamp or date. Keep "TS" in the Statsig SQL, or correct the Statsig source's timestamp column, then rerun`
+	if f.patchCount != 0 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+		t.Errorf("patches=%d errors=%q\nwant %q", f.patchCount, e.report.Errors, want)
+	}
+
+	// A non-numeric value column is not used; with no bound reader the old one is removed.
+	f = &fakeLD{t: t, list: list, previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},` + cols}
+	e = runMappings(t, f, func(e *migrationEngine) { e.overwrite, e.updateMappings = true, false; source(e) })
+	if got := opLines(f.patches["checkout-events"]); !strings.Contains(got, "remove /columnMappings/valueColumn") || strings.Contains(got, "add /columnMappings/valueColumn") {
+		t.Errorf("ops:\n%s", got)
+	}
+	wantWarnings := []string{
+		`Data source "checkout-events" was updated, but the new query does not return all of its mapped columns: value column: AMT → (none). Check its mappings in LaunchDarkly.`,
+		`1 data source(s) did not take some mappings from the Statsig export, because the export's column has the wrong type: value "NOTE" (TEXT) on checkout-events. A timestamp column needs a timestamp or date type, and a value column a numeric one; correct the column in Statsig, or cast it in the query, then rerun.`,
+	}
+	if strings.Join(e.report.Warnings, "\n") != strings.Join(wantWarnings, "\n") || noteCodes(e.report.Notes) != noteExportColumnWrongType {
+		t.Errorf("warnings:\n%s\nwant:\n%s\nnotes=%+v", strings.Join(e.report.Warnings, "\n"), strings.Join(wantWarnings, "\n"), e.report.Notes)
+	}
+}
+
+// A ratio's denominator with no data source of its own reads the numerator's, so its
+// event name must hold the data source key too.
+func TestPhase3_OverwriteChecksInheritingDenominators(t *testing.T) {
+	f := &fakeLD{t: t, list: unwrappedList, metrics: `[
+		{"key":"per-visit","eventKey":"checkout-events","dataSource":{"key":"checkout-events"},"denominator":{"eventName":"visit","dataSource":{"key":"launchdarkly-hosted"}}},
+		{"key":"per-session","eventKey":"checkout-events","dataSource":{"key":"checkout-events"},"denominator":{"eventName":"session"}},
+		{"key":"elsewhere","eventKey":"x","dataSource":{"key":"orders"},"denominator":{"eventName":"y","dataSource":{"key":"launchdarkly-hosted"}}}]`}
+	e := runOverwrite(t, f)
+	if f.patchCount != 0 || len(e.report.Errors) != 1 || !strings.Contains(e.report.Errors[0], `2 metric(s) bound to it use an event key other than "checkout-events" and would match no rows after the update: per-session (denominator event name "session"), per-visit (denominator event name "visit")`) {
+		t.Errorf("patches=%d errors=%q", f.patchCount, e.report.Errors)
+	}
+}
+
+func TestBoundMetrics_NumeratorOrDenominator(t *testing.T) {
+	f := &fakeLD{t: t, metrics: `[
+		{"key":"num","dataSource":{"key":"ds"},"analysisUnits":["user"]},
+		{"key":"den","dataSource":{"key":"other"},"denominator":{"dataSource":{"key":"ds"}},"randomizationUnits":["account"]},
+		{"key":"hosted-den","dataSource":{"key":"ds"},"denominator":{"dataSource":{"key":"launchdarkly-hosted"}}},
+		{"key":"no-den-source","dataSource":{"key":"ds"},"denominator":{}},
+		{"key":"num-only","dataSource":{"key":"ds"},"denominator":{"dataSource":{"key":"other"}}},
+		{"key":"hosted-elsewhere","dataSource":{"key":"other"},"denominator":{"dataSource":{"key":"launchdarkly-hosted"}}}]`}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	bound, err := e.boundMetrics("ds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, b := range bound {
+		got = append(got, fmt.Sprintf("%s num=%v den=%v units=%v", b.key, b.num != nil, b.den != nil, b.units))
+	}
+	want := []string{
+		"den num=false den=true units=[account]",
+		"hosted-den num=true den=true units=[]",
+		"no-den-source num=true den=true units=[]",
+		"num num=true den=false units=[user]",
+		"num-only num=true den=false units=[]",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("bound:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
