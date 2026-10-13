@@ -404,7 +404,26 @@ func TestReconcileColumnMappings_StatsigValueColumnWins(t *testing.T) {
 	}
 	cm = map[string]any{"timestampColumn": "ts", "valueColumn": "amount"}
 	ReconcileColumnMappings(cm, map[string]any{"valueColumn": "QUANTITY"}, real)
-	if cm["valueColumn"] != "QUANTITY" {
-		t.Errorf("valueColumn = %v, want the preview's QUANTITY when Statsig's column is missing", cm["valueColumn"])
+	if v, present := cm["valueColumn"]; present {
+		t.Errorf("valueColumn = %v, want it absent when the query does not return Statsig's column", v)
+	}
+}
+
+func TestReconcileColumnMappings_IgnoresPreviewValueColumnGuess(t *testing.T) {
+	real := []map[string]any{{"name": "TS", "type": "TIMESTAMP_NTZ"}, {"name": "USER_ID", "type": "TEXT"}, {"name": "QUANTITY", "type": "NUMBER"}, {"name": "ORDER_TOTAL", "type": "NUMBER"}}
+	preview := map[string]any{"timestampColumn": "TS", "valueColumn": "QUANTITY"}
+	src := map[string]any{"name": "Checkout Events", "sql": "SELECT * FROM analytics.orders", "timestampColumn": "ts",
+		"idTypeMapping": []any{map[string]any{"statsigUnitID": "userID", "column": "user_id"}}}
+	cm := MapMetricSourceToDataSource(src, "production", "snowflake-experimentation", "")["columnMappings"].(map[string]any)
+	ReconcileColumnMappings(cm, preview, real)
+	if v, present := cm["valueColumn"]; present {
+		t.Errorf("valueColumn = %v, want it absent: Statsig maps none, and the preview's is a guess", v)
+	}
+
+	src["customFieldMapping"] = []any{map[string]any{"fieldName": "amount", "column": "order_total"}}
+	cm = MapMetricSourceToDataSource(src, "production", "snowflake-experimentation", "")["columnMappings"].(map[string]any)
+	ReconcileColumnMappings(cm, preview, real)
+	if cm["valueColumn"] != "ORDER_TOTAL" {
+		t.Errorf("valueColumn = %v, want Statsig's order_total in the preview's case", cm["valueColumn"])
 	}
 }

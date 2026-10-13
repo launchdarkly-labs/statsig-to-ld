@@ -156,7 +156,7 @@ func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey, 
 		if strings.Contains(fieldName, "key") || strings.Contains(fieldName, "event") {
 			columnMappings["keyColumn"] = colVal
 		}
-		if strings.Contains(fieldName, "value") || strings.Contains(fieldName, "amount") {
+		if colVal != "" && (strings.Contains(fieldName, "value") || strings.Contains(fieldName, "amount")) {
 			columnMappings["valueColumn"] = colVal
 		}
 	}
@@ -216,15 +216,13 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
-	vcMapped := false
-	if v, ok := cm["valueColumn"].(string); ok && v != "" {
+	// Keep Statsig's value column only if the query returns it; the preview's is just a guess.
+	if v, ok := cm["valueColumn"].(string); ok {
 		if real, found := actual[strings.ToLower(v)]; found {
 			cm["valueColumn"] = real
-			vcMapped = true
+		} else {
+			delete(cm, "valueColumn")
 		}
-	}
-	if vc := j.GetStr(preview, "valueColumn"); vc != "" && !vcMapped {
-		cm["valueColumn"] = vc
 	}
 
 	if contexts, ok := cm["contexts"].(map[string]string); ok {

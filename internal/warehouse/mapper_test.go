@@ -58,3 +58,20 @@ func TestMapMetricSourceToDataSource_Maintainer(t *testing.T) {
 		t.Errorf("maintainerId should be absent when unset, got %v", bare["maintainerId"])
 	}
 }
+
+func TestMapMetricSourceToDataSource_ValueColumnOnlyWhenMapped(t *testing.T) {
+	src := map[string]any{"name": "Orders", "sql": "SELECT 1"}
+	for _, fields := range [][]any{nil, {map[string]any{"fieldName": "value"}}} {
+		src["customFieldMapping"] = fields
+		cm := MapMetricSourceToDataSource(src, "e", "k", "")["columnMappings"].(map[string]any)
+		if v, present := cm["valueColumn"]; present {
+			t.Errorf("fields %v: valueColumn = %q, want it absent", fields, v)
+		}
+	}
+
+	src["customFieldMapping"] = []any{map[string]any{"fieldName": "amount", "column": "order_total"}}
+	cm := MapMetricSourceToDataSource(src, "e", "k", "")["columnMappings"].(map[string]any)
+	if cm["valueColumn"] != "order_total" {
+		t.Errorf("valueColumn = %v, want order_total", cm["valueColumn"])
+	}
+}
