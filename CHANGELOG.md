@@ -111,7 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints one line naming the data sources whose query does not return their Statsig value column (note code
   `statsig_value_column_not_in_query`). `--overwrite` no longer puts the guess in place of an existing value column
   the new query lacks, and refuses a data source whose bound numeric metrics read that column without a value column
-  of their own, naming them. Numeric metrics then take their value column from the metric, which `metrics convert`
+  of their own, naming them (a `--dry-run`, which does not run the preview, still lists it as "would update"). Numeric
+  metrics then take their value column from the metric, which `metrics convert`
   sets on constant-key data sources; on one created with `--constant-event-key=false`, a numeric metric needs a value
   column set by hand.
 

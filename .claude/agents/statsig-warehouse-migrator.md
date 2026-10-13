@@ -133,7 +133,7 @@ The tool loads `migration_state.json` and skips already-created data sources / c
 | `--ld-url` | LD API base URL (for EU/FedRAMP) |
 | `--ld-project` | LaunchDarkly project key (required) |
 | `--ld-environment` | LaunchDarkly environment key (required) |
-| `--dry-run` | Preview without writing to LD; still writes `source-mapping.json` and `data-source-bodies.json` for review. With `--ld-key` and `--ld-project` it lists each source as would create / update / skip / refuse |
+| `--dry-run` | Preview without writing to LD; still writes `source-mapping.json` and `data-source-bodies.json` for review. With `--ld-key` and `--ld-project` it lists each source as would create / update / skip / refuse. "Would update" is provisional: the real run previews the new query first and can still refuse |
 | `--resume` | Resume from `migration_state.json` |
 | `--only` | Run only `warehouse` (Phase 2) or `data-sources` (Phase 3) |
 | `--overwrite` | Update existing LD data sources that lack the constant event key in place: query, key column, and column list; timestamp, value, and context mappings are kept while the new query returns them. With the constant event key on (the default), refuses a data source whose bound metrics use other event keys; either way, refuses one whose value column the new query drops while bound numeric metrics read it; with `--constant-event-key=false` it keeps the existing key column and refuses when the new query does not return it |
