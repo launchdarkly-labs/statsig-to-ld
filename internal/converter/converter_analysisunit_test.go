@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 )
 
 // Warehouse-native metrics usually omit unitTypes on the metric itself; the
@@ -129,5 +131,18 @@ func assertNoWarning(t *testing.T, warnings []string, substr string) {
 		if strings.Contains(w, substr) {
 			t.Errorf("unexpected warning containing %q: %v", substr, warnings)
 		}
+	}
+}
+
+// warehouse names data source contexts with the same rule, so metrics find their units.
+func TestMapUnitTypes_DefaultIsTheSharedContextKind(t *testing.T) {
+	ids := []string{"userID", "USERID", "anonymousUserID", "user_id", "companyID", "stableID"}
+	units, _ := mapUnitTypes(ids, Options{})
+	var want []string
+	for _, id := range ids {
+		want = appendUnique(want, statsig.ContextKind(id))
+	}
+	if !slices.Equal(units, want) || strings.Join(units, ",") != "user,anonymoususerid,user_id,companyid,stableid" {
+		t.Errorf("units = %v, want %v", units, want)
 	}
 }
