@@ -15,6 +15,7 @@ import (
 
 // --update-mappings moves an existing data source's timestamp, value, and context
 // mappings to the Statsig export's, leaving its query, key column, and columns alone.
+// --remove-unmapped-contexts also removes the context kinds the export does not map.
 
 const (
 	noteMappingsUpdated        = "mappings_updated"
@@ -22,6 +23,7 @@ const (
 	noteExportColumnNotInQuery = "export_column_not_in_query"
 	noteExportColumnWrongType  = "export_column_wrong_type"
 	noteContextKindNotInExport = "context_kind_not_in_export"
+	noteContextKindKept        = "context_kind_kept"
 )
 
 // mappingPlan is the --update-mappings part of a plan for an existing data source.
@@ -30,7 +32,10 @@ type mappingPlan struct {
 	// readers are bound metrics that read the value column the export does not map,
 	// so it is kept.
 	readers []string
-	ops     []launchdarkly.JSONPatchOp
+	// --remove-unmapped-contexts splits the unmapped kinds into remove and keepKinds,
+	// which bound metrics use; kindUsers name those metrics as "metric (kind)".
+	remove, keepKinds, kindUsers []string
+	ops                          []launchdarkly.JSONPatchOp
 	// changes read "field: old → new". With --overwrite, they and issues are an
 	// estimate until the preview gives the new column list.
 	changes []string
@@ -48,7 +53,7 @@ type mappingDiff struct {
 	changes []string
 	// missing and wrongType name export mappings left as they are, as `timestamp "TS"`.
 	missing, wrongType []string
-	// keptKinds are context kinds the export does not map; they are never removed.
+	// keptKinds are context kinds the export does not map and that stay.
 	keptKinds []string
 	// dropsValue: the export maps no value column, and the data source has one.
 	dropsValue bool
@@ -57,7 +62,8 @@ type mappingDiff struct {
 	contexts         map[string]string
 }
 
-func diffMappings(old map[string]any, t warehouse.ExportMappings, cols columnSet, keepValue bool) mappingDiff {
+// diffMappings removes the context kinds in remove that the export does not map.
+func diffMappings(old map[string]any, t warehouse.ExportMappings, cols columnSet, keepValue bool, remove []string) mappingDiff {
 	d := mappingDiff{
 		timestamp: jsonutil.GetStr(old, "timestampColumn"),
 		value:     jsonutil.GetStr(old, "valueColumn"),
@@ -110,11 +116,12 @@ func diffMappings(old map[string]any, t warehouse.ExportMappings, cols columnSet
 	if t.Contexts == nil {
 		return d
 	}
-	// Kinds only gain or move columns: one the export does not name may have been fixed by hand.
+	// Unless remove names them, kinds only gain or move columns: one the export does not name may have been fixed by hand.
 	final, n := maps.Clone(d.contexts), len(d.missing)
+	var unmapped []string
 	for _, kind := range slices.Sorted(maps.Keys(d.contexts)) {
 		if col, wanted := t.Contexts[kind]; !wanted {
-			d.keptKinds = append(d.keptKinds, kind)
+			unmapped = append(unmapped, kind)
 		} else if real, ok := resolve("context "+kind, col, nil); ok {
 			final[kind] = real
 		}
@@ -129,10 +136,30 @@ func diffMappings(old map[string]any, t warehouse.ExportMappings, cols columnSet
 		}
 	}
 	slices.Sort(d.missing[n:])
+	removed := slices.DeleteFunc(slices.Clone(unmapped), func(kind string) bool { return !slices.Contains(remove, kind) })
+	// LaunchDarkly requires a context mapping: remove nothing unless a kind whose column cols list stays.
+	if !slices.ContainsFunc(slices.Collect(maps.Keys(final)), func(kind string) bool {
+		_, listed := cols.find(final[kind])
+		return listed && !slices.Contains(removed, kind)
+	}) {
+		removed = nil
+	}
+	for _, kind := range unmapped {
+		if slices.Contains(removed, kind) {
+			delete(final, kind)
+		} else {
+			d.keptKinds = append(d.keptKinds, kind)
+		}
+	}
 	var ctxOps []launchdarkly.JSONPatchOp
-	for _, kind := range slices.Sorted(maps.Keys(final)) {
-		if from, had := d.contexts[kind]; !had || final[kind] != from {
-			put(&ctxOps, "contexts/"+launchdarkly.EscapeJSONPointer(kind), "context "+kind, from, had, final[kind])
+	for _, kind := range slices.Sorted(maps.Keys(union(d.contexts, final))) {
+		path := "contexts/" + launchdarkly.EscapeJSONPointer(kind)
+		from, had := d.contexts[kind]
+		if to, keep := final[kind]; !keep {
+			ctxOps = append(ctxOps, launchdarkly.JSONPatchOp{Op: "remove", Path: "/columnMappings/" + path})
+			d.changes = append(d.changes, mappingChange("context "+kind, from, ""))
+		} else if !had || to != from {
+			put(&ctxOps, path, "context "+kind, from, had, to)
 		}
 	}
 	// A per-kind add needs the contexts object to exist.
@@ -155,7 +182,11 @@ func orNone(s string) string {
 	return s
 }
 
-func mappingIssues(key string, d mappingDiff, readers []string) []sourceIssue {
+func mappingIssues(key string, d mappingDiff, mp *mappingPlan) []sourceIssue {
+	var readers, used, users []string
+	if mp != nil {
+		readers, used, users = mp.readers, mp.keepKinds, mp.kindUsers
+	}
 	var issues []sourceIssue
 	add := func(code string, details []string) {
 		if len(details) > 0 {
@@ -167,8 +198,9 @@ func mappingIssues(key string, d mappingDiff, readers []string) []sourceIssue {
 	}
 	add(noteExportColumnNotInQuery, d.missing)
 	add(noteExportColumnWrongType, d.wrongType)
-	if len(d.keptKinds) > 0 {
-		add(noteContextKindNotInExport, []string{quoteAll(d.keptKinds)})
+	add(noteContextKindKept, users)
+	if kept := slices.DeleteFunc(slices.Clone(d.keptKinds), func(k string) bool { return slices.Contains(used, k) }); len(kept) > 0 {
+		add(noteContextKindNotInExport, []string{quoteAll(kept)})
 	}
 	return issues
 }
@@ -211,18 +243,23 @@ func (e *migrationEngine) planMappings(plan dataSourcePlan, ds, source map[strin
 	if overwrite {
 		cols = approxColumns(old, mp.target)
 	}
-	d := diffMappings(old, mp.target, cols, false)
-	if d.dropsValue {
+	d := diffMappings(old, mp.target, cols, false, nil)
+	if removeKinds := e.removeUnmapped && len(d.keptKinds) > 0; d.dropsValue || removeKinds {
 		bound, err := e.boundMetrics(key)
 		if err != nil {
 			return plan.refuse("could not check bound metrics", boundMetricsUnchecked(err))
 		}
-		if mp.readers = valueReaders(bound); len(mp.readers) > 0 {
-			d = diffMappings(old, mp.target, cols, true)
+		if d.dropsValue {
+			mp.readers = valueReaders(bound)
 		}
+		if removeKinds {
+			mp.kindUsers, mp.keepKinds = kindUsers(bound, d.keptKinds)
+			mp.remove = slices.DeleteFunc(slices.Clone(d.keptKinds), func(k string) bool { return slices.Contains(mp.keepKinds, k) })
+		}
+		d = diffMappings(old, mp.target, cols, len(mp.readers) > 0, mp.remove)
 	}
 	mp.changes = d.changes
-	mp.issues = mappingIssues(key, d, mp.readers)
+	mp.issues = mappingIssues(key, d, mp)
 	plan.mappings = mp
 	if overwrite {
 		return plan
@@ -291,6 +328,7 @@ func issueSummaries(issues []sourceIssue) []string {
 		{noteValueColumnKept, "%d data source(s) kept a value column the Statsig export does not map, because bound numeric metrics with no value column of their own read it: %s. Set those metrics' value column in LaunchDarkly and refresh them on running experiments, then rerun to remove it."},
 		{noteExportColumnNotInQuery, "%d data source(s) did not take some mappings from the Statsig export, because their columns do not include the export's: %s. Correct the columns in Statsig, or add them to the data source's query, then rerun."},
 		{noteExportColumnWrongType, "%d data source(s) did not take some mappings from the Statsig export, because the export's column has the wrong type: %s. A timestamp column needs a timestamp or date type, and a value column a numeric one; correct the column in Statsig, or cast it in the query, then rerun."},
+		{noteContextKindKept, "%d data source(s) kept context kinds the Statsig export does not map, because bound metrics use them as analysis or randomization units: %s. Change those metrics' units in LaunchDarkly and refresh them on running experiments, then rerun to remove them."},
 	} {
 		if entries := byCode[s.code]; len(entries) > 0 {
 			lines = append(lines, fmt.Sprintf(s.text, len(entries), strings.Join(entries, "; ")))
@@ -308,7 +346,7 @@ func (e *migrationEngine) overwritePatch(existing, body map[string]any, plan dat
 	if plan.mappings == nil || old == nil {
 		return dataSourcePatch(existing, body, e.constantEventKey)
 	}
-	d := diffMappings(old, plan.mappings.target, newColumnSet(jsonutil.GetMap(body, "columnMappings")["columns"]), len(plan.mappings.readers) > 0)
+	d := diffMappings(old, plan.mappings.target, newColumnSet(jsonutil.GetMap(body, "columnMappings")["columns"]), len(plan.mappings.readers) > 0, plan.mappings.remove)
 	cm := maps.Clone(old)
 	cm["timestampColumn"] = d.timestamp
 	cm["contexts"] = d.contexts

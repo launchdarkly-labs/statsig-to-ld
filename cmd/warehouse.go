@@ -42,6 +42,7 @@ var (
 	whFlagConstantEventKey  bool
 	whFlagForceOverwrite    bool
 	whFlagUpdateMappings    bool
+	whFlagRemoveUnmapped    bool
 )
 
 var warehouseCmd = &cobra.Command{
@@ -117,6 +118,7 @@ func init() {
 	warehouseCmd.Flags().BoolVar(&whFlagOverwrite, "overwrite", false, "Update existing LD metric data sources that lack the constant event key in place: their query, key column, and column list (timestamp, value, and context mappings are kept while the new query returns them). Refuses a data source whose bound metrics use other event keys, whose value column or context kind columns the new query drops while bound metrics use them, or, with --constant-event-key=false, whose key column the new query no longer returns")
 	warehouseCmd.Flags().BoolVar(&whFlagForceOverwrite, "force-overwrite", false, "Like --overwrite, but also updates data sources whose bound metrics use other event keys and would match no rows afterwards; the run still lists those metrics")
 	warehouseCmd.Flags().BoolVar(&whFlagUpdateMappings, "update-mappings", false, "Correct existing LD metric data sources' timestamp, value, and context mappings from the Statsig export")
+	warehouseCmd.Flags().BoolVar(&whFlagRemoveUnmapped, "remove-unmapped-contexts", false, "With --update-mappings, also remove context kinds the Statsig export does not map, except those bound metrics use as analysis or randomization units")
 	warehouseCmd.Flags().BoolVar(&whFlagVerbose, "verbose", false, "Show detailed API request/response info")
 	warehouseCmd.Flags().BoolVar(&whFlagNoColor, "no-color", false, "Disable colored output")
 	warehouseCmd.Flags().BoolVar(&whFlagConstantEventKey, "constant-event-key", true, "Wrap each source's SQL to add a constant event-key column (value = the data source key) and use it as the key column, so migrated metrics can use the data source key as their event key")
@@ -178,6 +180,7 @@ type migrationEngine struct {
 	constantEventKey bool
 	forceOverwrite   bool
 	updateMappings   bool
+	removeUnmapped   bool
 	ldReadable       bool
 
 	// The project's metrics, read once per run by projectMetrics.
@@ -225,6 +228,9 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 	if err := launchdarkly.ValidateMaintainerFlag(whFlagLDMaintainer); err != nil {
 		return err
 	}
+	if whFlagRemoveUnmapped && !whFlagUpdateMappings {
+		return fmt.Errorf("--remove-unmapped-contexts requires --update-mappings")
+	}
 	if !whFlagDryRun {
 		if whFlagLDKey == "" {
 			return fmt.Errorf("--ld-key is required (or set LD_API_KEY)")
@@ -263,6 +269,7 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 		constantEventKey: whFlagConstantEventKey,
 		forceOverwrite:   whFlagForceOverwrite,
 		updateMappings:   whFlagUpdateMappings,
+		removeUnmapped:   whFlagRemoveUnmapped,
 		ldReadable:       whFlagLDKey != "" && whFlagLDProject != "",
 	}
 
@@ -1101,9 +1108,9 @@ func (e *migrationEngine) updateDataSource(existing, body map[string]any, name s
 	if len(plan.stale) > 0 {
 		e.warn(fmt.Sprintf("Data source %q was updated with --force-overwrite. Until their event key is set to %q in LaunchDarkly, these bound metrics match no rows: %s.", key, key, strings.Join(plan.stale, ", ")))
 	}
-	d, readers := mappingDiff{}, []string(nil)
+	d, mp := mappingDiff{}, (*mappingPlan)(nil)
 	if res.mapped != nil {
-		d, readers = *res.mapped, plan.mappings.readers
+		d, mp = *res.mapped, plan.mappings
 		if plan.mappings.target.Value != "" && jsonutil.GetStr(cm, "valueColumn") == "" {
 			// Already reported as statsig_value_column_not_in_query.
 			d.missing = slices.DeleteFunc(d.missing, func(m string) bool { return strings.HasPrefix(m, "value ") })
@@ -1114,7 +1121,7 @@ func (e *migrationEngine) updateDataSource(existing, body map[string]any, name s
 			d.wrongType = append(d.wrongType, w)
 		}
 	}
-	e.finishMappings(key, d.changes, mappingIssues(key, d, readers))
+	e.finishMappings(key, d.changes, mappingIssues(key, d, mp))
 }
 
 // patchPreconditions returns "test" ops so LaunchDarkly applies the patch only if the

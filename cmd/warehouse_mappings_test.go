@@ -396,7 +396,7 @@ func TestUpdateMappings_DryRunWithOverwriteEstimatesTheChanges(t *testing.T) {
 
 func TestDiffMappings_EscapesContextKinds(t *testing.T) {
 	old := map[string]any{"timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}}
-	d := diffMappings(old, warehouse.ExportMappings{Contexts: map[string]string{"user": "USER_ID", "a/b~c": "x"}}, newColumnSet([]any{map[string]any{"name": "USER_ID"}, map[string]any{"name": "X"}}), false)
+	d := diffMappings(old, warehouse.ExportMappings{Contexts: map[string]string{"user": "USER_ID", "a/b~c": "x"}}, newColumnSet([]any{map[string]any{"name": "USER_ID"}, map[string]any{"name": "X"}}), false, nil)
 	if got := opLines(d.ops); got != `add /columnMappings/contexts/a~1b~0c "X"` {
 		t.Errorf("ops = %q", got)
 	}
@@ -610,7 +610,7 @@ func TestUpdateMappings_ChecksColumnTypes(t *testing.T) {
 func TestDiffMappings_AddsContextsWhenNoneAreListed(t *testing.T) {
 	cols := newColumnSet(typedCols([2]string{"UID", "TEXT"}))
 	for _, old := range []map[string]any{{"timestampColumn": "TS"}, {"timestampColumn": "TS", "contexts": nil}} {
-		d := diffMappings(old, warehouse.ExportMappings{Contexts: map[string]string{"user": "uid"}}, cols, false)
+		d := diffMappings(old, warehouse.ExportMappings{Contexts: map[string]string{"user": "uid"}}, cols, false, nil)
 		if got := opLines(d.ops); got != `add /columnMappings/contexts {"user":"UID"}` || strings.Join(d.changes, "; ") != "context user: (none) → UID" {
 			t.Errorf("ops = %q changes = %q", got, d.changes)
 		}
@@ -675,5 +675,174 @@ func TestUpdateMappings_RefusalKeepsTheNoteAndWarning(t *testing.T) {
 	e = runMappings(t, f, nil)
 	if e.report.DataSources.Updated != 1 || len(e.report.Warnings) != 1 || !strings.Contains(e.report.Warnings[0], "kept its query, but its Statsig SQL has changed") {
 		t.Errorf("report %+v warnings=%q", e.report.DataSources, e.report.Warnings)
+	}
+}
+
+func unmappedKindsList(t *testing.T) string {
+	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "CREATED_AT", "valueColumn": "ORDER_TOTAL",
+		"contexts": map[string]any{"user": "UID", "tenantid": "TENANT_ID", "deviceid": "DEVICE_ID", "sessionid": "SESSION_ID", "storeid": "STORE"},
+		"columns":  append(mappingColumns(), typedCols([2]string{"STORE", "TEXT"}, [2]string{"STORE_ID", "TEXT"}, [2]string{"TENANT_ID", "TEXT"}, [2]string{"DEVICE_ID", "TEXT"}, [2]string{"SESSION_ID", "TEXT"})...)}
+	return dsList(t, wantCheckoutSQL, cm)
+}
+
+func storeExport(e *migrationEngine) {
+	e.metricSources[0]["idTypeMapping"] = []any{
+		map[string]any{"statsigUnitID": "userID", "column": "uid"},
+		map[string]any{"statsigUnitID": "storeID", "column": "store_id"},
+	}
+}
+
+func TestUpdateMappings_RemovesUnmappedContextKindsWhenAsked(t *testing.T) {
+	metrics := `[{"key":"tenant-retention","analysisUnits":["tenantid"],"dataSource":{"key":"checkout-events"}},
+		{"key":"checkouts","analysisUnits":["user"],"randomizationUnits":["user"],"dataSource":{"key":"checkout-events"}}]`
+	f := &fakeLD{t: t, list: unmappedKindsList(t), metrics: metrics}
+	e := runMappings(t, f, func(e *migrationEngine) {
+		e.removeUnmapped = true
+		storeExport(e)
+	})
+	want := `test /sqlQuery
+test /columnMappings
+remove /columnMappings/contexts/deviceid
+remove /columnMappings/contexts/sessionid
+replace /columnMappings/contexts/storeid "STORE_ID"`
+	if got := opLines(f.patches["checkout-events"]); got != want || e.report.DataSources.Updated != 1 {
+		t.Errorf("ops:\n%s\nwant:\n%s\nreport %+v errors=%q", got, want, e.report.DataSources, e.report.Errors)
+	}
+	if got := strings.Join(e.report.Notes[0].Changes, "; "); got != "context deviceid: DEVICE_ID → (none); context sessionid: SESSION_ID → (none); context storeid: STORE → STORE_ID" {
+		t.Errorf("changes = %q", got)
+	}
+	wantWarn := `1 data source(s) kept context kinds the Statsig export does not map, because bound metrics use them as analysis or randomization units: tenant-retention (tenantid) on checkout-events. Change those metrics' units in LaunchDarkly and refresh them on running experiments, then rerun to remove them.`
+	if len(e.report.Warnings) != 1 || e.report.Warnings[0] != wantWarn {
+		t.Errorf("warnings = %q\nwant %q", e.report.Warnings, wantWarn)
+	}
+	if codes := noteCodes(e.report.Notes); codes != "mappings_updated context_kind_kept" {
+		t.Errorf("note codes = %q", codes)
+	}
+
+	// Without the flag, the same kinds are kept and the metrics are not read.
+	f = &fakeLD{t: t, list: unmappedKindsList(t), metrics: metrics}
+	e = runMappings(t, f, storeExport)
+	if got := opLines(f.patches["checkout-events"]); got != "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/contexts/storeid \"STORE_ID\"" || f.metricsReads != 0 {
+		t.Errorf("ops without the flag:\n%s\nmetricsReads=%d", got, f.metricsReads)
+	}
+	if codes := noteCodes(e.report.Notes); codes != "mappings_updated context_kind_not_in_export" || len(e.report.Warnings) != 0 {
+		t.Errorf("note codes = %q warnings=%q", codes, e.report.Warnings)
+	}
+}
+
+func TestUpdateMappings_RemovalFailsClosedWhenMetricsCannotBeRead(t *testing.T) {
+	f := &fakeLD{t: t, list: unmappedKindsList(t), metricsStatus: http.StatusForbidden}
+	e := runMappings(t, f, func(e *migrationEngine) {
+		e.removeUnmapped = true
+		storeExport(e)
+	})
+	if f.patchCount != 0 || e.report.DataSources.Failed != 1 || !strings.Contains(e.report.Errors[0], "not updated, because its bound metrics could not be checked") {
+		t.Errorf("patches=%d report %+v errors=%q, want a refusal", f.patchCount, e.report.DataSources, e.report.Errors)
+	}
+}
+
+// LaunchDarkly requires a context mapping, so the last kind stays when no export kind resolves.
+func TestUpdateMappings_RemovalKeepsTheLastContextKind(t *testing.T) {
+	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "CREATED_AT", "valueColumn": "ORDER_TOTAL",
+		"contexts": map[string]any{"tenantid": "ACCOUNT_ID"}}
+	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm), metrics: `[]`}
+	e := runMappings(t, f, func(e *migrationEngine) {
+		e.removeUnmapped = true
+		e.metricSources[0]["idTypeMapping"] = []any{map[string]any{"statsigUnitID": "userID", "column": "user_key"}}
+	})
+	if f.patchCount != 0 || e.report.DataSources.Skipped != 1 {
+		t.Errorf("patches=%d report %+v, want a skip", f.patchCount, e.report.DataSources)
+	}
+	if codes := noteCodes(e.report.Notes); codes != "export_column_not_in_query context_kind_not_in_export" {
+		t.Errorf("note codes = %q", codes)
+	}
+}
+
+func TestUpdateMappings_WithOverwriteRemovesUnmappedContextKinds(t *testing.T) {
+	cm := map[string]any{"keyColumn": "EVENT_KEY", "timestampColumn": "TS",
+		"contexts": map[string]any{"user": "USER_ID", "tenantid": "TENANT_ID"}, "columns": []any{}}
+	f := &fakeLD{t: t, list: dsList(t, "SELECT * FROM analytics.events", cm), metrics: `[]`,
+		previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"CREATED_AT","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"UID","type":"TEXT"},{"name":"ACCOUNT_ID","type":"TEXT"},{"name":"TENANT_ID","type":"TEXT"},{"name":"ORDER_TOTAL","type":"NUMBER"},{"name":"EVENT_KEY","type":"TEXT"}`}
+	e := runMappings(t, f, func(e *migrationEngine) { e.overwrite, e.removeUnmapped = true, true })
+	var paths []string
+	for _, op := range f.patches["checkout-events"] {
+		paths = append(paths, op.Op+" "+op.Path)
+	}
+	want := []string{"test /sqlQuery", "test /columnMappings", "add /sqlQuery", "add /columnMappings/keyColumn", "replace /columnMappings/columns",
+		"replace /columnMappings/timestampColumn", "add /columnMappings/valueColumn", "add /columnMappings/contexts/account",
+		"remove /columnMappings/contexts/tenantid", "replace /columnMappings/contexts/user"}
+	if strings.Join(paths, "\n") != strings.Join(want, "\n") || e.report.DataSources.Updated != 1 {
+		t.Fatalf("ops:\n%s\nwant:\n%s\nreport %+v errors=%q", strings.Join(paths, "\n"), strings.Join(want, "\n"), e.report.DataSources, e.report.Errors)
+	}
+	if got := strings.Join(e.report.Notes[0].Changes, "; "); !strings.Contains(got, "context tenantid: TENANT_ID → (none)") {
+		t.Errorf("changes = %q", got)
+	}
+
+	f = &fakeLD{t: t, list: f.list, previewCols: f.previewCols, metrics: `[{"key":"tenant-retention","analysisUnits":["tenantid"],"eventKey":"checkout-events","dataSource":{"key":"checkout-events"}}]`}
+	e = runMappings(t, f, func(e *migrationEngine) { e.overwrite, e.removeUnmapped = true, true })
+	if got := opLines(f.patches["checkout-events"]); strings.Contains(got, "contexts/tenantid") || e.report.DataSources.Updated != 1 || len(e.report.Warnings) != 1 ||
+		!strings.HasPrefix(e.report.Warnings[0], "1 data source(s) kept context kinds") {
+		t.Errorf("ops:\n%s\nreport %+v warnings=%q errors=%q, want tenantid kept and named", got, e.report.DataSources, e.report.Warnings, e.report.Errors)
+	}
+}
+
+// A kind kept only because the new query returns its column keeps the data source valid.
+func TestUpdateMappings_WithOverwriteKeepsAKindWhoseColumnTheQueryReturns(t *testing.T) {
+	cm := map[string]any{"keyColumn": "EVENT_KEY", "timestampColumn": "TS",
+		"contexts": map[string]any{"user": "USER_ID", "deviceid": "DEVICE_ID"}, "columns": []any{}}
+	f := &fakeLD{t: t, list: dsList(t, "SELECT * FROM analytics.events", cm), metrics: `[]`,
+		previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"CREATED_AT","type":"TIMESTAMP_NTZ"},{"name":"DEVICE_ID","type":"TEXT"},{"name":"EVENT_KEY","type":"TEXT"}`}
+	e := runMappings(t, f, func(e *migrationEngine) {
+		e.overwrite, e.removeUnmapped = true, true
+		e.metricSources[0]["idTypeMapping"] = []any{map[string]any{"statsigUnitID": "userID", "column": "uid"}}
+	})
+	got := opLines(f.patches["checkout-events"])
+	if !strings.Contains(got, "remove /columnMappings/contexts/user") || strings.Contains(got, "contexts/deviceid") || strings.Contains(got, "replace /columnMappings/contexts ") {
+		t.Errorf("ops:\n%s\nwant user removed and deviceid kept", got)
+	}
+	if e.report.DataSources.Updated != 1 {
+		t.Errorf("report %+v errors=%q", e.report.DataSources, e.report.Errors)
+	}
+}
+
+func TestUpdateMappings_RemovalReadsNoMetricsWhenEveryKindIsMapped(t *testing.T) {
+	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}}
+	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm), metrics: `[]`}
+	e := runMappings(t, f, func(e *migrationEngine) { e.removeUnmapped = true })
+	if f.metricsReads != 0 || e.report.DataSources.Updated != 1 {
+		t.Errorf("metricsReads=%d report %+v, want an update with no metrics read", f.metricsReads, e.report.DataSources)
+	}
+}
+
+func TestUpdateMappings_DryRunListsRemovedContextKinds(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, list: unmappedKindsList(t), metrics: `[]`}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable, e.updateMappings, e.removeUnmapped = true, true, true, true
+	e.metricSources = []map[string]any{mappingSource()}
+	storeExport(e)
+	l := e.dryRunDataSources("snowflake")
+	want := "Checkout Events (query): would update mappings\n        context deviceid: DEVICE_ID → (none)\n        context sessionid: SESSION_ID → (none)\n        context storeid: STORE → STORE_ID\n        context tenantid: TENANT_ID → (none)"
+	if len(l.lines) != 1 || l.lines[0] != want || f.patchCount != 0 {
+		t.Errorf("lines = %q\nwant %q\npatches=%d", l.lines, want, f.patchCount)
+	}
+}
+
+func TestDiffMappings_RemovesOnlyUnmappedKinds(t *testing.T) {
+	old := map[string]any{"timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID", "a/b": "A", "c": "C"}}
+	cols := newColumnSet([]any{map[string]any{"name": "USER_ID"}, map[string]any{"name": "A"}, map[string]any{"name": "C"}})
+	d := diffMappings(old, warehouse.ExportMappings{Contexts: map[string]string{"user": "USER_ID"}}, cols, false, []string{"a/b", "user"})
+	if got := opLines(d.ops); got != "remove /columnMappings/contexts/a~1b" || fmt.Sprint(d.keptKinds) != "[c]" || fmt.Sprint(d.contexts) != "map[c:C user:USER_ID]" {
+		t.Errorf("ops = %q keptKinds=%v contexts=%v", got, d.keptKinds, d.contexts)
+	}
+}
+
+func TestWarehouse_RemoveUnmappedContextsNeedsUpdateMappings(t *testing.T) {
+	whFlagRemoveUnmapped, whFlagStatsigExportFile = true, "export.json"
+	t.Cleanup(func() { whFlagRemoveUnmapped, whFlagStatsigExportFile = false, "" })
+	if err := runWarehouse(warehouseCmd, nil); err == nil || err.Error() != "--remove-unmapped-contexts requires --update-mappings" {
+		t.Errorf("err = %v", err)
 	}
 }
