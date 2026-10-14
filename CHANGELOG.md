@@ -30,25 +30,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `warehouse`: `--update-mappings` corrects the timestamp, value, and context mappings of existing metric data
   sources in place from the Statsig export, keeping their keys, queries, key columns, column lists, and bound
   metrics, on data sources with or without the constant event key. Each mapping the export defines itself (its
-  timestamp column, its id-type mappings, and a value column only when it names one) is matched case-insensitively
-  to the data source's listed columns, and only fields that differ are patched, after the same `test` ops as
-  `--overwrite`; a data source that already matches gets no PATCH. Context kinds are only added or moved to another
-  column, never removed: a kind the export does not map, such as one renamed by hand in LaunchDarkly, is kept (note
-  code `context_kind_not_in_export`), and an export kind is added even when another kind maps the same column. A
-  mapping is left as it is when the data source's columns do not include the export's column
-  (`export_column_not_in_query`), when the column's type does not fit (a timestamp column needs a timestamp or date
-  type and a value column a numeric one; a column with no type passes; `export_column_wrong_type`), or, for a value
-  column the export no longer maps, while bound numeric metrics without their own value column read it
-  (`value_column_kept`); each prints one line per run naming the data sources. With `--overwrite`, a data source
-  without the constant event key still gets the wrapped query and new column list, but takes its mappings from the
-  export instead of keeping its old ones. Every update, with `--overwrite`, `--update-mappings`, or both, is refused,
-  naming the metrics, when the patch it would send removes a value column bound numeric metrics read or a context
-  kind bound metrics use as an analysis or randomization unit. A metric is bound through its numerator's data source
-  or its denominator's, and a denominator with no data source of its own reads the numerator's, which
-  `--overwrite`'s event-key check now counts too. `--overwrite` also checks the type of a fallback timestamp or value
-  column. A `--dry-run` with LD credentials prints each changed field (`timestamp: TS → CREATED_AT`), and the report
-  records each update as note code `mappings_updated` with a `changes` list in the same form, which `--overwrite`'s
-  warnings now use too.
+  timestamp column, its id-type mappings, and a value column only when it names one) is matched case-insensitively to
+  the data source's listed columns, and only fields that differ are patched, after the same `test` ops as
+  `--overwrite`; a data source that already matches gets no PATCH. Context kinds are added or moved to another
+  column. A kind the export does not map, such as one renamed by hand in LaunchDarkly, is kept (note code
+  `context_kind_not_in_export`). With `--remove-unmapped-contexts`, such kinds are removed instead, except those
+  bound metrics use as analysis or randomization units, which are kept and named on one line per run
+  (`context_kind_kept`). An export kind is added even when another kind maps the same column. A mapping is left as it
+  is when the data source's columns do not include the export's column (`export_column_not_in_query`), when the
+  column's type does not fit (a timestamp column needs a timestamp or date type and a value column a numeric one; a
+  column with no type passes; `export_column_wrong_type`), or, for a value column the export no longer maps, while
+  bound numeric metrics without their own value column read it (`value_column_kept`); each prints one line per run
+  naming the data sources. With `--overwrite`, a data source without the constant event key still gets the wrapped
+  query and new column list, but takes its mappings from the export instead of keeping its old ones. Every update,
+  with `--overwrite`, `--update-mappings`, or both, is refused, naming the metrics, when the patch it would send
+  removes a value column bound numeric metrics read or a context kind bound metrics use as an analysis or
+  randomization unit. A metric is bound through its numerator's data source or its denominator's, and a denominator
+  with no data source of its own reads the numerator's, which `--overwrite`'s event-key check now counts too.
+  `--overwrite` also checks the type of a fallback timestamp or value column. A `--dry-run` with LD credentials
+  prints each changed field (`timestamp: TS → CREATED_AT`), and the report records each update as note code
+  `mappings_updated` with a `changes` list in the same form, which `--overwrite`'s warnings now use too.
 
 
 ### Added
