@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 )
 
 // WarehouseTypes maps warehouse type to experimentation integration key.
@@ -122,16 +123,11 @@ func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey, 
 		if !ok {
 			continue
 		}
-		statsigUnit := j.GetStr(mapping, "statsigUnitID")
 		column := j.GetStr(mapping, "column")
 		if column == "" {
 			continue
 		}
-		if strings.Contains(strings.ToLower(statsigUnit), "user") {
-			contexts["user"] = column
-		} else {
-			contexts[SanitizeKey(statsigUnit)] = column
-		}
+		contexts[statsig.ContextKind(j.GetStr(mapping, "statsigUnitID"))] = column
 	}
 	if len(contexts) == 0 {
 		contexts["user"] = "user_id"
@@ -186,6 +182,46 @@ func MapMetricSourceToDataSource(source map[string]any, envKey, integrationKey, 
 	return body
 }
 
+// KindConflict is a context kind that more than one of a source's Statsig unit IDs map
+// to, with different columns.
+type KindConflict struct {
+	Kind    string
+	Units   []string
+	Columns []string
+}
+
+// ContextKindConflicts lists them in id-type mapping order.
+func ContextKindConflicts(source map[string]any) []KindConflict {
+	var out []KindConflict
+	at := map[string]int{}
+	for _, raw := range j.GetSlice(source, "idTypeMapping") {
+		mapping, ok := raw.(map[string]any)
+		if !ok || j.GetStr(mapping, "column") == "" {
+			continue
+		}
+		unit, column := j.GetStr(mapping, "statsigUnitID"), j.GetStr(mapping, "column")
+		kind := statsig.ContextKind(unit)
+		i, seen := at[kind]
+		if !seen {
+			at[kind] = len(out)
+			out = append(out, KindConflict{Kind: kind, Units: []string{unit}, Columns: []string{column}})
+			continue
+		}
+		out[i].Units = append(out[i].Units, unit)
+		out[i].Columns = append(out[i].Columns, column)
+	}
+	var conflicts []KindConflict
+	for _, c := range out {
+		for _, col := range c.Columns[1:] {
+			if !strings.EqualFold(col, c.Columns[0]) {
+				conflicts = append(conflicts, c)
+				break
+			}
+		}
+	}
+	return conflicts
+}
+
 // ReconcileColumnMappings uses the preview response to fix column mapping references.
 func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColumns []map[string]any) {
 	actual := map[string]string{}
@@ -225,16 +261,11 @@ func ReconcileColumnMappings(cm map[string]any, preview map[string]any, realColu
 		}
 	}
 
+	// Kinds sharing a column all stay: metrics analyze by each kind's name, and LaunchDarkly allows it.
 	if contexts, ok := cm["contexts"].(map[string]string); ok {
-		seen := map[string]bool{}
 		for kind, col := range contexts {
 			if real, found := actual[strings.ToLower(col)]; found {
-				if seen[real] {
-					delete(contexts, kind)
-				} else {
-					contexts[kind] = real
-					seen[real] = true
-				}
+				contexts[kind] = real
 			}
 		}
 	}

@@ -1,6 +1,9 @@
 package statsig
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // ============================================================================
 // Metric types (consumed by `metrics convert`)
@@ -140,6 +143,16 @@ type MetricSourceConfig struct {
 type IDTypeMapping struct {
 	StatsigUnitID string `json:"statsigUnitID"`
 	Column        string `json:"column"`
+}
+
+// ContextKind is the LaunchDarkly context kind a Statsig unit ID maps to without a
+// --unit-type-mapping: "userID" is "user", any other is lowercased. Metric analysis
+// units and warehouse data source contexts both use it, so they match.
+func ContextKind(unitID string) string {
+	if strings.EqualFold(unitID, "userID") {
+		return "user"
+	}
+	return strings.ToLower(unitID)
 }
 
 // IsWarehouseNative reports whether the metric's real aggregation lives in
