@@ -29,6 +29,7 @@ const (
 	MaintainerFromFlagID
 	MaintainerFromFlagEmail
 	MaintainerOptedOut
+	MaintainerFromMapping
 )
 
 func (s MaintainerSource) String() string {
@@ -41,6 +42,8 @@ func (s MaintainerSource) String() string {
 		return "--ld-maintainer email"
 	case MaintainerOptedOut:
 		return "--ld-maintainer none"
+	case MaintainerFromMapping:
+		return "--ld-maintainer-mapping"
 	default:
 		return "unset"
 	}
@@ -57,14 +60,20 @@ type Maintainer struct {
 // ValidateMaintainerFlag checks the value's shape without calling the API, so a
 // typo fails at startup.
 func ValidateMaintainerFlag(value string) error {
-	v := strings.TrimSpace(value)
-	if v == "" || strings.EqualFold(v, MaintainerNone) {
-		return nil
-	}
-	if strings.Contains(v, "@") || memberIDPattern.MatchString(v) {
+	if v := strings.TrimSpace(value); v == "" || IsMaintainerValue(v) {
 		return nil
 	}
 	return fmt.Errorf("invalid --ld-maintainer value %q: expected an email address, a 24-character member ID, or %q", value, MaintainerNone)
+}
+
+// IsMaintainerValue reports whether v is an email, a 24-character member ID, or "none".
+func IsMaintainerValue(v string) bool {
+	return strings.EqualFold(v, MaintainerNone) || isEmail(v) || memberIDPattern.MatchString(v)
+}
+
+// isEmail rejects what LD's member filter would read as more than one address.
+func isEmail(v string) bool {
+	return strings.Contains(v, "@") && !strings.ContainsAny(v, ",| \t\r\n")
 }
 
 // ResolveMaintainer decides which member maintains the resources a run creates.
@@ -72,26 +81,8 @@ func ValidateMaintainerFlag(value string) error {
 // personal token but not for a service token. Returns an error rather than an
 // empty maintainer; callers treat that as fatal.
 func (c *Client) ResolveMaintainer(ctx context.Context, flagValue string) (Maintainer, error) {
-	v := strings.TrimSpace(flagValue)
-
-	if strings.EqualFold(v, MaintainerNone) {
-		return Maintainer{Source: MaintainerOptedOut, OptedOut: true}, nil
-	}
-
-	if strings.Contains(v, "@") {
-		member, err := c.findMemberByEmail(ctx, v)
-		if err != nil {
-			return Maintainer{}, err
-		}
-		return Maintainer{MemberID: member.ID, Email: member.Email, Source: MaintainerFromFlagEmail}, nil
-	}
-
-	if v != "" {
-		member, err := c.getMember(ctx, v)
-		if err != nil {
-			return Maintainer{}, fmt.Errorf("--ld-maintainer member ID %q could not be verified: %w", v, err)
-		}
-		return Maintainer{MemberID: member.ID, Email: member.Email, Source: MaintainerFromFlagID}, nil
+	if v := strings.TrimSpace(flagValue); v != "" {
+		return c.resolveNamed(ctx, v, "--ld-maintainer", MaintainerOptedOut, MaintainerFromFlagEmail, MaintainerFromFlagID)
 	}
 
 	identity, err := c.GetCallerIdentity(ctx)
@@ -110,6 +101,35 @@ func (c *Client) ResolveMaintainer(ctx context.Context, flagValue string) (Maint
 			"Pass --ld-maintainer <email|member-id> to name one, or --ld-maintainer none to create resources without a maintainer", identity.MemberID, err)
 	}
 	return Maintainer{MemberID: member.ID, Email: member.Email, Source: MaintainerFromToken}, nil
+}
+
+// ResolveMappedMaintainer resolves one --ld-maintainer-mapping value: an email, a
+// 24-character member ID, or "none".
+func (c *Client) ResolveMappedMaintainer(ctx context.Context, value string) (Maintainer, error) {
+	v := strings.TrimSpace(value)
+	if !IsMaintainerValue(v) {
+		return Maintainer{}, fmt.Errorf("invalid --ld-maintainer-mapping value %q: expected an email address, a 24-character member ID, or %q", value, MaintainerNone)
+	}
+	return c.resolveNamed(ctx, v, "--ld-maintainer-mapping", MaintainerFromMapping, MaintainerFromMapping, MaintainerFromMapping)
+}
+
+// resolveNamed resolves "none", an email, or a member ID given with the flag origin.
+func (c *Client) resolveNamed(ctx context.Context, v, origin string, none, byEmail, byID MaintainerSource) (Maintainer, error) {
+	if strings.EqualFold(v, MaintainerNone) {
+		return Maintainer{Source: none, OptedOut: true}, nil
+	}
+	if strings.Contains(v, "@") {
+		member, err := c.findMemberByEmail(ctx, v, origin)
+		if err != nil {
+			return Maintainer{}, err
+		}
+		return Maintainer{MemberID: member.ID, Email: member.Email, Source: byEmail}, nil
+	}
+	member, err := c.getMember(ctx, v)
+	if err != nil {
+		return Maintainer{}, fmt.Errorf("%s member ID %q could not be verified: %w", origin, v, err)
+	}
+	return Maintainer{MemberID: member.ID, Email: member.Email, Source: byID}, nil
 }
 
 // CallerIdentity is the subset of GET /api/v2/caller-identity this tool uses.
@@ -165,7 +185,10 @@ func (c *Client) getMember(ctx context.Context, memberID string) (member, error)
 
 // findMemberByEmail resolves an email to a member. LD's email filter is an
 // exact, case-sensitive match, so a near miss returns no members at all.
-func (c *Client) findMemberByEmail(ctx context.Context, email string) (member, error) {
+func (c *Client) findMemberByEmail(ctx context.Context, email, origin string) (member, error) {
+	if !isEmail(email) {
+		return member{}, fmt.Errorf("%s value %q is not a single email address", origin, email)
+	}
 	base, err := url.JoinPath(c.apiBase, "api/v2/members")
 	if err != nil {
 		return member{}, fmt.Errorf("building members URL: %w", err)
@@ -174,7 +197,7 @@ func (c *Client) findMemberByEmail(ctx context.Context, email string) (member, e
 
 	body, _, err := c.getJSON(ctx, reqURL, "looking up the LD account member by email")
 	if err != nil {
-		return member{}, fmt.Errorf("could not look up --ld-maintainer email %q: %w", email, err)
+		return member{}, fmt.Errorf("could not look up %s email %q: %w", origin, email, err)
 	}
 	var resp struct {
 		Items []member `json:"items"`
@@ -183,11 +206,11 @@ func (c *Client) findMemberByEmail(ctx context.Context, email string) (member, e
 		return member{}, fmt.Errorf("parsing members response: %w (body: %s)", err, httputil.Truncate(string(body), 200))
 	}
 
-	switch len(resp.Items) {
-	case 0:
+	switch {
+	case len(resp.Items) == 0 || (len(resp.Items) == 1 && resp.Items[0].Email != email):
 		return member{}, fmt.Errorf("no LaunchDarkly member has the email %q. LaunchDarkly matches this address exactly, including case, "+
 			"so check the spelling and capitalisation against the member list, or pass a 24-character member ID instead", email)
-	case 1:
+	case len(resp.Items) == 1:
 		return resp.Items[0], nil
 	default:
 		return member{}, fmt.Errorf("%d LaunchDarkly members matched the email %q; pass a 24-character member ID instead", len(resp.Items), email)

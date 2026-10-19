@@ -227,3 +227,32 @@ func TestValidateMaintainerFlag(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveMappedMaintainer(t *testing.T) {
+	s := &maintainerServer{memberByID: jsonHandler(http.StatusOK, `{"_id":"`+testMemberID+`","email":"`+testMemberEmail+`"}`)}
+	c := newMaintainerClient(t, s)
+	ctx := context.Background()
+
+	if m, err := c.ResolveMappedMaintainer(ctx, "None"); err != nil || !m.OptedOut || len(s.paths) != 0 {
+		t.Errorf("none: %+v %v paths=%v", m, err, s.paths)
+	}
+	if m, err := c.ResolveMappedMaintainer(ctx, testMemberID); err != nil || m.MemberID != testMemberID || m.Email != testMemberEmail || m.Source != MaintainerFromMapping {
+		t.Errorf("member ID: %+v %v", m, err)
+	}
+	if _, err := c.ResolveMappedMaintainer(ctx, "bob"); err == nil || !strings.Contains(err.Error(), "--ld-maintainer-mapping") {
+		t.Errorf("invalid: err = %v", err)
+	}
+}
+
+// LD's member filter reads "|" and "," as more than one address, so a lookup must
+// return exactly the member asked for.
+func TestResolveMappedMaintainer_EmailMustMatchExactly(t *testing.T) {
+	s := &maintainerServer{membersFilter: jsonHandler(http.StatusOK, `{"items":[{"_id":"`+testMemberID+`","email":"other@example.com"}]}`)}
+	c := newMaintainerClient(t, s)
+	if _, err := c.ResolveMappedMaintainer(context.Background(), testMemberEmail); err == nil || !strings.Contains(err.Error(), "no LaunchDarkly member has the email") {
+		t.Errorf("mismatched member: err = %v", err)
+	}
+	if _, err := c.ResolveMappedMaintainer(context.Background(), "a@example.com|b@example.com"); err == nil || len(s.paths) != 1 {
+		t.Errorf("filter syntax: err = %v paths=%v", err, s.paths)
+	}
+}

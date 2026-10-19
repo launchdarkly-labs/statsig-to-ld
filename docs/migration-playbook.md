@@ -157,7 +157,7 @@ For the CLI, the LaunchDarkly token needs to:
 - **Read** flags, environments, metrics in the target project (for analyze, idempotency dedupe, env reconciliation)
 - **Write** flags, metrics (for `flags import`, `metrics convert`, `targeting import`)
 - **Create** environments (only if you let `targeting import` auto-create missing envs; turn off with `--no-create-envs`)
-- **Read** metric data sources (for `metrics convert` when it binds metrics to data sources), and **create** them for `warehouse` (**update** too with `--overwrite` or `--update-mappings`, which read the project's metrics when they need to check the metrics bound to a data source)
+- **Read** metric data sources (for `metrics convert` when it binds metrics to data sources), and **create** them for `warehouse` (**update** too with `--overwrite` or `--update-mappings`, which read the project's metrics when they need to check the metrics bound to a data source, or with `--update-maintainers`, which changes only maintainers), and **read** account members when maintainers are resolved
 
 The built-in **Writer** role covers all of this. If your team uses custom roles, the minimum set is:
 
@@ -165,7 +165,7 @@ The built-in **Writer** role covers all of this. If your team uses custom roles,
 viewFlag, createFlag, updateFlag (for the target project)
 viewMetric, createMetric (for the target project)
 viewEnvironment, createEnvironment (if auto-creating; otherwise just view)
-createMetricDataSource, updateMetricDataSource (for `warehouse`; update only with --overwrite or --update-mappings)
+createMetricDataSource, updateMetricDataSource (for `warehouse`; update only with --overwrite, --update-mappings, or --update-maintainers)
 ```
 
 For shared automation (CI, scheduled re-imports), use a **service token** rather than a personal access token so the migration doesn't break when individuals leave.

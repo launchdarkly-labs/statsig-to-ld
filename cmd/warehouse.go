@@ -43,6 +43,8 @@ var (
 	whFlagForceOverwrite    bool
 	whFlagUpdateMappings    bool
 	whFlagRemoveUnmapped    bool
+	whFlagMaintainerMapping string
+	whFlagUpdateMaintainers bool
 )
 
 var warehouseCmd = &cobra.Command{
@@ -112,7 +114,9 @@ func init() {
 	warehouseCmd.Flags().StringVar(&whFlagLDProject, "ld-project", "", "LaunchDarkly project key (required)")
 	warehouseCmd.Flags().StringVar(&whFlagLDEnvironment, "ld-environment", "", "LaunchDarkly environment key (required)")
 	warehouseCmd.Flags().StringVar(&whFlagWarehouseType, "warehouse-type", "", "Warehouse type: snowflake, bigquery, databricks, or redshift. Set this when Statsig does not expose its warehouse connection, rather than letting the command guess from SQL")
-	warehouseCmd.Flags().StringVar(&whFlagLDMaintainer, "ld-maintainer", "", "Maintainer for created data sources: an email, a 24-character member ID, or \"none\" to create them with no maintainer. Defaults to the member who owns the API token")
+	warehouseCmd.Flags().StringVar(&whFlagLDMaintainer, "ld-maintainer", "", "Maintainer for created data sources: an email, a 24-character member ID, or \"none\" to send none (LaunchDarkly then assigns a personal token's member). Defaults to the member who owns the API token")
+	warehouseCmd.Flags().StringVar(&whFlagMaintainerMapping, "ld-maintainer-mapping", "", "JSON file mapping Statsig metric source names to the maintainer of their data source: an email, a 24-character member ID, or \"none\". Sources it does not name get --ld-maintainer")
+	warehouseCmd.Flags().BoolVar(&whFlagUpdateMaintainers, "update-maintainers", false, "Set the maintainer of existing data sources in this environment in place: to the one --ld-maintainer-mapping names, or, for one with no maintainer, to --ld-maintainer. A maintainer set in LaunchDarkly is replaced only by a mapping entry")
 	warehouseCmd.Flags().BoolVar(&whFlagDryRun, "dry-run", false, "Export and preview data source mapping without writing to LD. With --ld-key, --ld-project, and --ld-environment, also check existing data sources and preview each query in the warehouse, as a real run does")
 	warehouseCmd.Flags().BoolVar(&whFlagResume, "resume", false, "Resume from migration_state.json")
 	warehouseCmd.Flags().StringVar(&whFlagOnly, "only", "", "Run only 'warehouse' (Phase 2) or 'data-sources' (Phase 3)")
@@ -132,6 +136,9 @@ type reportCounts struct {
 	Updated int `json:"updated"`
 	Skipped int `json:"skipped"`
 	Failed  int `json:"failed"`
+	// --update-maintainers patches; those data sources may count above too.
+	MaintainersUpdated int `json:"maintainers_updated"`
+	MaintainersFailed  int `json:"maintainers_failed"`
 }
 
 type migrationReport struct {
@@ -175,7 +182,6 @@ type migrationEngine struct {
 	dryRun         bool
 	only           string
 	overwrite      bool
-	maintainerID   string
 	verbose        bool
 
 	constantEventKey bool
@@ -183,6 +189,14 @@ type migrationEngine struct {
 	updateMappings   bool
 	removeUnmapped   bool
 	ldReadable       bool
+
+	// maintainerMapping is --ld-maintainer-mapping; maintainers holds its resolved
+	// entries, by Statsig source name, and defaultMaintainer the run's.
+	maintainerMapping   map[string]string
+	maintainers         map[string]launchdarkly.Maintainer
+	defaultMaintainer   launchdarkly.Maintainer
+	maintainersResolved bool
+	updateMaintainers   bool
 
 	// The project's metrics, read once per run by projectMetrics.
 	metrics     []map[string]any
@@ -232,6 +246,13 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 	if whFlagRemoveUnmapped && !whFlagUpdateMappings {
 		return fmt.Errorf("--remove-unmapped-contexts requires --update-mappings")
 	}
+	var maintainerMapping map[string]string
+	if whFlagMaintainerMapping != "" {
+		var err error
+		if maintainerMapping, err = loadMaintainerMapping(whFlagMaintainerMapping); err != nil {
+			return err
+		}
+	}
 	if !whFlagDryRun {
 		if whFlagLDKey == "" {
 			return fmt.Errorf("--ld-key is required (or set LD_API_KEY)")
@@ -272,6 +293,9 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 		updateMappings:   whFlagUpdateMappings,
 		removeUnmapped:   whFlagRemoveUnmapped,
 		ldReadable:       whFlagLDKey != "" && whFlagLDProject != "" && whFlagLDEnvironment != "",
+
+		maintainerMapping: maintainerMapping,
+		updateMaintainers: whFlagUpdateMaintainers,
 	}
 
 	return e.run()
@@ -296,7 +320,17 @@ func (e *migrationEngine) run() error {
 		}
 	}
 
+	if err := e.checkMaintainerMapping(); err != nil {
+		return err
+	}
+
 	if e.dryRun {
+		// Member lookups are reads, so a dry run resolves the maintainers a real run would.
+		if e.ldReadable {
+			if err := e.resolveMaintainers(true); err != nil {
+				return err
+			}
+		}
 		e.printDryRunReport()
 		if e.only != "warehouse" {
 			if err := e.writeSourceMapping(); err != nil {
@@ -313,12 +347,14 @@ func (e *migrationEngine) run() error {
 
 	// Fatal on failure: LD flags an unmaintained data source as incomplete, so
 	// stopping beats creating a hundred of them.
-	maintainer, err := e.ld.ResolveMaintainer(e.ctx, whFlagLDMaintainer)
-	if err != nil {
+	if err := e.resolveMaintainers(true); err != nil {
 		return err
 	}
-	e.maintainerID = maintainer.MemberID
-	logMaintainer(maintainer, "data source")
+	except := ""
+	if n := len(e.maintainerMapping); n > 0 {
+		except = fmt.Sprintf(" except the %d Statsig source(s) --ld-maintainer-mapping names", n)
+	}
+	logMaintainer(e.defaultMaintainer, "data source", except)
 
 	// Phase 2 — set up warehouse integrations
 	if e.only != "data-sources" {
@@ -725,7 +761,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 	withoutConstantKey := 0
 	var droppedValue []string
 	for i, source := range e.metricSources {
-		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, e.maintainerID)
+		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, e.maintainerFor(source))
 		key := jsonutil.GetStr(body, "key")
 		name := jsonutil.GetStr(body, "name")
 
@@ -800,6 +836,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 			e.report.DataSources.Created++
 		}
 	}
+	e.syncMaintainers(existing, collisions)
 	if msg := withoutConstantKeySummary(withoutConstantKey); msg != "" {
 		e.warn(msg)
 	}
@@ -1485,6 +1522,9 @@ type dryRunListing struct {
 	lines    []string
 	warnings []string
 	notes    []string
+	// maintainers lists --update-maintainers changes when maintainersChecked.
+	maintainers        []string
+	maintainersChecked bool
 }
 
 // dryRunDataSources makes the plans a real run would. With the environment's warehouse
@@ -1572,6 +1612,21 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 		out.warnings = append(out.warnings, msg)
 	}
 	out.warnings = append(out.warnings, issueSummaries(issues)...)
+	switch {
+	case out.checked && e.maintainersResolved && e.updateMaintainers:
+		out.maintainersChecked = true
+		for _, c := range e.maintainerChanges(existing, collisions, false) {
+			out.maintainers = append(out.maintainers, c.key+": "+c.change)
+		}
+	case out.checked && e.maintainersResolved:
+		if msg := maintainerMappingSummary(len(e.maintainerChanges(existing, collisions, true))); msg != "" {
+			out.warnings = append(out.warnings, msg)
+		}
+	case (len(e.maintainerMapping) > 0 || e.updateMaintainers) && !e.ldReadable:
+		out.notes = append(out.notes, "Existing data sources' maintainers were not compared. Pass --ld-key, --ld-project, and --ld-environment to see which would change.")
+	case len(e.maintainerMapping) > 0 || e.updateMaintainers:
+		out.notes = append(out.notes, "Existing data sources' maintainers were not compared, because the data sources could not be read.")
+	}
 	out.total = len(e.metricSources)
 	out.whType = whType
 	return out
@@ -1635,6 +1690,12 @@ func (e *migrationEngine) printDryRunDataSources(l dryRunListing) {
 	for _, line := range l.lines {
 		fmt.Fprintf(os.Stderr, "    - %s\n", line)
 	}
+	if l.maintainersChecked {
+		fmt.Fprintf(os.Stderr, "\n  Maintainers that would change (--update-maintainers): %d\n", len(l.maintainers))
+		for _, line := range l.maintainers {
+			fmt.Fprintf(os.Stderr, "    - %s\n", line)
+		}
+	}
 	for _, w := range l.warnings {
 		fmt.Fprintf(os.Stderr, "\n  Warning: %s\n", w)
 	}
@@ -1668,7 +1729,7 @@ func (e *migrationEngine) writeDryRunBodies(whType string) {
 	var problems int
 	collisions := keyCollisions(e.metricSources)
 	for _, source := range e.metricSources {
-		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, e.maintainerID)
+		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, e.maintainerFor(source))
 		if names, ok := collisions[jsonutil.GetStr(body, "key")]; ok {
 			body["error"] = fmt.Sprintf("Statsig sources %s all map to this data source key; none of them is created", quoteAll(names))
 			problems++
@@ -1704,6 +1765,9 @@ func (e *migrationEngine) printReport() {
 	}
 	fmt.Fprintf(os.Stderr, "  Warehouse Connection:  %s\n", whStatus)
 	fmt.Fprintf(os.Stderr, "  Metric Data Sources:   %d created, %d updated, %d skipped, %d failed\n", ds.Created, ds.Updated, ds.Skipped, ds.Failed)
+	if e.updateMaintainers {
+		fmt.Fprintf(os.Stderr, "  Maintainers:           %d updated, %d failed\n", ds.MaintainersUpdated, ds.MaintainersFailed)
+	}
 
 	if len(e.report.Warnings) > 0 {
 		fmt.Fprintf(os.Stderr, "\n  Warnings:\n")

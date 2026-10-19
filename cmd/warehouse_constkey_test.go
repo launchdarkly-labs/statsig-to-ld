@@ -46,16 +46,21 @@ type fakeLD struct {
 	extraIntegrations     []string
 	// previewMessage replaces the failed previews' "SQL compilation error".
 	previewMessage string
+	// members is a JSON array of {"_id","email"}; callerMemberID is the token's member.
+	members        string
+	callerMemberID string
+	memberReads    int
 
 	created      []map[string]any
 	patches      map[string][]launchdarkly.JSONPatchOp
+	patchBodies  map[string]string
 	patchCount   int
 	previews     []string
 	metricsReads int
 }
 
 func (f *fakeLD) server() *httptest.Server {
-	f.patches = map[string][]launchdarkly.JSONPatchOp{}
+	f.patches, f.patchBodies = map[string][]launchdarkly.JSONPatchOp{}, map[string]string{}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		const dsPath = "/internal/projects/proj/metric-data-sources"
@@ -119,11 +124,13 @@ func (f *fakeLD) server() *httptest.Server {
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{}`)
 		case strings.HasPrefix(r.URL.Path, dsPath+"/") && r.Method == http.MethodPatch:
+			raw, _ := io.ReadAll(r.Body)
 			var ops []launchdarkly.JSONPatchOp
-			if err := json.NewDecoder(r.Body).Decode(&ops); err != nil {
+			if err := json.Unmarshal(raw, &ops); err != nil {
 				f.t.Errorf("PATCH body is not a JSON Patch array: %v", err)
 			}
 			f.patches[strings.TrimPrefix(r.URL.Path, dsPath+"/")] = ops
+			f.patchBodies[strings.TrimPrefix(r.URL.Path, dsPath+"/")] = string(raw)
 			f.patchCount++
 			if f.patchStatus != 0 {
 				w.WriteHeader(f.patchStatus)
@@ -131,6 +138,41 @@ func (f *fakeLD) server() *httptest.Server {
 				return
 			}
 			_, _ = io.WriteString(w, `{}`)
+		case r.URL.Path == "/api/v2/projects/proj" || r.URL.Path == "/api/v2/projects/proj/environments/production":
+			_, _ = io.WriteString(w, `{"_id":"0123456789abcdef01234567"}`)
+		case r.URL.Path == "/api/v2/metrics/proj" && r.URL.Query().Get("limit") == "1" && !r.URL.Query().Has("offset"):
+			// The real run's API key probe.
+			_, _ = io.WriteString(w, `{"items":[]}`)
+		case r.URL.Path == "/api/v2/tokens":
+			_, _ = io.WriteString(w, `{"items":[{"_id":"tok","role":"writer"}]}`)
+		case r.URL.Path == "/api/v2/caller-identity":
+			_, _ = io.WriteString(w, `{"memberId":"`+f.callerMemberID+`"}`)
+		case strings.HasPrefix(r.URL.Path, "/api/v2/members"):
+			f.memberReads++
+			var members []map[string]any
+			if f.members != "" {
+				if err := json.Unmarshal([]byte(f.members), &members); err != nil {
+					f.t.Fatalf("members: %v", err)
+				}
+			}
+			var found []map[string]any
+			for _, m := range members {
+				if id := strings.TrimPrefix(r.URL.Path, "/api/v2/members/"); id == m["_id"] || "email:"+fmt.Sprint(m["email"]) == r.URL.Query().Get("filter") {
+					found = append(found, m)
+				}
+			}
+			if r.URL.Path != "/api/v2/members" {
+				if len(found) == 0 {
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = io.WriteString(w, `{"code":"not_found"}`)
+					return
+				}
+				raw, _ := json.Marshal(found[0])
+				_, _ = w.Write(raw)
+				return
+			}
+			raw, _ := json.Marshal(map[string]any{"items": found})
+			_, _ = w.Write(raw)
 		case r.URL.Path == "/api/v2/metrics/proj" && r.Method == http.MethodGet:
 			f.metricsReads++
 			if f.metricsStatus != 0 {
@@ -976,6 +1018,7 @@ func TestWarehouseCmd_FlagsBound(t *testing.T) {
 		"ld-key", "ld-url", "ld-project", "ld-environment", "ld-maintainer",
 		"warehouse-type", "dry-run", "resume", "only",
 		"overwrite", "force-overwrite", "update-mappings", "remove-unmapped-contexts", "constant-event-key", "verbose", "no-color",
+		"ld-maintainer-mapping", "update-maintainers",
 	} {
 		if warehouseCmd.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s not registered on `warehouse`", name)
