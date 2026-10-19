@@ -11,11 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `warehouse`: a `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` runs the warehouse previews and
   checks a real run does on each create and update, so its "would create" and "would update" are what the real run
-  does, and a source the real run would refuse or fail is listed that way. The previews are read-only queries that
-  LaunchDarkly limits to 10 rows. They go only through the environment's own experimentation integration; without
-  one, the dry run says so and lists creates and updates unpreviewed. Existing data sources are now checked only when
-  all three flags are given: without `--ld-environment`, every existing one was listed as taken in another
-  environment.
+  does, and a source the real run would refuse or fail is listed that way. Each preview runs the source's query in
+  the warehouse as `SELECT * FROM (<query>) LIMIT 10`, so only 10 rows come back but the warehouse still does the
+  query's work; a create or update is previewed up to twice. Previews go only through the environment's own
+  experimentation integration; without one, or when the integrations cannot be read, the dry run says so and lists
+  creates and updates unpreviewed.
 
 - `metrics convert` and `warehouse`: `--ld-maintainer` sets the maintainer on every created metric and metric data
   source. LaunchDarkly fills this in automatically from the token's member, but only for a personal token: a
@@ -55,8 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes a value column bound numeric metrics read or a context kind bound metrics use as an analysis or
   randomization unit. A metric is bound through its numerator's data source or its denominator's, and a denominator
   with no data source of its own reads the numerator's, which `--overwrite`'s event-key check now counts too.
-  `--overwrite` also checks the type of a fallback timestamp or value column. A `--dry-run` with LD credentials
-  prints each changed field (`timestamp: TS → CREATED_AT`), and the report records each update as note code
+  `--overwrite` also checks the type of a fallback timestamp or value column. A `--dry-run` with `--ld-key`,
+  `--ld-project`, and `--ld-environment` prints each changed field (`timestamp: TS → CREATED_AT`), and the report records each update as note code
   `mappings_updated` with a `changes` list in the same form, which `--overwrite`'s warnings now use too.
 
 
@@ -155,7 +155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints one line naming the data sources whose query does not return their Statsig value column (note code
   `statsig_value_column_not_in_query`). `--overwrite` no longer puts the guess in place of an existing value column
   the new query lacks, and refuses a data source whose bound numeric metrics read that column without a value column
-  of their own, naming them (a `--dry-run`, which does not run the preview, still lists it as "would update"). Numeric
+  of their own, naming them (a `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` lists it as "would refuse"). Numeric
   metrics then take their value column from the metric, which `metrics convert`
   sets on constant-key data sources; on one created with `--constant-event-key=false`, a numeric metric needs a value
   column set by hand.
