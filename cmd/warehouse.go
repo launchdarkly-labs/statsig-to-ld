@@ -581,19 +581,9 @@ func (e *migrationEngine) checkDataExportExists(whType string) bool {
 // Returns true if an integration exists for the current environment.
 func (e *migrationEngine) checkExperimentationExists(whType string) bool {
 	output.Info("Checking experimentation integration...")
-	for _, integrationKey := range warehouse.WarehouseTypes {
-		for _, cfg := range e.ld.ListIntegrationConfigs(e.ctx, integrationKey) {
-			cv := jsonutil.GetMap(cfg, "configValues")
-			env := jsonutil.GetMap(cv, "selectedEnv")
-			// Match project AND environment: ListIntegrationConfigs is
-			// account-wide, so environmentKey alone would false-match another
-			// project's same-named env. Mirrors getActiveIntegration.
-			if jsonutil.GetStr(env, "projectKey") == e.projectKey &&
-				jsonutil.GetStr(env, "environmentKey") == e.environmentKey {
-				output.Ok(fmt.Sprintf("Experimentation integration exists for env '%s' (%s), skipping", e.environmentKey, integrationKey))
-				return true
-			}
-		}
+	if integrationKey, configID, _ := e.environmentIntegration(); configID != "" {
+		output.Ok(fmt.Sprintf("Experimentation integration exists for env '%s' (%s), skipping", e.environmentKey, integrationKey))
+		return true
 	}
 	return false
 }
@@ -642,10 +632,11 @@ func (e *migrationEngine) phase2bExperimentation(whType string) error {
 }
 
 func (e *migrationEngine) getActiveIntegration() (string, string) {
-	if integrationKey, configID := e.environmentIntegration(); configID != "" {
+	if integrationKey, configID, _ := e.environmentIntegration(); configID != "" {
 		return integrationKey, configID
 	}
-	for _, integrationKey := range warehouse.WarehouseTypes {
+	for _, t := range warehouse.SupportedWarehouseTypes {
+		integrationKey := warehouse.WarehouseTypes[t]
 		configs := e.ld.ListIntegrationConfigs(e.ctx, integrationKey)
 		if len(configs) > 0 {
 			configID := jsonutil.GetStr(configs[0], "_id")
@@ -659,21 +650,29 @@ func (e *migrationEngine) getActiveIntegration() (string, string) {
 }
 
 // environmentIntegration returns the experimentation integration set up for this
-// project and environment, or "" for configID when there is none.
-func (e *migrationEngine) environmentIntegration() (integrationKey, configID string) {
-	for _, integrationKey := range warehouse.WarehouseTypes {
-		for _, cfg := range e.ld.ListIntegrationConfigs(e.ctx, integrationKey) {
+// project and environment, in SupportedWarehouseTypes order. configID is "" when none
+// is found; err reports a list that could not be read.
+func (e *migrationEngine) environmentIntegration() (integrationKey, configID string, err error) {
+	for _, t := range warehouse.SupportedWarehouseTypes {
+		key := warehouse.WarehouseTypes[t]
+		configs, readErr := e.ld.ReadIntegrationConfigs(e.ctx, key)
+		if readErr != nil {
+			err = readErr
+			continue
+		}
+		for _, cfg := range configs {
+			// The list is account-wide: match the project as well as the environment.
 			env := jsonutil.GetMap(jsonutil.GetMap(cfg, "configValues"), "selectedEnv")
 			if jsonutil.GetStr(env, "projectKey") == e.projectKey && jsonutil.GetStr(env, "environmentKey") == e.environmentKey {
 				configID := jsonutil.GetStr(cfg, "_id")
 				if configID == "" {
 					configID = jsonutil.GetStr(cfg, "id")
 				}
-				return integrationKey, configID
+				return key, configID, nil
 			}
 		}
 	}
-	return "", ""
+	return "", "", err
 }
 
 func (e *migrationEngine) phase3aMigrateDataSources() error {
@@ -743,7 +742,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 			continue
 		}
 
-		dropped, err := e.previewSource(source, body, name, whType, integrationConfigID)
+		dropped, _, err := e.previewSource(source, body, name, whType, integrationConfigID)
 		if err != nil {
 			e.failDataSource(key, name, err)
 			continue
@@ -791,12 +790,14 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 }
 
 // previewSource fills body's columns and mappings from the warehouse preview, as the
-// run sends them. dropped reports a Statsig value column the query does not return.
-func (e *migrationEngine) previewSource(source, body map[string]any, name, whType, integrationConfigID string) (dropped bool, err error) {
+// run sends them. dropped reports a Statsig value column the query does not return;
+// rawErr, a failed preview of the Statsig query, which the run only logs.
+func (e *migrationEngine) previewSource(source, body map[string]any, name, whType, integrationConfigID string) (dropped bool, rawErr, err error) {
 	statsigValue := jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn")
 	var sourceColumns []string
 	if previewSQL := warehouse.BuildPreviewSQL(source); integrationConfigID != "" && previewSQL != "" {
 		preview, err := e.ld.PreviewDataSource(e.ctx, integrationConfigID, previewSQL)
+		rawErr = err
 		if err == nil {
 			if realColumns := warehouse.ExtractPreviewColumns(preview); len(realColumns) > 0 {
 				cm := body["columnMappings"].(map[string]any)
@@ -812,10 +813,10 @@ func (e *migrationEngine) previewSource(source, body map[string]any, name, whTyp
 	}
 	if e.constantEventKey {
 		if err := e.applyConstantEventKey(body, whType, integrationConfigID, sourceColumns); err != nil {
-			return false, err
+			return false, rawErr, err
 		}
 	}
-	return statsigValue != "" && jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn") == "", nil
+	return statsigValue != "" && jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn") == "", rawErr, nil
 }
 
 func droppedValueSummary(keys []string) string {
@@ -1417,7 +1418,15 @@ func (e *migrationEngine) printDryRunReport() {
 	// ends up reporting a warehouse the customer does not use. The only error
 	// here is an invalid --warehouse-type, already rejected at startup.
 	detected, typeSource, _ := warehouse.ResolveWarehouseType(whFlagWarehouseType, e.whConnections, e.metricSources)
+	whType := detected
+	var l dryRunListing
+	if e.only != "warehouse" {
+		l = e.dryRunDataSources(detected)
+		whType = l.whType
+	}
 	switch {
+	case whType != detected:
+		fmt.Fprintf(os.Stderr, "  Warehouse type: %s (from the LaunchDarkly environment's experimentation integration)\n", whType)
 	case detected == "":
 		fmt.Fprintf(os.Stderr, "  Warehouse type: unknown (pass --warehouse-type)\n")
 	case typeSource.IsConfident():
@@ -1426,10 +1435,11 @@ func (e *migrationEngine) printDryRunReport() {
 		fmt.Fprintf(os.Stderr, "  Warehouse type: %s -- GUESS ONLY, %s. Confirm with --warehouse-type before a real run.\n", detected, typeSource)
 	}
 
-	e.printDryRunDataSources(detected)
-
-	if e.constantEventKey {
-		e.writeDryRunBodies(detected)
+	if e.only != "warehouse" {
+		e.printDryRunDataSources(l)
+		if e.constantEventKey {
+			e.writeDryRunBodies(whType)
+		}
 	}
 
 	fmt.Fprintln(os.Stderr, "\n  Note: metric definitions are migrated separately by `statsig-to-ld metrics convert`.")
@@ -1439,10 +1449,12 @@ type dryRunListing struct {
 	// checked reports that the project's data sources were read; previewed, that creates
 	// and updates were previewed and checked as in a real run.
 	checked, previewed bool
-	total              int
-	lines              []string
-	warnings           []string
-	notes              []string
+	// whType is the warehouse type the plans used: the integration's, when previewed.
+	whType   string
+	total    int
+	lines    []string
+	warnings []string
+	notes    []string
 }
 
 // dryRunDataSources makes the plans a real run would. With the environment's warehouse
@@ -1461,16 +1473,19 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 			out.checked = true
 		}
 	} else {
-		out.notes = append(out.notes, "Existing LaunchDarkly data sources were not checked, and no query was previewed. Pass --ld-key, --ld-project, and --ld-environment to see what a real run would create, update, skip, or refuse.")
+		out.notes = append(out.notes, "Existing LaunchDarkly data sources were not checked, and no query was previewed. Pass --ld-key, --ld-project, and --ld-environment to see what a real run would create, update, skip, refuse, or fail.")
 	}
 
 	integrationKey, configID := warehouse.WarehouseTypes[whType], ""
 	if out.checked {
 		// Only this environment's integration: another one could preview a different warehouse.
-		if k, id := e.environmentIntegration(); id != "" {
+		switch k, id, err := e.environmentIntegration(); {
+		case id != "":
 			integrationKey, configID, whType = k, id, warehouse.WarehouseTypeForIntegration(k)
 			out.previewed = true
-		} else {
+		case err != nil:
+			out.notes = append(out.notes, fmt.Sprintf("No query was previewed, because the experimentation integrations could not be read (%v), so a create or update listed here can still fail when a real run previews it.", err))
+		default:
 			out.notes = append(out.notes, fmt.Sprintf("No query was previewed, because LaunchDarkly project %q environment %q has no warehouse experimentation integration yet, so a create or update listed here can still fail when a real run previews it.", e.projectKey, e.environmentKey))
 		}
 	}
@@ -1528,6 +1543,7 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 	}
 	out.warnings = append(out.warnings, issueSummaries(issues)...)
 	out.total = len(e.metricSources)
+	out.whType = whType
 	return out
 }
 
@@ -1543,9 +1559,13 @@ type previewResult struct {
 // previewPlan runs a planned create's or update's previews and checks, writing nothing.
 func (e *migrationEngine) previewPlan(source, body, ds map[string]any, plan dataSourcePlan, whType, configID string) previewResult {
 	key := jsonutil.GetStr(body, "key")
-	dropped, err := e.previewSource(source, body, jsonutil.GetStr(body, "name"), whType, configID)
+	dropped, rawErr, err := e.previewSource(source, body, jsonutil.GetStr(body, "name"), whType, configID)
 	if err != nil {
 		return previewResult{outcome: "would fail (" + failureReason(err) + ")"}
+	}
+	if rawErr != nil && !e.constantEventKey {
+		// Nothing else previews the query, and LaunchDarkly runs it to validate the write.
+		return previewResult{outcome: "would fail (preview of the Statsig SQL failed: " + failureReason(rawErr) + ")"}
 	}
 	r := previewResult{dropped: dropped}
 	if plan.action != planUpdate {
@@ -1573,8 +1593,7 @@ func failureReason(err error) string {
 	return first
 }
 
-func (e *migrationEngine) printDryRunDataSources(whType string) {
-	l := e.dryRunDataSources(whType)
+func (e *migrationEngine) printDryRunDataSources(l dryRunListing) {
 	switch {
 	case l.previewed:
 		fmt.Fprintf(os.Stderr, "\n  Metric data sources (checked against LaunchDarkly project %q, queries previewed): %d\n", e.projectKey, l.total)
