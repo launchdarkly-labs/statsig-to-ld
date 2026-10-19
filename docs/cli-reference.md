@@ -221,9 +221,9 @@ This differs from calling the LaunchDarkly API directly, where the maintainer is
 | omitted (default) | Uses the member who owns the API token. Works for both token kinds. |
 | an email, `someone@example.com` | Looks the member up by email. LaunchDarkly matches the address **exactly, including case**, so a near miss fails rather than guessing. |
 | a member ID, 24 hex characters | Used directly, after checking the member exists. |
-| `none` | Creates resources with **no maintainer**. They will show as incomplete in the LaunchDarkly UI until someone is assigned. |
+| `none` | Sends **no maintainer**. With a service token, resources are created without one and show as incomplete in the LaunchDarkly UI until someone is assigned. With a personal token, LaunchDarkly makes the token's member the maintainer, as it does for any create without one. |
 
-If no maintainer can be resolved, the run stops before creating anything and the error points at `--ld-maintainer`. This happens when the token's member has left the account, or when the token cannot read its own identity. Use `--ld-maintainer none` if you want the resources created without one.
+If no maintainer can be resolved, the run stops before creating anything and the error points at `--ld-maintainer`. This happens when the token's member has left the account, or when the token cannot read its own identity. Use `--ld-maintainer none` to send none; that leaves resources without a maintainer only with a service token.
 
 The resolved maintainer is printed once at the start of the run.
 
@@ -400,7 +400,7 @@ A running experiment iteration keeps the metric versions it started with, which 
 
 Sources the file does not name get `--ld-maintainer`. Every entry is checked when the run starts: a source name the export does not have, or a member that cannot be found, stops the run before anything is written.
 
-New data sources get these maintainers. When the API token belongs to a member, LaunchDarkly makes that member the maintainer of a data source created with `none`, as it does for `--ld-maintainer none`; a run with `--update-maintainers` then removes it.
+New data sources get these maintainers. When the API token belongs to a member, LaunchDarkly makes that member the maintainer of a data source created with `none`, as it does for `--ld-maintainer none`. A later run with `--update-maintainers` removes it from a source the file maps to `none`; a source left to `--ld-maintainer none` keeps it, since a maintainer set in LaunchDarkly is replaced only by a file entry.
 
 Existing data sources in this environment keep their maintainers unless `--update-maintainers` is set, which changes only their `maintainerId`:
 
@@ -408,9 +408,9 @@ Existing data sources in this environment keep their maintainers unless `--updat
 - A data source with no maintainer gets `--ld-maintainer`, or the token's member when that flag is omitted.
 - A maintainer set in LaunchDarkly is replaced only by a file entry, never by `--ld-maintainer`.
 
-Each patch first tests the maintainer the run listed, or that there was none, so one changed in LaunchDarkly during the run fails rather than being overwritten. The report records each change as note code `maintainer_updated` (with `changes`, such as `["maintainer: old@example.com → new@example.com"]`), and the summary counts the updates and failures. Without `--update-maintainers`, the run prints one line counting existing data sources whose maintainer differs from the file's, and records each as note code `maintainer_differs_from_mapping`.
+Each patch first tests the maintainer the run listed, or that there was none, so one changed in LaunchDarkly during the run fails rather than being overwritten. The report records each change as note code `maintainer_updated`, and the summary counts the updates and failures. Report notes name maintainers by member ID (`["maintainer: 5f1d… → 6a2e…"]`), so a report can be shared without member emails; the console shows emails. If you need emails in the report, open an issue. Without `--update-maintainers`, the run prints one line counting existing data sources whose maintainer differs from the file's, and records each as note code `maintainer_differs_from_mapping`.
 
-A `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` resolves the maintainers, so a bad entry fails it too, and with `--update-maintainers` lists each change a real run would make.
+A `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` resolves the maintainers as a real run does, so an unresolvable `--ld-maintainer` or mapping entry fails it too. It writes them into `data-source-bodies.json`, and with `--update-maintainers` lists each change a real run would make, by email.
 
 ### Quick start
 

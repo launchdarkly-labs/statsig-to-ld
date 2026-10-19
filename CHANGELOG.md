@@ -10,15 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `warehouse`: `--ld-maintainer-mapping` names a maintainer per Statsig source, instead of one `--ld-maintainer` for
-  the whole run: a JSON object of Statsig metric source names to an email, a member ID, or `none`. Sources it does not
-  name get `--ld-maintainer`. `--update-maintainers` sets the maintainer of existing data sources in this environment
-  in place: the one the file names, or `--ld-maintainer` for one with no maintainer. A maintainer set in LaunchDarkly
-  is replaced only by a file entry. Each patch changes only `maintainerId`, after testing the one the run listed (or
-  that there was none). A source name the export does not have, or a member that cannot be found, stops the run
-  before anything is written. The report records each change as note code `maintainer_updated` and the summary
-  counts updates and failures; a dry run with `--ld-key`, `--ld-project`, and `--ld-environment` lists the changes it
-  would make. Without `--update-maintainers`, a run with the file prints one line counting the data sources whose
-  maintainer differs from it (note code `maintainer_differs_from_mapping`).
+  the whole run: a JSON object of Statsig metric source names to an email, a member ID, or `none`. Sources it does
+  not name get `--ld-maintainer`. `--update-maintainers` sets the maintainer of existing data sources in this
+  environment in place: the one the file names, or `--ld-maintainer` for one with no maintainer. A maintainer set in
+  LaunchDarkly is replaced only by a file entry. Each patch changes only `maintainerId`, after testing the one the
+  run listed (or that there was none). A source name the export does not have, or a member that cannot be found,
+  stops the run before anything is written. The report records each change as note code `maintainer_updated`, naming
+  maintainers by member ID rather than email, and the summary counts updates and failures; a dry run with `--ld-key`,
+  `--ld-project`, and `--ld-environment` lists the changes it would make. Without `--update-maintainers`, a run with
+  the file prints one line counting the data sources whose maintainer differs from it (note code
+  `maintainer_differs_from_mapping`).
 
 - `warehouse`: a `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` runs the warehouse previews and
   checks a real run does on each create and update, so its "would create" and "would update" are what the real run
@@ -32,13 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the account does not have counts as none.
 
 - `metrics convert` and `warehouse`: `--ld-maintainer` sets the maintainer on every created metric and metric data
-  source. LaunchDarkly fills this in automatically from the token's member, but only for a personal token: a
-  service token is not tied to a member, so resources it created were left unmaintained and the LaunchDarkly UI
-  flagged them as incomplete. The CLI now resolves a maintainer once per run and sets it explicitly, so both token
-  kinds produce the same result. The flag takes an email, a 24-character member ID, or `none` to create resources
-  with no maintainer; omitted, it uses the member who owns the API token. Resolution failure stops the run before
-  anything is created rather than quietly leaving hundreds of resources unmaintained, and the error names the flag
-  as the fix. The resolved maintainer is printed once at the start of the run.
+  source. LaunchDarkly fills this in automatically from the token's member, but only for a personal token: a service
+  token is not tied to a member, so resources it created were left unmaintained and the LaunchDarkly UI flagged them
+  as incomplete. The CLI now resolves a maintainer once per run and sets it explicitly, so both token kinds produce
+  the same result. The flag takes an email, a 24-character member ID, or `none` to send none (resources then have no
+  maintainer with a service token; with a personal token, LaunchDarkly assigns the token's member); omitted, it uses
+  the member who owns the API token. Resolution failure stops the run before anything is created rather than quietly
+  leaving hundreds of resources unmaintained, and the error names the flag as the fix. The resolved maintainer is
+  printed once at the start of the run.
 
 - `metrics convert`: `--assume-constant-event-key` treats mapped data sources that LaunchDarkly cannot report on (no
   credentials, or not created yet) as projecting the constant event key, so a dry run before `warehouse` previews the
