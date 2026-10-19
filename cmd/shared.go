@@ -44,12 +44,8 @@ func parseCommaSeparated(s string) []string {
 }
 
 // logMaintainer reports which member will own what the run creates. noun is
-// singular, e.g. "metric"; mapped counts sources --ld-maintainer-mapping names instead.
-func logMaintainer(m launchdarkly.Maintainer, noun string, mapped int) {
-	except := ""
-	if mapped > 0 {
-		except = fmt.Sprintf(" except the %d Statsig source(s) --ld-maintainer-mapping names", mapped)
-	}
+// singular, e.g. "metric"; except qualifies "every <noun> created by this run".
+func logMaintainer(m launchdarkly.Maintainer, noun, except string) {
 	if m.OptedOut {
 		log.Printf("Maintainer: NONE. Every %s created by this run%s will have no maintainer, "+
 			"which LaunchDarkly's UI flags as incomplete until someone is assigned.", noun, except)

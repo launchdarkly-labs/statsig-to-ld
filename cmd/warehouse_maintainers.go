@@ -18,7 +18,10 @@ import (
 // --ld-maintainer-mapping names a maintainer per Statsig source. --update-maintainers
 // moves existing data sources to those, and gives unmaintained ones the run's maintainer.
 
-const noteMaintainerUpdated = "maintainer_updated"
+const (
+	noteMaintainerUpdated = "maintainer_updated"
+	noteMaintainerDiffers = "maintainer_differs_from_mapping"
+)
 
 // loadMaintainerMapping reads a JSON object of Statsig source names to an email, a
 // member ID, or "none".
@@ -28,17 +31,20 @@ func loadMaintainerMapping(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("--ld-maintainer-mapping: %w", err)
 	}
 	var m map[string]string
-	if err := json.Unmarshal(raw, &m); err != nil {
+	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+		if err == nil {
+			err = fmt.Errorf("got null")
+		}
 		return nil, fmt.Errorf("--ld-maintainer-mapping %s must be a JSON object mapping Statsig metric source names to an email, a 24-character member ID, or %q: %w", path, launchdarkly.MaintainerNone, err)
 	}
 	var bad []string
 	for _, name := range slices.Sorted(maps.Keys(m)) {
-		if v := strings.TrimSpace(m[name]); !launchdarkly.IsMaintainerValue(v) {
+		if v := strings.TrimSpace(m[name]); strings.TrimSpace(name) == "" || !launchdarkly.IsMaintainerValue(v) {
 			bad = append(bad, fmt.Sprintf("%q: %q", name, m[name]))
 		}
 	}
 	if len(bad) > 0 {
-		return nil, fmt.Errorf("--ld-maintainer-mapping %s has values that are not an email, a 24-character member ID, or %q: %s", path, launchdarkly.MaintainerNone, strings.Join(bad, ", "))
+		return nil, fmt.Errorf("--ld-maintainer-mapping %s has entries that do not name a Statsig source, or whose value is not an email, a 24-character member ID, or %q: %s", path, launchdarkly.MaintainerNone, strings.Join(bad, ", "))
 	}
 	return m, nil
 }
@@ -87,7 +93,7 @@ func (e *migrationEngine) resolveMaintainers(withDefault bool) error {
 		if err != nil {
 			return err
 		}
-		e.defaultMaintainer, e.maintainerID = m, m.MemberID
+		e.defaultMaintainer = m
 	}
 	if err := e.resolveMappedMaintainers(); err != nil {
 		return err
@@ -101,14 +107,14 @@ func (e *migrationEngine) maintainerFor(source map[string]any) string {
 	if m, ok := e.maintainers[jsonutil.GetStr(source, "name")]; ok {
 		return m.MemberID
 	}
-	return e.maintainerID
+	return e.defaultMaintainer.MemberID
 }
 
 // maintainerChange is an existing data source whose maintainer --update-maintainers changes.
 type maintainerChange struct {
-	key    string
-	ops    []launchdarkly.JSONPatchOp
-	change string
+	key, name string
+	ops       []launchdarkly.JSONPatchOp
+	change    string
 }
 
 // maintainerChanges lists the existing data sources in this environment whose
@@ -138,17 +144,19 @@ func (e *migrationEngine) maintainerChanges(existing map[string]map[string]any, 
 		if current == to.MemberID {
 			continue
 		}
-		var ops []launchdarkly.JSONPatchOp
+		// A null test fails once someone sets a maintainer: LaunchDarkly omits an unset one.
+		var test any
 		if current != "" {
-			ops = append(ops, launchdarkly.JSONPatchOp{Op: "test", Path: "/maintainerId", Value: current})
+			test = current
 		}
+		ops := []launchdarkly.JSONPatchOp{{Op: "test", Path: "/maintainerId", Value: test}}
 		if to.MemberID == "" {
 			ops = append(ops, launchdarkly.JSONPatchOp{Op: "remove", Path: "/maintainerId"})
 		} else {
 			ops = append(ops, launchdarkly.JSONPatchOp{Op: "add", Path: "/maintainerId", Value: to.MemberID})
 		}
 		from := orEmail(current, jsonutil.GetStr(jsonutil.GetMap(ds, "maintainer"), "email"))
-		changes = append(changes, maintainerChange{key: key, ops: ops, change: mappingChange("maintainer", from, orEmail(to.MemberID, to.Email))})
+		changes = append(changes, maintainerChange{key: key, name: name, ops: ops, change: mappingChange("maintainer", from, orEmail(to.MemberID, to.Email))})
 	}
 	return changes
 }
@@ -163,7 +171,11 @@ func orEmail(id, email string) string {
 // syncMaintainers applies --update-maintainers, or says how many mapped maintainers it would change.
 func (e *migrationEngine) syncMaintainers(existing map[string]map[string]any, collisions map[string][]string) {
 	if !e.updateMaintainers {
-		if msg := maintainerMappingSummary(len(e.maintainerChanges(existing, collisions, true))); msg != "" {
+		differ := e.maintainerChanges(existing, collisions, true)
+		for _, c := range differ {
+			e.report.Notes = append(e.report.Notes, reportNote{Code: noteMaintainerDiffers, DataSource: c.key, Changes: []string{c.change}})
+		}
+		if msg := maintainerMappingSummary(len(differ)); msg != "" {
 			e.warn(msg)
 		}
 		return
@@ -178,9 +190,11 @@ func (e *migrationEngine) syncMaintainers(existing map[string]map[string]any, co
 			if errors.Is(err, launchdarkly.ErrPatchNotApplied) {
 				err = fmt.Errorf("its maintainer changed in LaunchDarkly after this run read it; rerun to pick up the change")
 			}
-			output.ErrMsg(fmt.Sprintf("Data source %q: maintainer not updated: %v", c.key, err))
+			msg := fmt.Sprintf("Data source %q: maintainer not updated: %v", c.name, err)
+			output.ErrMsg(msg)
 			e.state.AddError("data_source", c.key, err.Error())
-			e.report.Errors = append(e.report.Errors, fmt.Sprintf("Data source %q: maintainer not updated: %v", c.key, err))
+			e.report.Errors = append(e.report.Errors, msg)
+			e.report.DataSources.MaintainersFailed++
 			continue
 		}
 		e.report.DataSources.MaintainersUpdated++
@@ -192,5 +206,5 @@ func maintainerMappingSummary(n int) string {
 	if n == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d existing data source(s) have a maintainer other than --ld-maintainer-mapping names for them. Rerun with --update-maintainers to change them.", n)
+	return fmt.Sprintf("%d existing data source(s) have a maintainer that differs from the one --ld-maintainer-mapping names for them. Rerun with --update-maintainers to change them.", n)
 }
