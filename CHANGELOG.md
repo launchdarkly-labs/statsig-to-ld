@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `warehouse`: a `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` runs the warehouse previews and
+  checks a real run does on each create and update, so its "would create" and "would update" are what the real run
+  does, and a source the real run would refuse or fail is listed that way. The previews are read-only queries that
+  LaunchDarkly limits to 10 rows. They go only through the environment's own experimentation integration; without
+  one, the dry run says so and lists creates and updates unpreviewed. Existing data sources are now checked only when
+  all three flags are given: without `--ld-environment`, every existing one was listed as taken in another
+  environment.
+
 - `metrics convert` and `warehouse`: `--ld-maintainer` sets the maintainer on every created metric and metric data
   source. LaunchDarkly fills this in automatically from the token's member, but only for a personal token: a
   service token is not tied to a member, so resources it created were left unmaintained and the LaunchDarkly UI
@@ -112,8 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new query does not return it. A source whose key is taken by a data source in another LaunchDarkly environment
   fails, with or without `--overwrite`, and is left out of `source-mapping.json`. Without `--overwrite`, existing data
   sources that lack the constant are skipped, and the run prints one line counting them and saying what
-  `--overwrite` would do; the report's new `notes` list names them. A `--dry-run` with `--ld-key` and `--ld-project`
-  reports, per source, whether a real run would create, update, skip, or refuse it.
+  `--overwrite` would do; the report's new `notes` list names them. A `--dry-run` with `--ld-key`, `--ld-project`, and
+  `--ld-environment` reports, per source, whether a real run would create, update, skip, refuse, or fail it.
 
 - `warehouse`: data source context kinds are now named the way `metrics convert` names analysis units without
   `--unit-type-mapping`, so a data source has the kinds its metrics analyze by: `userID` is `user`, and any other
