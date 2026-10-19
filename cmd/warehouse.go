@@ -499,8 +499,12 @@ func (e *migrationEngine) phase2WarehouseSetup() error {
 	// gated on a host that is populated from the Statsig connection config, which
 	// is precisely the case where the type is already confident. If either check
 	// starts genuinely depending on the type, confirm it before this point.
+	// The integration check first: it stops the run, and the export check may POST a probe.
+	expExists, err := e.checkExperimentationExists(detected)
+	if err != nil {
+		return err
+	}
 	exportExists := e.checkDataExportExists(detected)
-	expExists := e.checkExperimentationExists(detected)
 
 	if exportExists && expExists {
 		e.report.Warehouse.Skipped = true
@@ -579,13 +583,18 @@ func (e *migrationEngine) checkDataExportExists(whType string) bool {
 
 // checkExperimentationExists checks all warehouse integration types for the environment.
 // Returns true if an integration exists for the current environment.
-func (e *migrationEngine) checkExperimentationExists(whType string) bool {
+func (e *migrationEngine) checkExperimentationExists(whType string) (bool, error) {
 	output.Info("Checking experimentation integration...")
-	if integrationKey, configID, _ := e.environmentIntegration(); configID != "" {
-		output.Ok(fmt.Sprintf("Experimentation integration exists for env '%s' (%s), skipping", e.environmentKey, integrationKey))
-		return true
+	integrationKey, configID, err := e.environmentIntegration()
+	if err != nil {
+		// Read as "none", setup could add a second integration for the environment.
+		return false, fmt.Errorf("could not read the LaunchDarkly experimentation integrations, so cannot tell whether one is set up for environment %q: %w. Rerun once the token can read them", e.environmentKey, err)
 	}
-	return false
+	if configID != "" {
+		output.Ok(fmt.Sprintf("Experimentation integration exists for env '%s' (%s), skipping", e.environmentKey, integrationKey))
+		return true, nil
+	}
+	return false, nil
 }
 
 func (e *migrationEngine) phase2aDataExport(whType string) error {
@@ -631,9 +640,14 @@ func (e *migrationEngine) phase2bExperimentation(whType string) error {
 	return nil
 }
 
-func (e *migrationEngine) getActiveIntegration() (string, string) {
-	if integrationKey, configID, _ := e.environmentIntegration(); configID != "" {
-		return integrationKey, configID
+func (e *migrationEngine) getActiveIntegration() (string, string, error) {
+	integrationKey, configID, err := e.environmentIntegration()
+	if err != nil {
+		// Another type's integration could be the one this environment uses.
+		return "", "", fmt.Errorf("could not read the LaunchDarkly experimentation integrations, so cannot tell which warehouse the data sources use: %w. Rerun once the token can read them", err)
+	}
+	if configID != "" {
+		return integrationKey, configID, nil
 	}
 	for _, t := range warehouse.SupportedWarehouseTypes {
 		integrationKey := warehouse.WarehouseTypes[t]
@@ -643,36 +657,42 @@ func (e *migrationEngine) getActiveIntegration() (string, string) {
 			if configID == "" {
 				configID = jsonutil.GetStr(configs[0], "id")
 			}
-			return integrationKey, configID
+			return integrationKey, configID, nil
 		}
 	}
-	return "snowflake-experimentation", ""
+	return "snowflake-experimentation", "", nil
 }
 
 // environmentIntegration returns the experimentation integration set up for this
 // project and environment, in SupportedWarehouseTypes order. configID is "" when none
-// is found; err reports a list that could not be read.
+// is found. err joins the lists that could not be read, and is set even with a match.
 func (e *migrationEngine) environmentIntegration() (integrationKey, configID string, err error) {
+	var unread []string
 	for _, t := range warehouse.SupportedWarehouseTypes {
 		key := warehouse.WarehouseTypes[t]
 		configs, readErr := e.ld.ReadIntegrationConfigs(e.ctx, key)
 		if readErr != nil {
-			err = readErr
+			unread = append(unread, readErr.Error())
 			continue
 		}
 		for _, cfg := range configs {
 			// The list is account-wide: match the project as well as the environment.
 			env := jsonutil.GetMap(jsonutil.GetMap(cfg, "configValues"), "selectedEnv")
 			if jsonutil.GetStr(env, "projectKey") == e.projectKey && jsonutil.GetStr(env, "environmentKey") == e.environmentKey {
-				configID := jsonutil.GetStr(cfg, "_id")
-				if configID == "" {
-					configID = jsonutil.GetStr(cfg, "id")
+				id := jsonutil.GetStr(cfg, "_id")
+				if id == "" {
+					id = jsonutil.GetStr(cfg, "id")
 				}
-				return key, configID, nil
+				if integrationKey == "" {
+					integrationKey, configID = key, id
+				}
 			}
 		}
 	}
-	return "", "", err
+	if len(unread) > 0 {
+		err = errors.New(strings.Join(unread, "; "))
+	}
+	return integrationKey, configID, err
 }
 
 func (e *migrationEngine) phase3aMigrateDataSources() error {
@@ -683,7 +703,10 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 		return nil
 	}
 
-	integrationKey, integrationConfigID := e.getActiveIntegration()
+	integrationKey, integrationConfigID, err := e.getActiveIntegration()
+	if err != nil {
+		return err
+	}
 	if integrationConfigID != "" {
 		output.Info(fmt.Sprintf("Using integration config: %s (%s)", integrationKey, integrationConfigID))
 	}
@@ -1424,16 +1447,7 @@ func (e *migrationEngine) printDryRunReport() {
 		l = e.dryRunDataSources(detected)
 		whType = l.whType
 	}
-	switch {
-	case whType != detected:
-		fmt.Fprintf(os.Stderr, "  Warehouse type: %s (from the LaunchDarkly environment's experimentation integration)\n", whType)
-	case detected == "":
-		fmt.Fprintf(os.Stderr, "  Warehouse type: unknown (pass --warehouse-type)\n")
-	case typeSource.IsConfident():
-		fmt.Fprintf(os.Stderr, "  Warehouse type: %s (from %s)\n", detected, typeSource)
-	default:
-		fmt.Fprintf(os.Stderr, "  Warehouse type: %s -- GUESS ONLY, %s. Confirm with --warehouse-type before a real run.\n", detected, typeSource)
-	}
+	fmt.Fprintf(os.Stderr, "  %s\n", warehouseTypeLine(detected, typeSource, l))
 
 	if e.only != "warehouse" {
 		e.printDryRunDataSources(l)
@@ -1443,6 +1457,22 @@ func (e *migrationEngine) printDryRunReport() {
 	}
 
 	fmt.Fprintln(os.Stderr, "\n  Note: metric definitions are migrated separately by `statsig-to-ld metrics convert`.")
+}
+
+// warehouseTypeLine says which warehouse type the dry run used and where it came from.
+func warehouseTypeLine(detected string, source warehouse.WarehouseTypeSource, l dryRunListing) string {
+	const fromIntegration = "from the LaunchDarkly environment's experimentation integration"
+	switch {
+	case l.previewed && detected != "" && l.whType != detected && source.IsConfident():
+		return fmt.Sprintf("Warehouse type: %s (%s, which data sources use; %s from %s, which data export setup uses)", l.whType, fromIntegration, detected, source)
+	case l.previewed:
+		return fmt.Sprintf("Warehouse type: %s (%s)", l.whType, fromIntegration)
+	case detected == "":
+		return "Warehouse type: unknown (pass --warehouse-type)"
+	case source.IsConfident():
+		return fmt.Sprintf("Warehouse type: %s (from %s)", detected, source)
+	}
+	return fmt.Sprintf("Warehouse type: %s -- GUESS ONLY, %s. Confirm with --warehouse-type before a real run.", detected, source)
 }
 
 type dryRunListing struct {
@@ -1480,11 +1510,11 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 	if out.checked {
 		// Only this environment's integration: another one could preview a different warehouse.
 		switch k, id, err := e.environmentIntegration(); {
+		case err != nil:
+			out.notes = append(out.notes, fmt.Sprintf("No query was previewed, because the experimentation integrations could not be read (%v); a real run stops on this error.", err))
 		case id != "":
 			integrationKey, configID, whType = k, id, warehouse.WarehouseTypeForIntegration(k)
 			out.previewed = true
-		case err != nil:
-			out.notes = append(out.notes, fmt.Sprintf("No query was previewed, because the experimentation integrations could not be read (%v), so a create or update listed here can still fail when a real run previews it.", err))
 		default:
 			out.notes = append(out.notes, fmt.Sprintf("No query was previewed, because LaunchDarkly project %q environment %q has no warehouse experimentation integration yet, so a create or update listed here can still fail when a real run previews it.", e.projectKey, e.environmentKey))
 		}
