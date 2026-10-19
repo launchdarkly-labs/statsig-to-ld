@@ -400,13 +400,15 @@ A running experiment iteration keeps the metric versions it started with, which 
 
 Sources the file does not name get `--ld-maintainer`. Every entry is checked when the run starts: a source name the export does not have, or a member that cannot be found, stops the run before anything is written.
 
-New data sources get these maintainers. Existing ones keep theirs unless `--update-maintainers` is set, which changes only their `maintainerId`:
+New data sources get these maintainers. When the API token belongs to a member, LaunchDarkly makes that member the maintainer of a data source created with `none`, as it does for `--ld-maintainer none`; a run with `--update-maintainers` then removes it.
+
+Existing data sources in this environment keep their maintainers unless `--update-maintainers` is set, which changes only their `maintainerId`:
 
 - A data source the file names gets that maintainer; `none` removes it.
 - A data source with no maintainer gets `--ld-maintainer`, or the token's member when that flag is omitted.
 - A maintainer set in LaunchDarkly is replaced only by a file entry, never by `--ld-maintainer`.
 
-Each patch first tests the maintainer the run listed, so one changed in LaunchDarkly during the run fails rather than being overwritten. The report records each change as note code `maintainer_updated` (with `changes`, such as `["maintainer: old@example.com → new@example.com"]`), and the summary counts them. Without `--update-maintainers`, the run prints one line counting existing data sources whose maintainer differs from the file's.
+Each patch first tests the maintainer the run listed, or that there was none, so one changed in LaunchDarkly during the run fails rather than being overwritten. The report records each change as note code `maintainer_updated` (with `changes`, such as `["maintainer: old@example.com → new@example.com"]`), and the summary counts the updates and failures. Without `--update-maintainers`, the run prints one line counting existing data sources whose maintainer differs from the file's, and records each as note code `maintainer_differs_from_mapping`.
 
 A `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` resolves the maintainers, so a bad entry fails it too, and with `--update-maintainers` lists each change a real run would make.
 
@@ -492,7 +494,7 @@ statsig-to-ld warehouse \
 | `--warehouse-type` | — | `snowflake`, `bigquery`, `databricks`, or `redshift`. Set this when Statsig does not expose its warehouse connection config. Without it the command falls back to guessing from metric source SQL, and it will not create anything on a guess. |
 | `--ld-maintainer` | — | Maintainer for created data sources: an email, a 24-character member ID, or `none`. Defaults to the member who owns the API token. See [Maintainers](#maintainers). |
 | `--ld-maintainer-mapping` | — | JSON file mapping Statsig metric source names to their data source's maintainer: an email, a 24-character member ID, or `none`. Sources it does not name get `--ld-maintainer`. See [Data source maintainers](#data-source-maintainers). |
-| `--update-maintainers` | `false` | Set the maintainer of existing data sources in place: the one `--ld-maintainer-mapping` names, or `--ld-maintainer` for one with no maintainer. A maintainer set in LaunchDarkly is replaced only by a mapping entry. See [Data source maintainers](#data-source-maintainers). |
+| `--update-maintainers` | `false` | Set the maintainer of existing data sources in this environment in place: the one `--ld-maintainer-mapping` names, or `--ld-maintainer` for one with no maintainer. A maintainer set in LaunchDarkly is replaced only by a mapping entry. See [Data source maintainers](#data-source-maintainers). |
 | `--dry-run` | `false` | Preview data source mapping without writing to LD (still writes `source-mapping.json` and, with the constant event key on, `data-source-bodies.json` so you can review them). With `--ld-key`, `--ld-project`, and `--ld-environment` it reads the project's data sources (and, when a check needs them, its metrics), runs the real run's warehouse previews and checks on each create and update, and lists each source as would create, update, skip, refuse, or fail. Each preview runs the source's query in the warehouse as `SELECT * FROM (<query>) LIMIT 10`, so only 10 rows come back but the warehouse still does the query's work; a create or update is previewed up to twice, plus retries on server errors. Previews go only through the environment's own experimentation integration; without one, the dry run says so, and a create or update it lists can still fail when the real run previews it. When the integrations cannot be read, the dry run says a real run would stop: a real run stops before Phase 2 or 3 writes anything, since it cannot tell which warehouse the data sources use. With `--only warehouse` the dry run skips the data sources. Without all three flags, existing data sources are not checked. |
 | `--resume` | `false` | Resume from `migration_state.json` |
 | `--only` | — | Run only `warehouse` (Phase 2) or `data-sources` (Phase 3) |

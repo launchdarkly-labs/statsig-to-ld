@@ -372,7 +372,7 @@ Sets up the LaunchDarkly side of a Statsig warehouse-native experimentation proj
 
 ### Report notes
 
-`migration_report_<timestamp>.json` keeps per-data-source outcomes as `notes` (`{code, data_source}`, plus a `changes` list on `mappings_updated` and `maintainer_updated`); the run prints at most one line per code, not one per data source:
+`migration_report_<timestamp>.json` keeps per-data-source outcomes as `notes` (`{code, data_source}`, plus a `changes` list on `mappings_updated`, `maintainer_updated`, and `maintainer_differs_from_mapping`); the run prints at most one line per code, not one per data source:
 
 | Note code | Meaning |
 |---|---|
@@ -383,6 +383,7 @@ Sets up the LaunchDarkly side of a Statsig warehouse-native experimentation proj
 | `mappings_updated` | `--update-mappings` changed the data source's mappings. `changes` lists each changed field as `field: old → new` (for example `["timestamp: TS → CREATED_AT", "context user: USER_ID → UID"]`), the form `--overwrite`'s warnings use. Not printed. |
 | `context_kind_not_in_export` | `--update-mappings` kept a context kind the Statsig export does not map, such as one renamed by hand in LD. With `--remove-unmapped-contexts`, it marks a kind kept so the data source still has one. Not printed. |
 | `maintainer_updated` | `--update-maintainers` changed the data source's maintainer; `changes` holds `maintainer: old → new`. Not printed; the run summary counts them. |
+| `maintainer_differs_from_mapping` | `--ld-maintainer-mapping` names another maintainer for this existing data source, and `--update-maintainers` was not set; `changes` holds the change it would make. The run prints one line counting these. |
 | `context_kind_kept` | `--remove-unmapped-contexts` kept context kinds the export does not map, because bound metrics use them as analysis or randomization units. The run prints one line naming these and the metrics. |
 | `value_column_kept` | `--update-mappings` kept a value column the export does not map, because bound numeric metrics without their own value column read it. The run prints one line naming these and the metrics. |
 | `export_column_not_in_query` | `--update-mappings` left a mapping as it was, because the data source's columns do not include the export's column. The run prints one line naming these. |
@@ -447,6 +448,8 @@ cat migration-report.json | jq -r '.metrics[].note_codes[]?' | sort | uniq -c | 
 cat migration_report_*.json | jq -r '.notes[]? | "\(.code)\t\(.data_source)"' | sort
 # warehouse --update-mappings: what changed on each data source
 cat migration_report_*.json | jq -r '.notes[]? | select(.code == "mappings_updated") | "\(.data_source)\t\(.changes | join("; "))"'
+# warehouse --update-maintainers: whose maintainer changed
+cat migration_report_*.json | jq -r '.notes[]? | select(.code == "maintainer_updated") | "\(.data_source)\t\(.changes[0])"'
 
 # metric filters: how many terms converted vs were blocked
 cat migration-report.json | jq '[.metrics[].filters[]?] | group_by(.applied) | map({applied: .[0].applied, terms: length, criteria: (map(.criteria) | add)})'
@@ -501,8 +504,8 @@ Those data sources were created before the constant event key, or by hand; each 
 ### `warehouse --overwrite` fails a data source with "bound to it use an event key other than"
 Those metrics would match no rows once the key column holds only the data source key. Metrics created by older versions of this tool usually match nothing already. Rerun with `--force-overwrite` to update it anyway, then set each listed metric's event key to the data source key in LD.
 
-### `warehouse --overwrite` fails a data source with "changed in LaunchDarkly after this run read it" or "could not read a complete list of the project's metrics"
-Nothing was changed. The first means someone edited the data source during the run; the second means LD's metric list came back short twice, so the bound metrics could not be checked. Rerun.
+### `warehouse --overwrite` or `--update-maintainers` fails a data source with "changed in LaunchDarkly after this run read it" or "could not read a complete list of the project's metrics"
+Nothing was changed. The first means someone edited the data source (or its maintainer) during the run; the second means LD's metric list came back short twice, so the bound metrics could not be checked. Rerun.
 
 ### `warehouse` stops with "could not read the LaunchDarkly experimentation integrations"
 The token could not list one of the warehouse experimentation integration types, so the run cannot tell which warehouse the data sources use, or whether setup would add a second integration; it stops before writing anything. Check the token's access to integrations and rerun. A `--dry-run` reports the same error in a note.
