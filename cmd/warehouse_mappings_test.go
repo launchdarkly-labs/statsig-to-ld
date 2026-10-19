@@ -361,36 +361,49 @@ func TestUpdateMappings_DryRun(t *testing.T) {
 	}
 	wantWarnings := []string{
 		withoutConstantKeySummary(2),
+		droppedValueSummary([]string{"page-views"}),
 		`1 data source(s) kept a value column the Statsig export does not map, because bound numeric metrics with no value column of their own read it: order-total-sum on checkout-events. Set those metrics' value column in LaunchDarkly and refresh them on running experiments, then rerun to remove it.`,
 		`1 data source(s) did not take some mappings from the Statsig export, because their columns do not include the export's: context account "acct" on checkout-events. Correct the columns in Statsig, or add them to the data source's query, then rerun.`,
 	}
 	if strings.Join(l.warnings, "\n") != strings.Join(wantWarnings, "\n") {
 		t.Errorf("warnings:\n%s\nwant:\n%s", strings.Join(l.warnings, "\n"), strings.Join(wantWarnings, "\n"))
 	}
-	if f.patchCount != 0 || len(f.previews) != 0 {
-		t.Errorf("dry run wrote or previewed: patches=%d previews=%d", f.patchCount, len(f.previews))
+	if f.patchCount != 0 || len(f.created) != 0 || len(f.previews) != 2 {
+		t.Errorf("patches=%d created=%d previews=%d, want Page Views previewed and no writes", f.patchCount, len(f.created), len(f.previews))
 	}
 
 	e.ldReadable = false
 	l = e.dryRunDataSources("snowflake")
-	if l.checked || !strings.Contains(l.note, "were not checked") || len(l.lines) != 4 || l.lines[0] != "Checkout Events (query): would create" {
-		t.Errorf("without credentials: checked=%v note=%q lines=%q", l.checked, l.note, l.lines)
+	if l.checked || !strings.Contains(strings.Join(l.notes, " "), "were not checked") || len(l.lines) != 4 || l.lines[0] != "Checkout Events (query): would create" {
+		t.Errorf("without credentials: checked=%v notes=%q lines=%q", l.checked, l.notes, l.lines)
 	}
 }
 
-func TestUpdateMappings_DryRunWithOverwriteEstimatesTheChanges(t *testing.T) {
+func TestUpdateMappings_DryRunWithOverwrite(t *testing.T) {
 	t.Chdir(t.TempDir())
 	cm := map[string]any{"keyColumn": "EVENT_KEY", "timestampColumn": "TS", "valueColumn": "ORDER_TOTAL", "contexts": map[string]any{"user": "USER_ID", "account": "account_id"}}
-	f := &fakeLD{t: t, list: dsList(t, "SELECT * FROM analytics.events", cm)}
-	srv := f.server()
-	defer srv.Close()
-	e := newPhase3Engine(t, srv.URL, false)
-	e.dryRun, e.ldReadable, e.updateMappings, e.overwrite = true, true, true, true
-	e.metricSources = []map[string]any{mappingSource()}
-	l := e.dryRunDataSources("snowflake")
+	run := func(f *fakeLD) dryRunListing {
+		srv := f.server()
+		defer srv.Close()
+		e := newPhase3Engine(t, srv.URL, false)
+		e.dryRun, e.ldReadable, e.updateMappings, e.overwrite = true, true, true, true
+		e.metricSources = []map[string]any{mappingSource()}
+		return e.dryRunDataSources("snowflake")
+	}
+
+	// Without the environment's integration, the field list is an estimate in the export's case.
+	l := run(&fakeLD{t: t, list: dsList(t, "SELECT * FROM analytics.events", cm), noIntegration: true})
 	want := "Checkout Events (query): would update\n        timestamp: TS → created_at\n        context user: USER_ID → uid"
-	if len(l.lines) != 1 || l.lines[0] != want {
-		t.Errorf("lines = %q\nwant %q", l.lines, want)
+	if len(l.lines) != 1 || l.lines[0] != want || l.previewed || !strings.Contains(strings.Join(l.notes, " "), "No query was previewed") {
+		t.Errorf("lines = %q\nwant %q\npreviewed=%v notes=%q", l.lines, want, l.previewed, l.notes)
+	}
+
+	// With it, the preview's columns (TS, USER_ID, EVENT_KEY) give the patch a real run sends.
+	f := &fakeLD{t: t, list: dsList(t, "SELECT * FROM analytics.events", cm)}
+	l = run(f)
+	want = "Checkout Events (query): would update\n        value column: ORDER_TOTAL → (none)\n        context account: account_id → (none)"
+	if len(l.lines) != 1 || l.lines[0] != want || !l.previewed || f.patchCount != 0 || len(f.previews) != 2 {
+		t.Errorf("lines = %q\nwant %q\npreviewed=%v patches=%d previews=%d", l.lines, want, l.previewed, f.patchCount, len(f.previews))
 	}
 }
 

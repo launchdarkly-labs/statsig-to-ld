@@ -325,8 +325,9 @@ Many of these mark a conversion **lossy**: by default the metric is skipped (`sk
 Sets up the LaunchDarkly side of a Statsig warehouse-native experimentation project: data export integration, experimentation integration, and LD metric data sources. **It does not migrate metric definitions** — `metrics convert` does that, using the `source-mapping.json` this subcommand writes. Full operator detail (interactive SQL wizards per warehouse type, resume semantics, the `migration_state.json` lifecycle) is in [`.claude/agents/statsig-warehouse-migrator.md`](.claude/agents/statsig-warehouse-migrator.md); this section is enough to drive the basic flow and decide when to run it.
 
 ```bash
-# Dry-run from live Statsig API (only Statsig key needed). Add --ld-key and
-# --ld-project to list which data sources would be created, updated, skipped, or refused.
+# Dry-run from live Statsig API (only Statsig key needed). Add --ld-key, --ld-project,
+# and --ld-environment to preview each query and list what a real run would create,
+# update, skip, refuse, or fail.
 ./statsig-to-ld warehouse --statsig-key console-... --dry-run
 
 # Full warehouse setup (integrations + data sources)
@@ -353,7 +354,7 @@ Sets up the LaunchDarkly side of a Statsig warehouse-native experimentation proj
 ./statsig-to-ld warehouse ... --only data-sources
 
 # Correct existing data sources' timestamp, value, and context mappings from the export
-# (preview first: add --dry-run with --ld-key and --ld-project)
+# (preview first: add --dry-run with --ld-key, --ld-project, and --ld-environment)
 ./statsig-to-ld warehouse ... --only data-sources --update-mappings
 
 # Also remove context kinds the export no longer maps (kinds bound metrics use are kept)
@@ -491,13 +492,16 @@ LaunchDarkly rate-limiting. Throttled requests are retried automatically, but a 
 Already created in a previous run — expected and safe. The tool is idempotent. Existing metrics are not updated, so one created before its data source got the constant event key is flagged with `existing_metric_event_key_mismatch`; fix its event key in LD.
 
 ### `warehouse` warns "N data source(s) already exist without the constant event key"
-Those data sources were created before the constant event key, or by hand; each is listed in the progress output as "exists without the constant event key". If this tool created them, rerun `warehouse --dry-run` with LD credentials and `--overwrite` to see what would happen (a "would update" can still be refused once the real run previews the new query), then rerun with `--overwrite` to update them in place (LD cannot delete metric data sources). If one was built by hand and its key column holds real event names, leave it.
+Those data sources were created before the constant event key, or by hand; each is listed in the progress output as "exists without the constant event key". If this tool created them, rerun `warehouse --dry-run --overwrite` with `--ld-key`, `--ld-project`, and `--ld-environment` to see what would happen (it previews each new query and runs the real run's checks), then rerun with `--overwrite` to update them in place (LD cannot delete metric data sources). If one was built by hand and its key column holds real event names, leave it.
 
 ### `warehouse --overwrite` fails a data source with "bound to it use an event key other than"
 Those metrics would match no rows once the key column holds only the data source key. Metrics created by older versions of this tool usually match nothing already. Rerun with `--force-overwrite` to update it anyway, then set each listed metric's event key to the data source key in LD.
 
 ### `warehouse --overwrite` fails a data source with "changed in LaunchDarkly after this run read it" or "could not read a complete list of the project's metrics"
 Nothing was changed. The first means someone edited the data source during the run; the second means LD's metric list came back short twice, so the bound metrics could not be checked. Rerun.
+
+### `warehouse` stops with "could not read the LaunchDarkly experimentation integrations"
+The token could not list one of the warehouse experimentation integration types, so the run cannot tell which warehouse the data sources use, or whether setup would add a second integration; it stops before writing anything. Check the token's access to integrations and rerun. A `--dry-run` reports the same error in a note.
 
 ### `warehouse` fails a data source with "is taken by a data source in LaunchDarkly environment"
 Data source keys are unique per project, and that key belongs to a data source in another environment, which this run will not change or map. Rename the source in Statsig, or run against that environment with `--ld-environment`.

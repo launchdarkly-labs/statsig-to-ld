@@ -106,19 +106,36 @@ func (c *Client) CompleteDataExportSetup(ctx context.Context, kind string, paylo
 
 // -- Integration configurations --
 
-// ListIntegrationConfigs lists integration configurations for a given key.
+// ListIntegrationConfigs lists integration configurations for a given key, or none
+// when they cannot be read.
 func (c *Client) ListIntegrationConfigs(ctx context.Context, integrationKey string) []map[string]any {
-	status, body, _ := c.requestJSON(ctx, "GET", fmt.Sprintf("/api/v2/integration-configurations/keys/%s", integrationKey), nil)
-	if status == 200 && body != nil {
-		items := j.ExtractItemsList(body)
-		if len(items) > 0 {
-			return items
-		}
-		if j.GetStr(body, "id") != "" {
-			return []map[string]any{body}
-		}
+	items, _ := c.ReadIntegrationConfigs(ctx, integrationKey)
+	return items
+}
+
+// ReadIntegrationConfigs lists integration configurations for a given key. A key the
+// account does not have (404) has none.
+func (c *Client) ReadIntegrationConfigs(ctx context.Context, integrationKey string) ([]map[string]any, error) {
+	status, body, err := c.requestJSON(ctx, "GET", fmt.Sprintf("/api/v2/integration-configurations/keys/%s", integrationKey), nil)
+	if err != nil {
+		return nil, fmt.Errorf("listing %s integrations: %w", integrationKey, err)
 	}
-	return nil
+	if status == 404 {
+		return nil, nil
+	}
+	if status != 200 {
+		if msg := j.GetStr(body, "message"); msg != "" {
+			return nil, fmt.Errorf("listing %s integrations: %d: %s", integrationKey, status, msg)
+		}
+		return nil, fmt.Errorf("listing %s integrations: %d", integrationKey, status)
+	}
+	if items := j.ExtractItemsList(body); len(items) > 0 {
+		return items, nil
+	}
+	if body != nil && j.GetStr(body, "id") != "" {
+		return []map[string]any{body}, nil
+	}
+	return nil, nil
 }
 
 // CreateIntegrationConfig creates an integration configuration.
@@ -180,6 +197,10 @@ func (c *Client) PreviewDataSource(ctx context.Context, integrationConfigID, sql
 		return nil, err
 	}
 	if status != 200 {
+		// Warehouse messages span lines (Snowflake's "SQL compilation error:\n…"), and callers print the first.
+		if msg := strings.Join(strings.Fields(j.GetStr(body, "message")), " "); msg != "" {
+			return nil, fmt.Errorf("failed to preview data source: %d: %s\n%s", status, msg, j.ToJSON(body))
+		}
 		return nil, fmt.Errorf("failed to preview data source: %d\n%s", status, j.ToJSON(body))
 	}
 	return body, nil

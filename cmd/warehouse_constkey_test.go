@@ -15,6 +15,7 @@ import (
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/state"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/warehouse"
 )
 
 // fakeLD's preview upper-cases an unquoted alias, as Snowflake does.
@@ -31,6 +32,20 @@ type fakeLD struct {
 	previewCols   string
 	// previewValue is the preview's guessed value column, as LaunchDarkly returns one.
 	previewValue string
+	// noIntegration lists no experimentation integration.
+	noIntegration bool
+	// wrappedPreviewStatus fails previews of the wrapped SQL; previewStatus, every preview.
+	wrappedPreviewStatus int
+	previewStatus        int
+	// integrationStatus fails the integration lists of integrationStatusKeys, or of
+	// every key when that is empty; missingIntegrations 404. extraIntegrations are
+	// integration keys besides snowflake-experimentation set up for proj/production.
+	integrationStatus     int
+	integrationStatusKeys []string
+	missingIntegrations   []string
+	extraIntegrations     []string
+	// previewMessage replaces the failed previews' "SQL compilation error".
+	previewMessage string
 
 	created      []map[string]any
 	patches      map[string][]launchdarkly.JSONPatchOp
@@ -45,13 +60,35 @@ func (f *fakeLD) server() *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		const dsPath = "/internal/projects/proj/metric-data-sources"
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/snowflake-experimentation"):
+		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/") && f.integrationStatus != 0 &&
+			(len(f.integrationStatusKeys) == 0 || slices.Contains(f.integrationStatusKeys, strings.TrimPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/"))):
+			w.WriteHeader(f.integrationStatus)
+			_, _ = io.WriteString(w, `{"code":"forbidden","message":"Access to the requested resource was denied"}`)
+		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/") && slices.Contains(f.missingIntegrations, strings.TrimPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/")):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"code":"not_found","message":"Integration not found"}`)
+		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/snowflake-experimentation") && !f.noIntegration:
 			_, _ = io.WriteString(w, `{"items":[{"_id":"cfg-1","configValues":{"selectedEnv":{"projectKey":"proj","environmentKey":"production"}}}]}`)
+		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/") && slices.Contains(f.extraIntegrations, strings.TrimPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/")):
+			_, _ = io.WriteString(w, `{"items":[{"_id":"cfg-`+strings.TrimPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/")+`","configValues":{"selectedEnv":{"projectKey":"proj","environmentKey":"production"}}}]}`)
 		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/"):
 			_, _ = io.WriteString(w, `{"items":[]}`)
 		case strings.HasSuffix(r.URL.Path, "/metric-data-source-preview"):
 			sql := r.URL.Query().Get("sqlQuery")
 			f.previews = append(f.previews, sql)
+			if status := f.previewStatus; status != 0 || (f.wrappedPreviewStatus != 0 && strings.HasPrefix(sql, "SELECT *, '")) {
+				if status == 0 {
+					status = f.wrappedPreviewStatus
+				}
+				w.WriteHeader(status)
+				msg := f.previewMessage
+				if msg == "" {
+					msg = "SQL compilation error"
+				}
+				raw, _ := json.Marshal(map[string]string{"code": "invalid_request", "message": msg})
+				_, _ = w.Write(raw)
+				return
+			}
 			cols := f.previewCols
 			if cols == "" {
 				cols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT","length":64},{"name":"EVENT_KEY","type":"TEXT"}`
@@ -896,17 +933,18 @@ func TestDryRun_ReportsPlannedOutcomes(t *testing.T) {
 		"Signups (query): would refuse (key collision: \"Signups\", \"signups\")",
 		"signups (query): would refuse (key collision: \"Signups\", \"signups\")",
 	}
-	if !l.checked || strings.Join(l.lines, "\n") != strings.Join(want, "\n") || l.note != "" {
-		t.Errorf("checked=%v note=%q lines:\n%s\nwant:\n%s", l.checked, l.note, strings.Join(l.lines, "\n"), strings.Join(want, "\n"))
+	if !l.checked || strings.Join(l.lines, "\n") != strings.Join(want, "\n") || len(l.notes) != 0 {
+		t.Errorf("checked=%v notes=%q lines:\n%s\nwant:\n%s", l.checked, l.notes, strings.Join(l.lines, "\n"), strings.Join(want, "\n"))
 	}
-	if f.patchCount != 0 || len(f.created) != 0 || len(f.previews) != 0 {
-		t.Errorf("dry run wrote or previewed: patches=%d created=%d previews=%d", f.patchCount, len(f.created), len(f.previews))
+	// Refunds' update and Page Views' create are each previewed raw, then wrapped.
+	if !l.previewed || f.patchCount != 0 || len(f.created) != 0 || len(f.previews) != 4 {
+		t.Errorf("previewed=%v patches=%d created=%d previews=%d, want 4 previews and no writes", l.previewed, f.patchCount, len(f.created), len(f.previews))
 	}
 
 	e.ldReadable = false
 	l = e.dryRunDataSources("snowflake")
-	if l.checked || !strings.Contains(l.note, "were not checked") || l.lines[0] != "Checkout Events (query): would create" {
-		t.Errorf("without credentials: checked=%v note=%q lines=%q", l.checked, l.note, l.lines)
+	if l.checked || !strings.Contains(strings.Join(l.notes, " "), "were not checked") || l.lines[0] != "Checkout Events (query): would create" {
+		t.Errorf("without credentials: checked=%v notes=%q lines=%q", l.checked, l.notes, l.lines)
 	}
 }
 
@@ -1245,5 +1283,237 @@ func TestBoundMetrics_NumeratorOrDenominator(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("bound:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// The case a dry run without previews lists as "would update": the new query drops a
+// value column bound numeric metrics read, which only the preview shows.
+func TestDryRun_PreviewsShowRefusalsTheRealRunMakes(t *testing.T) {
+	t.Chdir(t.TempDir())
+	metrics := `[{"key":"order-total","eventKey":"checkout-events","isNumeric":true,"unitAggregationType":"sum","dataSource":{"key":"checkout-events"}}]`
+	run := func(f *fakeLD) []string {
+		srv := f.server()
+		defer srv.Close()
+		e := newPhase3Engine(t, srv.URL, false)
+		e.dryRun, e.ldReadable, e.overwrite = true, true, true
+		l := e.dryRunDataSources("snowflake")
+		if f.patchCount != 0 || len(f.created) != 0 {
+			t.Errorf("dry run wrote: patches=%d created=%d", f.patchCount, len(f.created))
+		}
+		return l.lines
+	}
+	if lines := run(&fakeLD{t: t, list: valueColumnList, metrics: metrics, noIntegration: true}); len(lines) != 1 || lines[0] != "Checkout Events (query): would update" {
+		t.Errorf("without previews: lines = %q", lines)
+	}
+	want := `Checkout Events (query): would refuse (would remove value column "AMT", read by bound metrics: order-total)`
+	if lines := run(&fakeLD{t: t, list: valueColumnList, metrics: metrics}); len(lines) != 1 || lines[0] != want {
+		t.Errorf("with previews: lines = %q\nwant %q", lines, want)
+	}
+}
+
+func TestDryRun_FailedPreviewIsReportedAndTheRunContinues(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, wrappedPreviewStatus: http.StatusBadRequest}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable = true, true
+	orders := checkoutSource()
+	orders["name"] = "Orders"
+	e.metricSources = append(e.metricSources, orders)
+	l := e.dryRunDataSources("snowflake")
+	// The line carries LaunchDarkly's message, not just the status.
+	const outcome = "would fail (preview of the wrapped source SQL failed (LaunchDarkly runs the same query to validate the data source): failed to preview data source: 400: SQL compilation error)"
+	if len(l.lines) != 2 || l.lines[0] != "Checkout Events (query): "+outcome || l.lines[1] != "Orders (query): "+outcome {
+		t.Errorf("lines = %q", l.lines)
+	}
+	if len(f.previews) != 4 || len(f.created) != 0 {
+		t.Errorf("previews=%d created=%d, want both sources previewed and nothing created", len(f.previews), len(f.created))
+	}
+}
+
+// An integration set up for another project could preview a different warehouse.
+func TestDryRun_PreviewsOnlyThroughThisEnvironmentsIntegration(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable, e.projectKey = true, true, "other-project"
+	l := e.dryRunDataSources("snowflake")
+	if l.previewed || len(f.previews) != 0 || len(l.notes) != 1 || !strings.HasPrefix(l.notes[0], `No query was previewed, because LaunchDarkly project "other-project" environment "production" has no warehouse experimentation integration yet`) {
+		t.Errorf("previewed=%v previews=%d notes=%q", l.previewed, len(f.previews), l.notes)
+	}
+	if len(l.lines) != 1 || l.lines[0] != "Checkout Events (query): would create" {
+		t.Errorf("lines = %q", l.lines)
+	}
+}
+
+// With the constant event key off, nothing else previews the query, and LaunchDarkly
+// runs it to validate the create.
+func TestDryRun_FailedQueryPreviewWithoutTheConstantKey(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, previewStatus: http.StatusBadRequest}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable, e.constantEventKey = true, true, false
+	l := e.dryRunDataSources("snowflake")
+	want := "Checkout Events (query): would fail (preview of the Statsig SQL failed: failed to preview data source: 400: SQL compilation error)"
+	if len(l.lines) != 1 || l.lines[0] != want {
+		t.Errorf("lines = %q\nwant %q", l.lines, want)
+	}
+}
+
+func TestDryRun_RefusalWithoutAShortReasonIsTheError(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, list: unwrappedList}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable, e.overwrite, e.constantEventKey = true, true, true, false
+	l := e.dryRunDataSources("snowflake")
+	want := `Checkout Events (query): would refuse (its key column "EVENT_NAME" is not in the updated query; metrics on it would filter a different column. Keep that column in the Statsig SQL, or update the data source by hand)`
+	if len(l.lines) != 1 || l.lines[0] != want {
+		t.Errorf("lines = %q\nwant %q", l.lines, want)
+	}
+}
+
+func TestDryRun_UnreadableIntegrationsAreNotReportedAsMissing(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, integrationStatus: http.StatusForbidden}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable = true, true
+	l := e.dryRunDataSources("snowflake")
+	want := "No query was previewed, because the experimentation integrations could not be read (listing snowflake-experimentation integrations: 403: Access to the requested resource was denied; listing bigquery-experimentation integrations: 403: Access to the requested resource was denied; listing databricks-experimentation integrations: 403: Access to the requested resource was denied; listing redshift-experimentation integrations: 403: Access to the requested resource was denied); a real run stops on this error."
+	if l.previewed || len(l.notes) != 1 || l.notes[0] != want {
+		t.Errorf("previewed=%v notes=%q\nwant %q", l.previewed, l.notes, want)
+	}
+}
+
+// Every call picks the same integration, so a dry run and a real run agree.
+func TestEnvironmentIntegration_PicksInSupportedOrder(t *testing.T) {
+	f := &fakeLD{t: t, extraIntegrations: []string{"bigquery-experimentation", "redshift-experimentation"}}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	for range 20 {
+		if key, id, err := e.environmentIntegration(); key != "snowflake-experimentation" || id != "cfg-1" || err != nil {
+			t.Fatalf("got %q %q %v, want snowflake's", key, id, err)
+		}
+	}
+	if key, id, err := e.getActiveIntegration(); key != "snowflake-experimentation" || id != "cfg-1" || err != nil {
+		t.Errorf("getActiveIntegration = %q %q %v", key, id, err)
+	}
+}
+
+// The header, listing, and data-source-bodies.json use the integration's warehouse type.
+func TestDryRun_ReportUsesTheIntegrationsWarehouseType(t *testing.T) {
+	t.Chdir(t.TempDir())
+	whFlagWarehouseType = "bigquery"
+	t.Cleanup(func() { whFlagWarehouseType = "" })
+	f := &fakeLD{t: t}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable = true, true
+	e.printDryRunReport()
+	raw, err := os.ReadFile("data-source-bodies.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := string(raw); !strings.Contains(body, "AS LD_EVENT_KEY") || !strings.Contains(body, "snowflake-experimentation") {
+		t.Errorf("data-source-bodies.json = %s, want snowflake's wrapping and integration", body)
+	}
+}
+
+func TestDryRun_OnlyWarehouseSkipsDataSources(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable, e.only = true, true, "warehouse"
+	e.printDryRunReport()
+	if _, err := os.Stat("data-source-bodies.json"); !os.IsNotExist(err) || len(f.previews) != 0 {
+		t.Errorf("bodies stat err=%v previews=%d, want no data source work", err, len(f.previews))
+	}
+}
+
+// Snowflake puts the object name after a newline; callers print the first line.
+func TestDryRun_MultiLinePreviewErrorKeepsTheCause(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, wrappedPreviewStatus: http.StatusBadRequest, previewMessage: "Could not execute query: 002003 (02000): SQL compilation error:\nObject 'DB.EVENTS' does not exist or not authorized."}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable = true, true
+	l := e.dryRunDataSources("snowflake")
+	if len(l.lines) != 1 || !strings.HasSuffix(l.lines[0], "SQL compilation error: Object 'DB.EVENTS' does not exist or not authorized.)") {
+		t.Errorf("lines = %q", l.lines)
+	}
+}
+
+// LaunchDarkly 404s an integration key the account does not have.
+func TestDryRun_IntegrationKeysTheAccountLacksAreNotErrors(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, noIntegration: true, missingIntegrations: []string{"redshift-experimentation"}}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable = true, true
+	l := e.dryRunDataSources("snowflake")
+	if len(l.notes) != 1 || !strings.Contains(l.notes[0], "has no warehouse experimentation integration yet") {
+		t.Errorf("notes = %q", l.notes)
+	}
+}
+
+// Another type's unreadable integration could be the one the environment uses, so the
+// run stops before writing, even when one type matched.
+func TestPhase3_StopsWhenIntegrationsCannotBeRead(t *testing.T) {
+	for _, keys := range [][]string{nil, {"bigquery-experimentation"}} {
+		t.Run(fmt.Sprint(keys), func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			// Not a 5xx: the client retries those with backoff.
+			f := &fakeLD{t: t, integrationStatus: http.StatusForbidden, integrationStatusKeys: keys}
+			srv := f.server()
+			defer srv.Close()
+			e := newPhase3Engine(t, srv.URL, false)
+			err := e.phase3aMigrateDataSources()
+			if err == nil || !strings.HasPrefix(err.Error(), "could not read the LaunchDarkly experimentation integrations, so cannot tell which warehouse the data sources use: ") || len(f.created) != 0 || len(f.previews) != 0 {
+				t.Errorf("err=%v created=%d previews=%d", err, len(f.created), len(f.previews))
+			}
+			if _, err := e.checkExperimentationExists("snowflake"); err == nil || !strings.Contains(err.Error(), "cannot tell whether one is set up") {
+				t.Errorf("phase 2 check: err = %v", err)
+			}
+
+			e.dryRun, e.ldReadable = true, true
+			l := e.dryRunDataSources("snowflake")
+			if l.previewed || len(l.notes) != 1 || !strings.HasSuffix(l.notes[0], "a real run stops on this error.") {
+				t.Errorf("dry run: previewed=%v notes=%q", l.previewed, l.notes)
+			}
+		})
+	}
+}
+
+func TestWarehouseTypeLine(t *testing.T) {
+	previewed := dryRunListing{previewed: true, whType: "snowflake"}
+	for _, tc := range []struct {
+		detected string
+		source   warehouse.WarehouseTypeSource
+		l        dryRunListing
+		want     string
+	}{
+		{"bigquery", warehouse.WarehouseTypeFromFlag, previewed, "Warehouse type: snowflake (from the LaunchDarkly environment's experimentation integration, which data sources use; bigquery from --warehouse-type, which data export setup uses)"},
+		{"bigquery", warehouse.WarehouseTypeGuessedFromSQL, previewed, "Warehouse type: snowflake (from the LaunchDarkly environment's experimentation integration)"},
+		{"snowflake", warehouse.WarehouseTypeGuessedFromSQL, previewed, "Warehouse type: snowflake (from the LaunchDarkly environment's experimentation integration)"},
+		{"bigquery", warehouse.WarehouseTypeFromFlag, dryRunListing{whType: "bigquery"}, "Warehouse type: bigquery (from --warehouse-type)"},
+		{"", warehouse.WarehouseTypeUnknown, dryRunListing{}, "Warehouse type: unknown (pass --warehouse-type)"},
+	} {
+		if got := warehouseTypeLine(tc.detected, tc.source, tc.l); got != tc.want {
+			t.Errorf("warehouseTypeLine(%q, %v) =\n%s\nwant\n%s", tc.detected, tc.source, got, tc.want)
+		}
 	}
 }
