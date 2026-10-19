@@ -13,9 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks a real run does on each create and update, so its "would create" and "would update" are what the real run
   does, and a source the real run would refuse or fail is listed that way. Each preview runs the source's query in
   the warehouse as `SELECT * FROM (<query>) LIMIT 10`, so only 10 rows come back but the warehouse still does the
-  query's work; a create or update is previewed up to twice. Previews go only through the environment's own
-  experimentation integration; without one, or when the integrations cannot be read, the dry run says so and lists
-  creates and updates unpreviewed.
+  query's work; a create or update is previewed up to twice, plus retries on server errors. Previews go only through
+  the environment's own experimentation integration; without one, the dry run says so and lists creates and updates
+  unpreviewed. With `--only warehouse` it skips the data sources, as a real run does. A real run now stops before
+  Phase 2 or 3 writes anything when the experimentation integrations cannot be read, since setup could add a second
+  integration and data sources could bind to the wrong warehouse; a dry run says it would stop. An integration type
+  the account does not have counts as none.
 
 - `metrics convert` and `warehouse`: `--ld-maintainer` sets the maintainer on every created metric and metric data
   source. LaunchDarkly fills this in automatically from the token's member, but only for a personal token: a
@@ -56,8 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   randomization unit. A metric is bound through its numerator's data source or its denominator's, and a denominator
   with no data source of its own reads the numerator's, which `--overwrite`'s event-key check now counts too.
   `--overwrite` also checks the type of a fallback timestamp or value column. A `--dry-run` with `--ld-key`,
-  `--ld-project`, and `--ld-environment` prints each changed field (`timestamp: TS → CREATED_AT`), and the report records each update as note code
-  `mappings_updated` with a `changes` list in the same form, which `--overwrite`'s warnings now use too.
+  `--ld-project`, and `--ld-environment` prints each changed field (`timestamp: TS → CREATED_AT`), and the report
+  records each update as note code `mappings_updated` with a `changes` list in the same form, which `--overwrite`'s
+  warnings now use too.
 
 
 ### Added
@@ -149,16 +153,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `warehouse`: the warehouse preview's column guesses (the first timestamp-typed column as the timestamp column; an
   `event_value` column, else the first numeric column, as the value column) replaced the columns configured in
-  Statsig, and a data source got the value-column guess even when its Statsig source defined none. Statsig's timestamp
-  column now wins whenever the warehouse returns it, in the warehouse's case, and the value-column guess is never
-  used: a data source gets a value column only when its Statsig source defines one and the query returns it. The run
-  prints one line naming the data sources whose query does not return their Statsig value column (note code
+  Statsig, and a data source got the value-column guess even when its Statsig source defined none. Statsig's
+  timestamp column now wins whenever the warehouse returns it, in the warehouse's case, and the value-column guess is
+  never used: a data source gets a value column only when its Statsig source defines one and the query returns it.
+  The run prints one line naming the data sources whose query does not return their Statsig value column (note code
   `statsig_value_column_not_in_query`). `--overwrite` no longer puts the guess in place of an existing value column
   the new query lacks, and refuses a data source whose bound numeric metrics read that column without a value column
-  of their own, naming them (a `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` lists it as "would refuse"). Numeric
-  metrics then take their value column from the metric, which `metrics convert`
-  sets on constant-key data sources; on one created with `--constant-event-key=false`, a numeric metric needs a value
-  column set by hand.
+  of their own, naming them (a `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` lists it as "would
+  refuse" when the environment has an experimentation integration). Numeric metrics then take their value column from
+  the metric, which `metrics convert` sets on constant-key data sources; on one created with
+  `--constant-event-key=false`, a numeric metric needs a value column set by hand.
 
 - `warehouse`: Statsig sources whose names sanitize to the same LaunchDarkly key (for example `Checkout Events` and
   `checkout events`) were written to one data source, the last one winning, and `source-mapping.json` bound all of

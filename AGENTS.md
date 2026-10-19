@@ -500,6 +500,9 @@ Those metrics would match no rows once the key column holds only the data source
 ### `warehouse --overwrite` fails a data source with "changed in LaunchDarkly after this run read it" or "could not read a complete list of the project's metrics"
 Nothing was changed. The first means someone edited the data source during the run; the second means LD's metric list came back short twice, so the bound metrics could not be checked. Rerun.
 
+### `warehouse` stops with "could not read the LaunchDarkly experimentation integrations"
+The token could not list one of the warehouse experimentation integration types, so the run cannot tell which warehouse the data sources use, or whether setup would add a second integration; it stops before writing anything. Check the token's access to integrations and rerun. A `--dry-run` reports the same error in a note.
+
 ### `warehouse` fails a data source with "is taken by a data source in LaunchDarkly environment"
 Data source keys are unique per project, and that key belongs to a data source in another environment, which this run will not change or map. Rename the source in Statsig, or run against that environment with `--ld-environment`.
 
