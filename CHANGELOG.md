@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `warehouse`: `--ld-maintainer-mapping` names a maintainer per Statsig source, instead of one `--ld-maintainer` for
+  the whole run: a JSON object of Statsig metric source names to an email, a member ID, or `none`. Sources it does not
+  name get `--ld-maintainer`. `--update-maintainers` sets the maintainer of existing data sources in place: the one
+  the file names, or `--ld-maintainer` for one with no maintainer. A maintainer set in LaunchDarkly is replaced only
+  by a file entry. Each patch changes only `maintainerId`, after testing the one the run listed. A source name the
+  export does not have, or a member that cannot be found, stops the run before anything is written. The report
+  records each change as note code `maintainer_updated`, and a dry run with LD credentials lists the changes it would
+  make.
+
 - `warehouse`: a `--dry-run` with `--ld-key`, `--ld-project`, and `--ld-environment` runs the warehouse previews and
   checks a real run does on each create and update, so its "would create" and "would update" are what the real run
   does, and a source the real run would refuse or fail is listed that way. Each preview runs the source's query in
