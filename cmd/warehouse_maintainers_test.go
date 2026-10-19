@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -70,9 +71,9 @@ func TestUpdateMaintainers_SetsMappedAndUnmaintainedDataSources(t *testing.T) {
 			t.Errorf("%s ops:\n%s\nwant:\n%s", key, got, want)
 		}
 	}
-	// orders tests that it still has no maintainer.
-	if f.patches["checkout-events"][0].Value != memberA || f.patches["refunds"][0].Value != memberB || f.patches["orders"][0].Value != nil {
-		t.Errorf("test values = %v, %v, %v, want the listed maintainers", f.patches["checkout-events"][0].Value, f.patches["refunds"][0].Value, f.patches["orders"][0].Value)
+	// orders tests that it still has no maintainer, so the null must be sent: LD's json-patch rejects a test with no value.
+	if f.patches["checkout-events"][0].Value != memberA || f.patches["refunds"][0].Value != memberB || !strings.Contains(f.patchBodies["orders"], `{"op":"test","path":"/maintainerId","value":null}`) {
+		t.Errorf("test values = %v, %v, orders body %s, want the listed maintainers", f.patches["checkout-events"][0].Value, f.patches["refunds"][0].Value, f.patchBodies["orders"])
 	}
 	if len(f.created) != 1 || f.created[0]["key"] != "page-views" || f.created[0]["maintainerId"] != nil {
 		t.Errorf("created = %v, want page-views with no maintainer", f.created)
@@ -83,10 +84,11 @@ func TestUpdateMaintainers_SetsMappedAndUnmaintainedDataSources(t *testing.T) {
 			notes = append(notes, n)
 		}
 	}
+	// By member ID, so a shared report carries no member emails.
 	want := []reportNote{
-		{Code: noteMaintainerUpdated, DataSource: "checkout-events", Changes: []string{"maintainer: a@example.com → c@example.com"}},
-		{Code: noteMaintainerUpdated, DataSource: "orders", Changes: []string{"maintainer: (none) → d@example.com"}},
-		{Code: noteMaintainerUpdated, DataSource: "refunds", Changes: []string{"maintainer: b@example.com → (none)"}},
+		{Code: noteMaintainerUpdated, DataSource: "checkout-events", Changes: []string{"maintainer: " + memberA + " → " + memberC}},
+		{Code: noteMaintainerUpdated, DataSource: "orders", Changes: []string{"maintainer: (none) → " + memberD}},
+		{Code: noteMaintainerUpdated, DataSource: "refunds", Changes: []string{"maintainer: " + memberB + " → (none)"}},
 	}
 	if !reflect.DeepEqual(notes, want) || e.report.DataSources.MaintainersUpdated != 3 {
 		t.Errorf("notes = %+v\nwant %+v\nmaintainers updated = %d", notes, want, e.report.DataSources.MaintainersUpdated)
@@ -121,7 +123,7 @@ func TestUpdateMaintainers_WithoutTheFlagSaysHowManyMappedDiffer(t *testing.T) {
 			differs = append(differs, n)
 		}
 	}
-	if want := []reportNote{{Code: noteMaintainerDiffers, DataSource: "checkout-events", Changes: []string{"maintainer: a@example.com → c@example.com"}}}; !reflect.DeepEqual(differs, want) {
+	if want := []reportNote{{Code: noteMaintainerDiffers, DataSource: "checkout-events", Changes: []string{"maintainer: " + memberA + " → " + memberC}}}; !reflect.DeepEqual(differs, want) {
 		t.Errorf("notes = %+v, want %+v", differs, want)
 	}
 
@@ -136,10 +138,13 @@ func TestUpdateMaintainers_WithoutTheFlagSaysHowManyMappedDiffer(t *testing.T) {
 func TestUpdateMaintainers_PatchErrorsSayWhatToDo(t *testing.T) {
 	f := &fakeLD{t: t, list: maintainedList, patchStatus: http.StatusBadRequest, patchBody: `{"code":"invalid_request","message":"Error applying json-patch document"}`}
 	e := runMaintainers(t, f, map[string]string{"Checkout Events": "c@example.com"}, true)
-	want := `Data source "Checkout Events": maintainer not updated: its maintainer changed in LaunchDarkly after this run read it; rerun to pick up the change`
+	want := []string{
+		`Data source "Checkout Events": maintainer not updated: its maintainer changed in LaunchDarkly after this run read it. Check the change there before rerunning: a rerun sets the one --ld-maintainer-mapping names`,
+		`Data source "Orders": maintainer not updated: someone set its maintainer in LaunchDarkly after this run read it, so it was left as is`,
+	}
 	ds := e.report.DataSources
-	if len(e.report.Errors) != 2 || e.report.Errors[0] != want || ds.MaintainersUpdated != 0 || ds.MaintainersFailed != 2 || ds.Failed != 0 {
-		t.Errorf("errors=%q report %+v", e.report.Errors, ds)
+	if !reflect.DeepEqual(e.report.Errors, want) || ds.MaintainersUpdated != 0 || ds.MaintainersFailed != 2 || ds.Failed != 0 {
+		t.Errorf("errors=%q\nwant %q\nreport %+v", e.report.Errors, want, ds)
 	}
 }
 
@@ -292,5 +297,46 @@ func TestCheckMaintainerMapping_NamesUnknownSources(t *testing.T) {
 	err := e.checkMaintainerMapping()
 	if err == nil || !strings.HasPrefix(err.Error(), `--ld-maintainer-mapping names Statsig metric sources the export does not have: "Gone", "orders"`) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// Through run(), as a real run resolves them: mapped sources get theirs, the rest the
+// token's member, and a dry run writes the same into data-source-bodies.json.
+func TestRun_CreatesDataSourcesWithTheirMaintainers(t *testing.T) {
+	sources := append(maintainedSources(), func() map[string]any { s := checkoutSource(); s["name"] = "Signups"; return s }())
+	raw, _ := json.Marshal(map[string]any{"metric_sources": sources})
+	export := filepath.Join(t.TempDir(), "export.json")
+	if err := os.WriteFile(export, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: maintainedList, members: testMembers, callerMemberID: memberD}
+			srv := f.server()
+			defer srv.Close()
+			e := newPhase3Engine(t, srv.URL, false)
+			e.exportFile, e.only, e.dryRun, e.ldReadable = export, "data-sources", dryRun, true
+			e.maintainerMapping = map[string]string{"Page Views": "c@example.com"}
+			if err := e.run(); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]any{}
+			bodies := f.created
+			if dryRun {
+				raw, err := os.ReadFile("data-source-bodies.json")
+				if err != nil {
+					t.Fatal(err)
+				}
+				bodies = nil
+				_ = json.Unmarshal(raw, &bodies)
+			}
+			for _, b := range bodies {
+				got[fmt.Sprint(b["key"])] = b["maintainerId"]
+			}
+			if got["page-views"] != memberC || got["signups"] != memberD {
+				t.Errorf("maintainers = %v, want page-views by c@ and signups by the token's member", got)
+			}
+		})
 	}
 }

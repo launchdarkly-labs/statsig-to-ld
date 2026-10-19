@@ -115,7 +115,7 @@ func init() {
 	convertCmd.Flags().StringVar(&flagExtraUnits, "extra-analysis-units", "", "Extra LD context kinds added to every metric's analysis units (comma-separated, additive)")
 	convertCmd.Flags().BoolVar(&flagWidenUnits, "widen-analysis-units", false, "Add every id type a metric's Statsig source declares to its analysis units, not just the unit types on the metric. Off by default: it widens most warehouse-native metrics, and each added unit must be registered on the LD project")
 
-	convertCmd.Flags().StringVar(&flagLDMaintainer, "ld-maintainer", "", "Maintainer for created metrics: an email, a 24-character member ID, or \"none\" to create them with no maintainer. Defaults to the member who owns the API token")
+	convertCmd.Flags().StringVar(&flagLDMaintainer, "ld-maintainer", "", "Maintainer for created metrics: an email, a 24-character member ID, or \"none\" to send none (LaunchDarkly then assigns a personal token's member). Defaults to the member who owns the API token")
 
 	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Migration report path")
 	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")

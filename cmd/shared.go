@@ -47,8 +47,8 @@ func parseCommaSeparated(s string) []string {
 // singular, e.g. "metric"; except qualifies "every <noun> created by this run".
 func logMaintainer(m launchdarkly.Maintainer, noun, except string) {
 	if m.OptedOut {
-		log.Printf("Maintainer: NONE. Every %s created by this run%s will have no maintainer, "+
-			"which LaunchDarkly's UI flags as incomplete until someone is assigned.", noun, except)
+		log.Printf("Maintainer: NONE. No maintainer is sent with any %s this run creates%s. With a personal token, "+
+			"LaunchDarkly makes the token's member its maintainer; otherwise its UI flags it as incomplete until someone is assigned.", noun, except)
 		return
 	}
 	who := m.MemberID

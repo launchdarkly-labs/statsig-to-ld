@@ -53,13 +53,14 @@ type fakeLD struct {
 
 	created      []map[string]any
 	patches      map[string][]launchdarkly.JSONPatchOp
+	patchBodies  map[string]string
 	patchCount   int
 	previews     []string
 	metricsReads int
 }
 
 func (f *fakeLD) server() *httptest.Server {
-	f.patches = map[string][]launchdarkly.JSONPatchOp{}
+	f.patches, f.patchBodies = map[string][]launchdarkly.JSONPatchOp{}, map[string]string{}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		const dsPath = "/internal/projects/proj/metric-data-sources"
@@ -123,11 +124,13 @@ func (f *fakeLD) server() *httptest.Server {
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{}`)
 		case strings.HasPrefix(r.URL.Path, dsPath+"/") && r.Method == http.MethodPatch:
+			raw, _ := io.ReadAll(r.Body)
 			var ops []launchdarkly.JSONPatchOp
-			if err := json.NewDecoder(r.Body).Decode(&ops); err != nil {
+			if err := json.Unmarshal(raw, &ops); err != nil {
 				f.t.Errorf("PATCH body is not a JSON Patch array: %v", err)
 			}
 			f.patches[strings.TrimPrefix(r.URL.Path, dsPath+"/")] = ops
+			f.patchBodies[strings.TrimPrefix(r.URL.Path, dsPath+"/")] = string(raw)
 			f.patchCount++
 			if f.patchStatus != 0 {
 				w.WriteHeader(f.patchStatus)
@@ -135,6 +138,13 @@ func (f *fakeLD) server() *httptest.Server {
 				return
 			}
 			_, _ = io.WriteString(w, `{}`)
+		case r.URL.Path == "/api/v2/projects/proj" || r.URL.Path == "/api/v2/projects/proj/environments/production":
+			_, _ = io.WriteString(w, `{"_id":"0123456789abcdef01234567"}`)
+		case r.URL.Path == "/api/v2/metrics/proj" && r.URL.Query().Get("limit") == "1" && !r.URL.Query().Has("offset"):
+			// The real run's API key probe.
+			_, _ = io.WriteString(w, `{"items":[]}`)
+		case r.URL.Path == "/api/v2/tokens":
+			_, _ = io.WriteString(w, `{"items":[{"_id":"tok","role":"writer"}]}`)
 		case r.URL.Path == "/api/v2/caller-identity":
 			_, _ = io.WriteString(w, `{"memberId":"`+f.callerMemberID+`"}`)
 		case strings.HasPrefix(r.URL.Path, "/api/v2/members"):

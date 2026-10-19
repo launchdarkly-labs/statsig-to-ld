@@ -114,7 +114,7 @@ func init() {
 	warehouseCmd.Flags().StringVar(&whFlagLDProject, "ld-project", "", "LaunchDarkly project key (required)")
 	warehouseCmd.Flags().StringVar(&whFlagLDEnvironment, "ld-environment", "", "LaunchDarkly environment key (required)")
 	warehouseCmd.Flags().StringVar(&whFlagWarehouseType, "warehouse-type", "", "Warehouse type: snowflake, bigquery, databricks, or redshift. Set this when Statsig does not expose its warehouse connection, rather than letting the command guess from SQL")
-	warehouseCmd.Flags().StringVar(&whFlagLDMaintainer, "ld-maintainer", "", "Maintainer for created data sources: an email, a 24-character member ID, or \"none\" to create them with no maintainer. Defaults to the member who owns the API token")
+	warehouseCmd.Flags().StringVar(&whFlagLDMaintainer, "ld-maintainer", "", "Maintainer for created data sources: an email, a 24-character member ID, or \"none\" to send none (LaunchDarkly then assigns a personal token's member). Defaults to the member who owns the API token")
 	warehouseCmd.Flags().StringVar(&whFlagMaintainerMapping, "ld-maintainer-mapping", "", "JSON file mapping Statsig metric source names to the maintainer of their data source: an email, a 24-character member ID, or \"none\". Sources it does not name get --ld-maintainer")
 	warehouseCmd.Flags().BoolVar(&whFlagUpdateMaintainers, "update-maintainers", false, "Set the maintainer of existing data sources in this environment in place: to the one --ld-maintainer-mapping names, or, for one with no maintainer, to --ld-maintainer. A maintainer set in LaunchDarkly is replaced only by a mapping entry")
 	warehouseCmd.Flags().BoolVar(&whFlagDryRun, "dry-run", false, "Export and preview data source mapping without writing to LD. With --ld-key, --ld-project, and --ld-environment, also check existing data sources and preview each query in the warehouse, as a real run does")
@@ -325,9 +325,9 @@ func (e *migrationEngine) run() error {
 	}
 
 	if e.dryRun {
-		// Member lookups are reads, so a dry run checks the maintainers it would compare.
-		if e.ldReadable && (len(e.maintainerMapping) > 0 || e.updateMaintainers) {
-			if err := e.resolveMaintainers(e.updateMaintainers); err != nil {
+		// Member lookups are reads, so a dry run resolves the maintainers a real run would.
+		if e.ldReadable {
+			if err := e.resolveMaintainers(true); err != nil {
 				return err
 			}
 		}

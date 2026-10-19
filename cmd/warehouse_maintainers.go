@@ -113,8 +113,10 @@ func (e *migrationEngine) maintainerFor(source map[string]any) string {
 // maintainerChange is an existing data source whose maintainer --update-maintainers changes.
 type maintainerChange struct {
 	key, name string
+	mapped    bool
 	ops       []launchdarkly.JSONPatchOp
-	change    string
+	// change names maintainers by email, for the console; noteChange by member ID, for the report.
+	change, noteChange string
 }
 
 // maintainerChanges lists the existing data sources in this environment whose
@@ -156,7 +158,9 @@ func (e *migrationEngine) maintainerChanges(existing map[string]map[string]any, 
 			ops = append(ops, launchdarkly.JSONPatchOp{Op: "add", Path: "/maintainerId", Value: to.MemberID})
 		}
 		from := orEmail(current, jsonutil.GetStr(jsonutil.GetMap(ds, "maintainer"), "email"))
-		changes = append(changes, maintainerChange{key: key, name: name, ops: ops, change: mappingChange("maintainer", from, orEmail(to.MemberID, to.Email))})
+		changes = append(changes, maintainerChange{key: key, name: name, mapped: mapped, ops: ops,
+			change:     mappingChange("maintainer", from, orEmail(to.MemberID, to.Email)),
+			noteChange: mappingChange("maintainer", current, to.MemberID)})
 	}
 	return changes
 }
@@ -173,7 +177,7 @@ func (e *migrationEngine) syncMaintainers(existing map[string]map[string]any, co
 	if !e.updateMaintainers {
 		differ := e.maintainerChanges(existing, collisions, true)
 		for _, c := range differ {
-			e.report.Notes = append(e.report.Notes, reportNote{Code: noteMaintainerDiffers, DataSource: c.key, Changes: []string{c.change}})
+			e.report.Notes = append(e.report.Notes, reportNote{Code: noteMaintainerDiffers, DataSource: c.key, Changes: []string{c.noteChange}})
 		}
 		if msg := maintainerMappingSummary(len(differ)); msg != "" {
 			e.warn(msg)
@@ -187,18 +191,22 @@ func (e *migrationEngine) syncMaintainers(existing map[string]map[string]any, co
 	output.Info(fmt.Sprintf("Updating the maintainer of %d existing data source(s)...", len(changes)))
 	for _, c := range changes {
 		if _, err := e.ld.UpdateMetricDataSource(e.ctx, c.key, c.ops); err != nil {
-			if errors.Is(err, launchdarkly.ErrPatchNotApplied) {
-				err = fmt.Errorf("its maintainer changed in LaunchDarkly after this run read it; rerun to pick up the change")
+			switch {
+			case errors.Is(err, launchdarkly.ErrPatchNotApplied) && c.mapped:
+				err = fmt.Errorf("its maintainer changed in LaunchDarkly after this run read it. Check the change there before rerunning: a rerun sets the one --ld-maintainer-mapping names")
+			case errors.Is(err, launchdarkly.ErrPatchNotApplied):
+				err = fmt.Errorf("someone set its maintainer in LaunchDarkly after this run read it, so it was left as is")
 			}
 			msg := fmt.Sprintf("Data source %q: maintainer not updated: %v", c.name, err)
-			output.ErrMsg(msg)
+			first, _, _ := strings.Cut(msg, "\n")
+			output.ErrMsg(first)
 			e.state.AddError("data_source", c.key, err.Error())
 			e.report.Errors = append(e.report.Errors, msg)
 			e.report.DataSources.MaintainersFailed++
 			continue
 		}
 		e.report.DataSources.MaintainersUpdated++
-		e.report.Notes = append(e.report.Notes, reportNote{Code: noteMaintainerUpdated, DataSource: c.key, Changes: []string{c.change}})
+		e.report.Notes = append(e.report.Notes, reportNote{Code: noteMaintainerUpdated, DataSource: c.key, Changes: []string{c.noteChange}})
 	}
 }
 
