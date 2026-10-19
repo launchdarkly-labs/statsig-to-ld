@@ -31,6 +31,10 @@ type fakeLD struct {
 	previewCols   string
 	// previewValue is the preview's guessed value column, as LaunchDarkly returns one.
 	previewValue string
+	// noIntegration lists no experimentation integration.
+	noIntegration bool
+	// wrappedPreviewStatus fails previews of the wrapped SQL.
+	wrappedPreviewStatus int
 
 	created      []map[string]any
 	patches      map[string][]launchdarkly.JSONPatchOp
@@ -45,13 +49,18 @@ func (f *fakeLD) server() *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		const dsPath = "/internal/projects/proj/metric-data-sources"
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/snowflake-experimentation"):
+		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/snowflake-experimentation") && !f.noIntegration:
 			_, _ = io.WriteString(w, `{"items":[{"_id":"cfg-1","configValues":{"selectedEnv":{"projectKey":"proj","environmentKey":"production"}}}]}`)
 		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/"):
 			_, _ = io.WriteString(w, `{"items":[]}`)
 		case strings.HasSuffix(r.URL.Path, "/metric-data-source-preview"):
 			sql := r.URL.Query().Get("sqlQuery")
 			f.previews = append(f.previews, sql)
+			if f.wrappedPreviewStatus != 0 && strings.HasPrefix(sql, "SELECT *, '") {
+				w.WriteHeader(f.wrappedPreviewStatus)
+				_, _ = io.WriteString(w, `{"code":"invalid_request","message":"SQL compilation error"}`)
+				return
+			}
 			cols := f.previewCols
 			if cols == "" {
 				cols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT","length":64},{"name":"EVENT_KEY","type":"TEXT"}`
@@ -896,17 +905,18 @@ func TestDryRun_ReportsPlannedOutcomes(t *testing.T) {
 		"Signups (query): would refuse (key collision: \"Signups\", \"signups\")",
 		"signups (query): would refuse (key collision: \"Signups\", \"signups\")",
 	}
-	if !l.checked || strings.Join(l.lines, "\n") != strings.Join(want, "\n") || l.note != "" {
-		t.Errorf("checked=%v note=%q lines:\n%s\nwant:\n%s", l.checked, l.note, strings.Join(l.lines, "\n"), strings.Join(want, "\n"))
+	if !l.checked || strings.Join(l.lines, "\n") != strings.Join(want, "\n") || len(l.notes) != 0 {
+		t.Errorf("checked=%v notes=%q lines:\n%s\nwant:\n%s", l.checked, l.notes, strings.Join(l.lines, "\n"), strings.Join(want, "\n"))
 	}
-	if f.patchCount != 0 || len(f.created) != 0 || len(f.previews) != 0 {
-		t.Errorf("dry run wrote or previewed: patches=%d created=%d previews=%d", f.patchCount, len(f.created), len(f.previews))
+	// Refunds' update and Page Views' create are each previewed raw, then wrapped.
+	if !l.previewed || f.patchCount != 0 || len(f.created) != 0 || len(f.previews) != 4 {
+		t.Errorf("previewed=%v patches=%d created=%d previews=%d, want 4 previews and no writes", l.previewed, f.patchCount, len(f.created), len(f.previews))
 	}
 
 	e.ldReadable = false
 	l = e.dryRunDataSources("snowflake")
-	if l.checked || !strings.Contains(l.note, "were not checked") || l.lines[0] != "Checkout Events (query): would create" {
-		t.Errorf("without credentials: checked=%v note=%q lines=%q", l.checked, l.note, l.lines)
+	if l.checked || !strings.Contains(strings.Join(l.notes, " "), "were not checked") || l.lines[0] != "Checkout Events (query): would create" {
+		t.Errorf("without credentials: checked=%v notes=%q lines=%q", l.checked, l.notes, l.lines)
 	}
 }
 
@@ -1245,5 +1255,67 @@ func TestBoundMetrics_NumeratorOrDenominator(t *testing.T) {
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("bound:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// The case a dry run without previews lists as "would update": the new query drops a
+// value column bound numeric metrics read, which only the preview shows.
+func TestDryRun_PreviewsShowRefusalsTheRealRunMakes(t *testing.T) {
+	t.Chdir(t.TempDir())
+	metrics := `[{"key":"order-total","eventKey":"checkout-events","isNumeric":true,"unitAggregationType":"sum","dataSource":{"key":"checkout-events"}}]`
+	run := func(f *fakeLD) []string {
+		srv := f.server()
+		defer srv.Close()
+		e := newPhase3Engine(t, srv.URL, false)
+		e.dryRun, e.ldReadable, e.overwrite = true, true, true
+		l := e.dryRunDataSources("snowflake")
+		if f.patchCount != 0 || len(f.created) != 0 {
+			t.Errorf("dry run wrote: patches=%d created=%d", f.patchCount, len(f.created))
+		}
+		return l.lines
+	}
+	if lines := run(&fakeLD{t: t, list: valueColumnList, metrics: metrics, noIntegration: true}); len(lines) != 1 || lines[0] != "Checkout Events (query): would update" {
+		t.Errorf("without previews: lines = %q", lines)
+	}
+	want := `Checkout Events (query): would refuse (would remove value column "AMT", read by bound metrics: order-total)`
+	if lines := run(&fakeLD{t: t, list: valueColumnList, metrics: metrics}); len(lines) != 1 || lines[0] != want {
+		t.Errorf("with previews: lines = %q\nwant %q", lines, want)
+	}
+}
+
+func TestDryRun_FailedPreviewIsReportedAndTheRunContinues(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, wrappedPreviewStatus: http.StatusBadRequest}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable = true, true
+	orders := checkoutSource()
+	orders["name"] = "Orders"
+	e.metricSources = append(e.metricSources, orders)
+	l := e.dryRunDataSources("snowflake")
+	const prefix = "would fail (preview of the wrapped source SQL failed (LaunchDarkly runs the same query to validate the data source): "
+	if len(l.lines) != 2 || !strings.HasPrefix(l.lines[0], "Checkout Events (query): "+prefix) || !strings.HasPrefix(l.lines[1], "Orders (query): "+prefix) {
+		t.Errorf("lines = %q", l.lines)
+	}
+	if len(f.previews) != 4 || len(f.created) != 0 {
+		t.Errorf("previews=%d created=%d, want both sources previewed and nothing created", len(f.previews), len(f.created))
+	}
+}
+
+// An integration set up for another project could preview a different warehouse.
+func TestDryRun_PreviewsOnlyThroughThisEnvironmentsIntegration(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	e.dryRun, e.ldReadable, e.projectKey = true, true, "other-project"
+	l := e.dryRunDataSources("snowflake")
+	if l.previewed || len(f.previews) != 0 || len(l.notes) != 1 || !strings.HasPrefix(l.notes[0], `No query was previewed, because LaunchDarkly project "other-project" environment "production" has no warehouse experimentation integration yet`) {
+		t.Errorf("previewed=%v previews=%d notes=%q", l.previewed, len(f.previews), l.notes)
+	}
+	if len(l.lines) != 1 || l.lines[0] != "Checkout Events (query): would create" {
+		t.Errorf("lines = %q", l.lines)
 	}
 }

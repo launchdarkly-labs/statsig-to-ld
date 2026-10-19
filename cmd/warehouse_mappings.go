@@ -526,13 +526,10 @@ func mappingsAfter(old map[string]any, ops []launchdarkly.JSONPatchOp) (string, 
 	return value, contexts
 }
 
-// mappingLines lists a dry run's mapping changes under the source's line.
-func mappingLines(plan dataSourcePlan) string {
-	if plan.mappings == nil || plan.action == planSkip {
-		return ""
-	}
+// changeLines lists a dry run's mapping changes under the source's line.
+func changeLines(changes []string) string {
 	var b strings.Builder
-	for _, c := range plan.mappings.changes {
+	for _, c := range changes {
 		b.WriteString("\n        " + c)
 	}
 	return b.String()
