@@ -227,3 +227,19 @@ func TestValidateMaintainerFlag(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveMappedMaintainer(t *testing.T) {
+	s := &maintainerServer{memberByID: jsonHandler(http.StatusOK, `{"_id":"`+testMemberID+`","email":"`+testMemberEmail+`"}`)}
+	c := newMaintainerClient(t, s)
+	ctx := context.Background()
+
+	if m, err := c.ResolveMappedMaintainer(ctx, "None"); err != nil || !m.OptedOut || len(s.paths) != 0 {
+		t.Errorf("none: %+v %v paths=%v", m, err, s.paths)
+	}
+	if m, err := c.ResolveMappedMaintainer(ctx, testMemberID); err != nil || m.MemberID != testMemberID || m.Email != testMemberEmail || m.Source != MaintainerFromMapping {
+		t.Errorf("member ID: %+v %v", m, err)
+	}
+	if _, err := c.ResolveMappedMaintainer(ctx, "bob"); err == nil || !strings.Contains(err.Error(), "--ld-maintainer-mapping") {
+		t.Errorf("invalid: err = %v", err)
+	}
+}

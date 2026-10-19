@@ -298,7 +298,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		convOpts.MaintainerID = maintainer.MemberID
-		logMaintainer(maintainer, "metric")
+		logMaintainer(maintainer, "metric", 0)
 	} else if flagLDMaintainer != "" {
 		log.Printf("NOTE: --ld-maintainer needs --ld-key and --ld-project to resolve, so it was ignored.")
 	}

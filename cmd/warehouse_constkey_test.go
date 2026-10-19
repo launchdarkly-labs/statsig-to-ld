@@ -46,6 +46,10 @@ type fakeLD struct {
 	extraIntegrations     []string
 	// previewMessage replaces the failed previews' "SQL compilation error".
 	previewMessage string
+	// members is a JSON array of {"_id","email"}; callerMemberID is the token's member.
+	members        string
+	callerMemberID string
+	memberReads    int
 
 	created      []map[string]any
 	patches      map[string][]launchdarkly.JSONPatchOp
@@ -131,6 +135,34 @@ func (f *fakeLD) server() *httptest.Server {
 				return
 			}
 			_, _ = io.WriteString(w, `{}`)
+		case r.URL.Path == "/api/v2/caller-identity":
+			_, _ = io.WriteString(w, `{"memberId":"`+f.callerMemberID+`"}`)
+		case strings.HasPrefix(r.URL.Path, "/api/v2/members"):
+			f.memberReads++
+			var members []map[string]any
+			if f.members != "" {
+				if err := json.Unmarshal([]byte(f.members), &members); err != nil {
+					f.t.Fatalf("members: %v", err)
+				}
+			}
+			var found []map[string]any
+			for _, m := range members {
+				if id := strings.TrimPrefix(r.URL.Path, "/api/v2/members/"); id == m["_id"] || "email:"+fmt.Sprint(m["email"]) == r.URL.Query().Get("filter") {
+					found = append(found, m)
+				}
+			}
+			if r.URL.Path != "/api/v2/members" {
+				if len(found) == 0 {
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = io.WriteString(w, `{"code":"not_found"}`)
+					return
+				}
+				raw, _ := json.Marshal(found[0])
+				_, _ = w.Write(raw)
+				return
+			}
+			raw, _ := json.Marshal(map[string]any{"items": found})
+			_, _ = w.Write(raw)
 		case r.URL.Path == "/api/v2/metrics/proj" && r.Method == http.MethodGet:
 			f.metricsReads++
 			if f.metricsStatus != 0 {
@@ -976,6 +1008,7 @@ func TestWarehouseCmd_FlagsBound(t *testing.T) {
 		"ld-key", "ld-url", "ld-project", "ld-environment", "ld-maintainer",
 		"warehouse-type", "dry-run", "resume", "only",
 		"overwrite", "force-overwrite", "update-mappings", "remove-unmapped-contexts", "constant-event-key", "verbose", "no-color",
+		"ld-maintainer-mapping", "update-maintainers",
 	} {
 		if warehouseCmd.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s not registered on `warehouse`", name)
