@@ -160,6 +160,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `warehouse`: a source whose key an archived data source holds was posted as new, and LaunchDarkly rejected it with
+  an HTTP 500 that the CLI retried three times. LaunchDarkly keeps an archived data source's key but leaves it out of
+  the data source list, so the run now also lists archived data sources. Such a source fails, naming the archived
+  data source and how to free the key, and is left out of `source-mapping.json`; a dry run lists it as "would
+  refuse". If the archived data sources cannot be read, Phase 3 stops before creating anything.
+
 - `warehouse` and `metrics convert`: a failed read of the project's metric data sources was treated as "none exist".
   `warehouse` then posted every source again, and `metrics convert` fell back to legacy event keys. A real run of
   either now stops with the error; a `metrics convert` dry run warns and continues.

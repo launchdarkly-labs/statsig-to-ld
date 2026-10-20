@@ -514,6 +514,9 @@ Someone set the data source's maintainer during the run, so it was left as is. F
 ### `warehouse` stops with "could not read the LaunchDarkly experimentation integrations"
 The token could not list one of the warehouse experimentation integration types, so the run cannot tell which warehouse the data sources use, or whether setup would add a second integration; it stops before writing anything. Check the token's access to integrations and rerun. A `--dry-run` reports the same error in a note.
 
+### `warehouse` fails a data source with "belongs to an archived data source"
+LaunchDarkly keeps an archived data source's key, so the source cannot be created under it, and `--overwrite` or `--update-mappings` cannot update it while it is archived. Unarchive the data source in LD and rerun (add either flag to update it), or rename the source in Statsig.
+
 ### `warehouse` fails a data source with "is taken by a data source in LaunchDarkly environment"
 Data source keys are unique per project, and that key belongs to a data source in another environment, which this run will not change or map. Rename the source in Statsig, or run against that environment with `--ld-environment`.
 
