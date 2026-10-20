@@ -208,12 +208,22 @@ func (c *Client) PreviewDataSource(ctx context.Context, integrationConfigID, sql
 
 // ListMetricDataSources lists the project's unarchived metric data sources.
 func (c *Client) ListMetricDataSources(ctx context.Context) ([]map[string]any, error) {
-	status, body, err := c.requestJSON(ctx, "GET", fmt.Sprintf("/internal/projects/%s/metric-data-sources", c.projectKey), nil)
+	return c.listMetricDataSources(ctx, "", "metric data sources")
+}
+
+// ListArchivedMetricDataSources lists the project's archived metric data sources,
+// which keep their keys.
+func (c *Client) ListArchivedMetricDataSources(ctx context.Context) ([]map[string]any, error) {
+	return c.listMetricDataSources(ctx, "?filter="+url.QueryEscape("archived equals true"), "archived metric data sources")
+}
+
+func (c *Client) listMetricDataSources(ctx context.Context, query, what string) ([]map[string]any, error) {
+	status, body, err := c.requestJSON(ctx, "GET", fmt.Sprintf("/internal/projects/%s/metric-data-sources%s", c.projectKey, query), nil)
 	if err != nil {
-		return nil, fmt.Errorf("listing metric data sources: %w", err)
+		return nil, fmt.Errorf("listing %s: %w", what, err)
 	}
 	if status != 200 || body == nil {
-		return nil, fmt.Errorf("listing metric data sources: %d\n%s", status, j.ToJSON(body))
+		return nil, fmt.Errorf("listing %s: %d\n%s", what, status, j.ToJSON(body))
 	}
 	return j.ExtractItemsList(body), nil
 }

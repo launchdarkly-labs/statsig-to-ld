@@ -205,6 +205,8 @@ type migrationEngine struct {
 
 	// unmapped holds keys taken in another environment, left out of source-mapping.json.
 	unmapped map[string]bool
+	// archived indexes archived data sources by key: LaunchDarkly keeps their keys taken.
+	archived map[string]map[string]any
 	// issues are printed once per code at the end of the phase.
 	issues []sourceIssue
 
@@ -755,6 +757,11 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 		return fmt.Errorf("could not read the project's existing LaunchDarkly metric data sources, so cannot tell which to create: %w", err)
 	}
 	existing := indexDataSources(list)
+	archivedList, err := e.ld.ListArchivedMetricDataSources(e.ctx)
+	if err != nil {
+		return fmt.Errorf("could not read the project's archived LaunchDarkly metric data sources, whose keys stay taken, so cannot tell which keys are free: %w", err)
+	}
+	e.archived = indexDataSources(archivedList)
 	collisions := keyCollisions(e.metricSources)
 
 	total := len(e.metricSources)
@@ -1029,6 +1036,19 @@ func (e *migrationEngine) planDataSource(body map[string]any, existing map[strin
 
 	ds, exists := existing[key]
 	if !exists {
+		if archived, ok := e.archived[key]; ok {
+			where := ""
+			if env := jsonutil.GetStr(archived, "environmentKey"); env != "" {
+				where = fmt.Sprintf(" in LaunchDarkly environment %q", env)
+			}
+			return dataSourcePlan{
+				action:   planRefuse,
+				reason:   "key taken by an archived data source",
+				unmapped: true,
+				err: fmt.Errorf("not created: the key %q belongs to an archived data source%s, and LaunchDarkly keeps an archived data source's key, so this source was left out of source-mapping.json. Unarchive that data source in LaunchDarkly and rerun (add --overwrite or --update-mappings to update it), or rename the source in Statsig",
+					key, where),
+			}
+		}
 		if e.state.IsDataSourceDone(key) {
 			return dataSourcePlan{action: planSkip, reason: "already migrated"}
 		}
@@ -1534,6 +1554,7 @@ type dryRunListing struct {
 func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 	var out dryRunListing
 	existing := map[string]map[string]any{}
+	e.archived = nil
 	if e.ldReadable {
 		list, err := e.ld.ListMetricDataSources(e.ctx)
 		if err != nil {
@@ -1541,6 +1562,11 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 		} else {
 			existing = indexDataSources(list)
 			out.checked = true
+		}
+		if archivedList, err := e.ld.ListArchivedMetricDataSources(e.ctx); err != nil {
+			out.notes = append(out.notes, fmt.Sprintf("Archived LaunchDarkly data sources could not be read (%v), so their keys were not checked; a real run stops on this error.", err))
+		} else {
+			e.archived = indexDataSources(archivedList)
 		}
 	} else {
 		out.notes = append(out.notes, "Existing LaunchDarkly data sources were not checked, and no query was previewed. Pass --ld-key, --ld-project, and --ld-environment to see what a real run would create, update, skip, refuse, or fail.")
