@@ -227,6 +227,9 @@ Those data sources (each shown as "exists without the constant event key" in the
 ### "changed in LaunchDarkly after this run read it" / "could not read a complete list of the project's metrics"
 Nothing was changed: the data source was edited in LD during the run, or LD's metric list came back short twice, so its bound metrics could not be checked. Rerun.
 
+### "belongs to an archived data source"
+LaunchDarkly keeps an archived data source's key, so the source cannot be created under it, and neither `--overwrite` nor `--update-mappings` applies while it is archived. Unarchive it in LD and rerun (add either flag to update it), or rename the source in Statsig.
+
 ### "is taken by a data source in LaunchDarkly environment"
 Data source keys are unique per project; that key belongs to a data source in another environment, which this run neither changes nor maps. Rename the source in Statsig, or run against that environment with `--ld-environment`.
 

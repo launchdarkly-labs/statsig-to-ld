@@ -23,6 +23,9 @@ type fakeLD struct {
 	t          *testing.T
 	list       string
 	listStatus int
+	// archivedList answers the archived filter; archivedStatus fails it.
+	archivedList   string
+	archivedStatus int
 	// metricsTotal, when set, overrides the reported totalCount.
 	metrics       string
 	metricsStatus int
@@ -106,6 +109,20 @@ func (f *fakeLD) server() *httptest.Server {
 				guess = `"valueColumn":"` + f.previewValue + `",`
 			}
 			_, _ = io.WriteString(w, `{"rows":[],"timestampColumn":"TS","keyColumn":"EVENT_KEY",`+guess+`"columns":[`+cols+`]}`)
+		case r.URL.Path == dsPath && r.Method == http.MethodGet && r.URL.Query().Has("filter"):
+			if got := r.URL.Query().Get("filter"); got != "archived equals true" {
+				f.t.Errorf("data source list filter = %q", got)
+			}
+			if f.archivedStatus != 0 {
+				w.WriteHeader(f.archivedStatus)
+				_, _ = io.WriteString(w, `{"code":"forbidden","message":"Access to the requested resource was denied"}`)
+				return
+			}
+			list := f.archivedList
+			if list == "" {
+				list = `{"items":[]}`
+			}
+			_, _ = io.WriteString(w, list)
 		case r.URL.Path == dsPath && r.Method == http.MethodGet:
 			if f.listStatus != 0 {
 				w.WriteHeader(f.listStatus)
@@ -1558,5 +1575,61 @@ func TestWarehouseTypeLine(t *testing.T) {
 		if got := warehouseTypeLine(tc.detected, tc.source, tc.l); got != tc.want {
 			t.Errorf("warehouseTypeLine(%q, %v) =\n%s\nwant\n%s", tc.detected, tc.source, got, tc.want)
 		}
+	}
+}
+
+// LaunchDarkly keeps an archived data source's key, and its list omits archived data sources.
+func TestPhase3_KeyHeldByAnArchivedDataSourceIsRefused(t *testing.T) {
+	t.Chdir(t.TempDir())
+	archived := `{"items":[{"key":"checkout-events","environmentKey":"production","archived":true,"sqlQuery":"SELECT 1","columnMappings":{"keyColumn":"EVENT_NAME","timestampColumn":"TS","contexts":{"user":"USER_ID"}}}]}`
+	f := &fakeLD{t: t, archivedList: archived}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	orders := checkoutSource()
+	orders["name"] = "Orders"
+	e.metricSources = append(e.metricSources, orders)
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.created) != 1 || f.created[0]["key"] != "orders" || e.report.DataSources.Failed != 1 {
+		t.Fatalf("created=%v report %+v, want checkout-events refused and only orders created", f.created, e.report.DataSources)
+	}
+	want := `Data source "Checkout Events": not created: the key "checkout-events" belongs to an archived data source in LaunchDarkly environment "production", and LaunchDarkly keeps an archived data source's key, so this source was left out of source-mapping.json. Unarchive that data source in LaunchDarkly and rerun (add --overwrite or --update-mappings to update it), or rename the source in Statsig`
+	if len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+		t.Errorf("errors = %q\nwant %q", e.report.Errors, want)
+	}
+	if err := e.writeSourceMapping(); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile("source-mapping.json")
+	var mapping map[string]string
+	_ = json.Unmarshal(raw, &mapping)
+	if len(mapping) != 1 || mapping["Orders"] != "orders" {
+		t.Errorf("source-mapping.json = %v, want only Orders", mapping)
+	}
+
+	e.dryRun, e.ldReadable = true, true
+	l := e.dryRunDataSources("snowflake")
+	if len(l.lines) != 2 || l.lines[0] != "Checkout Events (query): would refuse (key taken by an archived data source)" {
+		t.Errorf("dry run lines = %q", l.lines)
+	}
+}
+
+func TestPhase3_StopsWhenArchivedDataSourcesCannotBeRead(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, archivedStatus: http.StatusForbidden}
+	srv := f.server()
+	defer srv.Close()
+	e := newPhase3Engine(t, srv.URL, false)
+	err := e.phase3aMigrateDataSources()
+	if err == nil || !strings.HasPrefix(err.Error(), "could not read the project's archived LaunchDarkly metric data sources") || len(f.created) != 0 {
+		t.Errorf("err=%v created=%d, want a stop before any create", err, len(f.created))
+	}
+
+	e.dryRun, e.ldReadable = true, true
+	l := e.dryRunDataSources("snowflake")
+	if !strings.Contains(strings.Join(l.notes, " "), "Archived LaunchDarkly data sources could not be read") {
+		t.Errorf("dry run notes = %q", l.notes)
 	}
 }
