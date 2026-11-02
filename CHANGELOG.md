@@ -52,11 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   many of them project the constant).
 
 - `warehouse`: `--update-mappings` corrects the timestamp, value, and context mappings of existing metric data
-  sources in place from the Statsig export, keeping their keys, queries, key columns, column lists, and bound
-  metrics, on data sources with or without the constant event key. Each mapping the export defines itself (its
-  timestamp column, its id-type mappings, and a value column only when it names one) is matched case-insensitively to
-  the data source's listed columns, and only fields that differ are patched, after the same `test` ops as
-  `--overwrite`; a data source that already matches gets no PATCH. Context kinds are added or moved to another
+  sources in place from the Statsig export, keeping their keys, queries, key columns, and bound metrics, on data
+  sources with or without the constant event key. Each mapping the export defines itself (its timestamp column, its
+  id-type mappings, and a value column only when it names one) is matched case-insensitively to the data source's
+  listed columns, and only fields that differ are patched, after the same `test` ops as `--overwrite`; a data source
+  that already matches gets no PATCH. Before patching a data source, or when its listed columns lack an export
+  column, the run previews its query. When the warehouse returns other columns, such as one added to the table since
+  the data source was created, the patch also replaces the column list with the preview's, which LaunchDarkly
+  requires to equal the query's, and the mappings are matched to the new list (`columns: added TEAM_ID`). A data
+  source whose preview fails, or whose query no longer returns a column its mappings use, is not updated. Context kinds are added or moved to another
   column. A kind the export does not map, such as one renamed by hand in LaunchDarkly, is kept (note code
   `context_kind_not_in_export`). With `--remove-unmapped-contexts`, such kinds are removed instead, except those
   bound metrics use as analysis or randomization units, which are kept and named on one line per run

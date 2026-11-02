@@ -98,11 +98,15 @@ func (f *fakeLD) server() *httptest.Server {
 				return
 			}
 			cols := f.previewCols
-			if cols == "" {
-				cols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT","length":64},{"name":"EVENT_KEY","type":"TEXT"}`
-			}
-			if strings.HasPrefix(sql, "SELECT *, '") {
-				cols += `,{"name":"LD_EVENT_KEY","type":"TEXT","length":15}`
+			if listed := f.listedColumns(sql); cols == "" && listed != "" {
+				cols = listed
+			} else {
+				if cols == "" {
+					cols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT","length":64},{"name":"EVENT_KEY","type":"TEXT"}`
+				}
+				if strings.HasPrefix(sql, "SELECT *, '") && !strings.Contains(cols, `"LD_EVENT_KEY"`) {
+					cols += `,{"name":"LD_EVENT_KEY","type":"TEXT","length":15}`
+				}
 			}
 			guess := ""
 			if f.previewValue != "" {
@@ -218,6 +222,30 @@ func (f *fakeLD) server() *httptest.Server {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+}
+
+// listedColumns is the column list of the listed data source whose query is sql, as an
+// unchanged warehouse returns it, or "" when none lists columns.
+func (f *fakeLD) listedColumns(sql string) string {
+	var list struct {
+		Items []struct {
+			SQLQuery       string `json:"sqlQuery"`
+			ColumnMappings struct {
+				Columns []json.RawMessage `json:"columns"`
+			} `json:"columnMappings"`
+		} `json:"items"`
+	}
+	_ = json.Unmarshal([]byte(f.list), &list)
+	for _, ds := range list.Items {
+		if ds.SQLQuery == sql && len(ds.ColumnMappings.Columns) > 0 {
+			var cols []string
+			for _, c := range ds.ColumnMappings.Columns {
+				cols = append(cols, string(c))
+			}
+			return strings.Join(cols, ",")
+		}
+	}
+	return ""
 }
 
 func checkoutSource() map[string]any {

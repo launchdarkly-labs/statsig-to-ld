@@ -775,7 +775,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 		output.Progress(i+1, total, name, "")
 
 		// Planned before the preview so a source that is not written costs no warehouse query.
-		plan := e.planSource(source, body, existing, collisions, whType)
+		plan := e.planSource(source, body, existing, collisions, whType, integrationConfigID)
 		e.recordPlan(key, plan)
 		if plan.note == noteExistsWithoutConstantKey {
 			withoutConstantKey++
@@ -973,14 +973,15 @@ func (p dataSourcePlan) refuse(reason string, err error) dataSourcePlan {
 	return p
 }
 
-// planSource plans one Statsig source; the run and the dry run share it.
-func (e *migrationEngine) planSource(source, body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string) dataSourcePlan {
+// planSource plans one Statsig source; the run and the dry run share it. configID is the
+// integration that previews queries, or "" for none.
+func (e *migrationEngine) planSource(source, body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType, configID string) dataSourcePlan {
 	plan := e.planDataSource(body, existing, collisions, whType)
 	ds := existing[jsonutil.GetStr(body, "key")]
 	conflicts := warehouse.ContextKindConflicts(source)
 	if plan.action == planUpdate && !e.updateMappings {
 		plan.kindConflicts = conflicts
-		return e.planMappings(plan, ds, source)
+		return e.planMappings(plan, ds, source, configID)
 	}
 	takesExport := plan.action == planCreate || plan.action == planUpdate || (e.updateMappings && ds != nil && plan.action == planSkip)
 	if takesExport && len(conflicts) > 0 {
@@ -990,7 +991,7 @@ func (e *migrationEngine) planSource(source, body map[string]any, existing map[s
 		}
 		return plan.refuse("Statsig unit IDs share context kind(s) "+quoteAll(kinds), kindConflictError(conflicts, ds != nil))
 	}
-	return e.planMappings(plan, ds, source)
+	return e.planMappings(plan, ds, source, configID)
 }
 
 // conflictsTaken refuses when ops give a conflicting kind a column from the export.
@@ -1597,7 +1598,7 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 		}
 		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, "")
 		key := jsonutil.GetStr(body, "key")
-		plan := e.planSource(source, body, existing, collisions, whType)
+		plan := e.planSource(source, body, existing, collisions, whType, configID)
 		e.recordPlan(key, plan)
 		outcome := dryRunOutcome(plan)
 		var changes []string
