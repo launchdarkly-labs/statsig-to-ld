@@ -678,14 +678,16 @@ func (e *migrationEngine) phase2bExperimentation(whType string) error {
 	return nil
 }
 
-func (e *migrationEngine) getActiveIntegration() (string, string, error) {
+// getActiveIntegration returns the environment's experimentation integration, else the
+// account's first; own reports the environment's.
+func (e *migrationEngine) getActiveIntegration() (key, configID string, own bool, err error) {
 	integrationKey, configID, err := e.environmentIntegration()
 	if err != nil {
 		// Another type's integration could be the one this environment uses.
-		return "", "", fmt.Errorf("could not read the LaunchDarkly experimentation integrations, so cannot tell which warehouse the data sources use: %w. Rerun once the token can read them", err)
+		return "", "", false, fmt.Errorf("could not read the LaunchDarkly experimentation integrations, so cannot tell which warehouse the data sources use: %w. Rerun once the token can read them", err)
 	}
 	if configID != "" {
-		return integrationKey, configID, nil
+		return integrationKey, configID, true, nil
 	}
 	for _, t := range warehouse.SupportedWarehouseTypes {
 		integrationKey := warehouse.WarehouseTypes[t]
@@ -695,10 +697,10 @@ func (e *migrationEngine) getActiveIntegration() (string, string, error) {
 			if configID == "" {
 				configID = jsonutil.GetStr(configs[0], "id")
 			}
-			return integrationKey, configID, nil
+			return integrationKey, configID, false, nil
 		}
 	}
-	return "snowflake-experimentation", "", nil
+	return "snowflake-experimentation", "", false, nil
 }
 
 // environmentIntegration returns the experimentation integration set up for this
@@ -741,12 +743,16 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 		return nil
 	}
 
-	integrationKey, integrationConfigID, err := e.getActiveIntegration()
+	integrationKey, integrationConfigID, own, err := e.getActiveIntegration()
 	if err != nil {
 		return err
 	}
 	if integrationConfigID != "" {
 		output.Info(fmt.Sprintf("Using integration config: %s (%s)", integrationKey, integrationConfigID))
+	}
+	var preview previewIntegration
+	if own {
+		preview = previewIntegration{integrationKey, integrationConfigID}
 	}
 
 	whType := warehouse.WarehouseTypeForIntegration(integrationKey)
@@ -774,8 +780,8 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 
 		output.Progress(i+1, total, name, "")
 
-		// Planned before the preview so a source that is not written costs no warehouse query.
-		plan := e.planSource(source, body, existing, collisions, whType, integrationConfigID)
+		// Planned before the Statsig SQL preview so a source that is not written costs none.
+		plan := e.planSource(source, body, existing, collisions, whType, preview)
 		e.recordPlan(key, plan)
 		if plan.note == noteExistsWithoutConstantKey {
 			withoutConstantKey++
@@ -973,15 +979,14 @@ func (p dataSourcePlan) refuse(reason string, err error) dataSourcePlan {
 	return p
 }
 
-// planSource plans one Statsig source; the run and the dry run share it. configID is the
-// integration that previews queries, or "" for none.
-func (e *migrationEngine) planSource(source, body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType, configID string) dataSourcePlan {
+// planSource plans one Statsig source; the run and the dry run share it.
+func (e *migrationEngine) planSource(source, body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string, preview previewIntegration) dataSourcePlan {
 	plan := e.planDataSource(body, existing, collisions, whType)
 	ds := existing[jsonutil.GetStr(body, "key")]
 	conflicts := warehouse.ContextKindConflicts(source)
 	if plan.action == planUpdate && !e.updateMappings {
 		plan.kindConflicts = conflicts
-		return e.planMappings(plan, ds, source, configID)
+		return e.planMappings(plan, ds, source, preview)
 	}
 	takesExport := plan.action == planCreate || plan.action == planUpdate || (e.updateMappings && ds != nil && plan.action == planSkip)
 	if takesExport && len(conflicts) > 0 {
@@ -991,7 +996,7 @@ func (e *migrationEngine) planSource(source, body map[string]any, existing map[s
 		}
 		return plan.refuse("Statsig unit IDs share context kind(s) "+quoteAll(kinds), kindConflictError(conflicts, ds != nil))
 	}
-	return e.planMappings(plan, ds, source, configID)
+	return e.planMappings(plan, ds, source, preview)
 }
 
 // conflictsTaken refuses when ops give a conflicting kind a column from the export.
@@ -1574,6 +1579,7 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 	}
 
 	integrationKey, configID := warehouse.WarehouseTypes[whType], ""
+	var preview previewIntegration
 	if out.checked {
 		// Only this environment's integration: another one could preview a different warehouse.
 		switch k, id, err := e.environmentIntegration(); {
@@ -1581,6 +1587,7 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 			out.notes = append(out.notes, fmt.Sprintf("No query was previewed, because the experimentation integrations could not be read (%v); a real run stops on this error.", err))
 		case id != "":
 			integrationKey, configID, whType = k, id, warehouse.WarehouseTypeForIntegration(k)
+			preview = previewIntegration{k, id}
 			out.previewed = true
 		default:
 			out.notes = append(out.notes, fmt.Sprintf("No query was previewed, because LaunchDarkly project %q environment %q has no warehouse experimentation integration yet, so a create or update listed here can still fail when a real run previews it.", e.projectKey, e.environmentKey))
@@ -1598,7 +1605,7 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 		}
 		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, "")
 		key := jsonutil.GetStr(body, "key")
-		plan := e.planSource(source, body, existing, collisions, whType, configID)
+		plan := e.planSource(source, body, existing, collisions, whType, preview)
 		e.recordPlan(key, plan)
 		outcome := dryRunOutcome(plan)
 		var changes []string

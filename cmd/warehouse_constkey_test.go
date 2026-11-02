@@ -35,8 +35,10 @@ type fakeLD struct {
 	previewCols   string
 	// previewValue is the preview's guessed value column, as LaunchDarkly returns one.
 	previewValue string
-	// noIntegration lists no experimentation integration.
-	noIntegration bool
+	// noIntegration lists no experimentation integration; foreignIntegration lists only
+	// another project's snowflake one.
+	noIntegration      bool
+	foreignIntegration bool
 	// wrappedPreviewStatus fails previews of the wrapped SQL; previewStatus, every preview.
 	wrappedPreviewStatus int
 	previewStatus        int
@@ -75,6 +77,8 @@ func (f *fakeLD) server() *httptest.Server {
 		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/") && slices.Contains(f.missingIntegrations, strings.TrimPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/")):
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, `{"code":"not_found","message":"Integration not found"}`)
+		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/snowflake-experimentation") && f.foreignIntegration:
+			_, _ = io.WriteString(w, `{"items":[{"_id":"cfg-other","configValues":{"selectedEnv":{"projectKey":"other","environmentKey":"staging"}}}]}`)
 		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/snowflake-experimentation") && !f.noIntegration:
 			_, _ = io.WriteString(w, `{"items":[{"_id":"cfg-1","configValues":{"selectedEnv":{"projectKey":"proj","environmentKey":"production"}}}]}`)
 		case strings.HasPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/") && slices.Contains(f.extraIntegrations, strings.TrimPrefix(r.URL.Path, "/api/v2/integration-configurations/keys/")):
@@ -1492,8 +1496,8 @@ func TestEnvironmentIntegration_PicksInSupportedOrder(t *testing.T) {
 			t.Fatalf("got %q %q %v, want snowflake's", key, id, err)
 		}
 	}
-	if key, id, err := e.getActiveIntegration(); key != "snowflake-experimentation" || id != "cfg-1" || err != nil {
-		t.Errorf("getActiveIntegration = %q %q %v", key, id, err)
+	if key, id, own, err := e.getActiveIntegration(); key != "snowflake-experimentation" || id != "cfg-1" || !own || err != nil {
+		t.Errorf("getActiveIntegration = %q %q %v %v", key, id, own, err)
 	}
 }
 

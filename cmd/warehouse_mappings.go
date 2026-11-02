@@ -14,7 +14,8 @@ import (
 )
 
 // --update-mappings moves an existing data source's timestamp, value, and context
-// mappings to the Statsig export's, leaving its query, key column, and columns alone.
+// mappings to the Statsig export's, leaving its query and key column alone; its column
+// list changes only to match the query.
 // --remove-unmapped-contexts also removes the context kinds the export does not map.
 
 const (
@@ -230,10 +231,14 @@ func approxColumns(old map[string]any, t warehouse.ExportMappings) columnSet {
 	return newColumnSet(cols)
 }
 
+// previewIntegration is the environment's own experimentation integration, which previews
+// existing data sources' queries; configID is "" when there is none.
+type previewIntegration struct{ key, configID string }
+
 // planMappings turns the plan for an existing data source into a mapping update. Without
-// --overwrite, a data source that would change, or whose columns lack the export's, is
-// previewed with configID first: the warehouse may return columns added since it was listed.
-func (e *migrationEngine) planMappings(plan dataSourcePlan, ds, source map[string]any, configID string) dataSourcePlan {
+// --overwrite, a data source that would change, or whose columns lack or mistype the
+// export's, is previewed first: the warehouse may return columns changed since it was listed.
+func (e *migrationEngine) planMappings(plan dataSourcePlan, ds, source map[string]any, preview previewIntegration) dataSourcePlan {
 	if !e.updateMappings || ds == nil || (plan.action != planSkip && plan.action != planUpdate) {
 		return plan
 	}
@@ -250,11 +255,8 @@ func (e *migrationEngine) planMappings(plan dataSourcePlan, ds, source map[strin
 		return plan.refuse("could not check bound metrics", boundMetricsUnchecked(err))
 	}
 	var fresh []map[string]any
-	if !overwrite && (len(d.ops) > 0 || len(d.missing) > 0) {
-		if fresh, err = e.freshColumns(ds, configID); err != nil {
-			return plan.refuse("preview of its query failed", err)
-		}
-		if fresh != nil {
+	if !overwrite && (len(d.ops) > 0 || len(d.missing) > 0 || len(d.wrongType) > 0) {
+		if fresh = e.freshColumns(ds, preview); fresh != nil {
 			cols = newColumnSet(fresh)
 			if d, err = e.exportDiff(key, old, mp, cols); err != nil {
 				return plan.refuse("could not check bound metrics", boundMetricsUnchecked(err))
@@ -272,8 +274,8 @@ func (e *migrationEngine) planMappings(plan dataSourcePlan, ds, source map[strin
 		return plan
 	}
 	if fresh != nil {
-		if gone := unlistedMappings(old, d, cols); len(gone) > 0 {
-			return plan.refuse("its query no longer returns mapped columns", fmt.Errorf("not updated: its query no longer returns columns its mappings use: %s. Map them to columns the query returns in LaunchDarkly, or restore them in the query, then rerun", strings.Join(gone, ", ")))
+		if gone := strings.Join(unlistedMappings(old, d, cols), ", "); gone != "" {
+			return plan.refuse("its query no longer returns "+gone, fmt.Errorf("not updated: its query no longer returns columns its mappings use: %s. Map them to columns the query returns in LaunchDarkly, or restore them in the query, then rerun", gone))
 		}
 		// LaunchDarkly requires the listed columns to equal the query's.
 		d.ops = append([]launchdarkly.JSONPatchOp{{Op: "replace", Path: "/columnMappings/columns", Value: fresh}}, d.ops...)
@@ -308,32 +310,42 @@ func (e *migrationEngine) exportDiff(key string, old map[string]any, mp *mapping
 	return d, nil
 }
 
-// freshColumns previews ds's query and returns its columns, or nil when they equal the
-// listed ones or ds cannot be previewed: it has no SQL query, or configID is "".
-func (e *migrationEngine) freshColumns(ds map[string]any, configID string) ([]map[string]any, error) {
+// freshColumns previews ds's query and returns its columns. It returns nil, so the listed
+// columns are used, when they match, when the preview fails, or when ds has no SQL query
+// or is on an integration other than preview's.
+func (e *migrationEngine) freshColumns(ds map[string]any, preview previewIntegration) []map[string]any {
 	sql := jsonutil.GetStr(ds, "sqlQuery")
-	if configID == "" || sql == "" {
-		return nil, nil
+	if k := jsonutil.GetStr(ds, "integrationKey"); preview.configID == "" || sql == "" || (k != "" && k != preview.key) {
+		return nil
 	}
-	preview, err := e.ld.PreviewDataSource(e.ctx, configID, sql)
+	res, err := e.ld.PreviewDataSource(e.ctx, preview.configID, sql)
+	fresh := warehouse.ExtractPreviewColumns(res)
+	if err == nil && len(fresh) == 0 {
+		err = errors.New("it returned no columns")
+	}
 	if err != nil {
-		return nil, fmt.Errorf("not updated: the preview of its query failed, and LaunchDarkly runs the same query to check a mapping change: %w", err)
-	}
-	fresh := warehouse.ExtractPreviewColumns(preview)
-	if len(fresh) == 0 {
-		return nil, fmt.Errorf("not updated: the preview of its query returned no columns")
+		if e.verbose {
+			output.Warn(fmt.Sprintf("Preview failed for %s, so its listed columns were used: %v", jsonutil.GetStr(ds, "key"), err))
+		}
+		return nil
 	}
 	if sameColumns(jsonutil.GetMap(ds, "columnMappings")["columns"], fresh) {
-		return nil, nil
+		return nil
 	}
-	return fresh, nil
+	return fresh
 }
 
-// unlistedMappings names the mappings after d whose columns cols does not list.
+// unlistedMappings names the mappings after d whose columns cols does not list by their
+// exact name, as LaunchDarkly requires.
 func unlistedMappings(old map[string]any, d mappingDiff, cols columnSet) []string {
 	var gone []string
 	check := func(label, col string) {
-		if _, ok := cols.find(col); col != "" && !ok {
+		if col == "" || cols.exact[col] {
+			return
+		}
+		if real, ok := cols.find(col); ok {
+			gone = append(gone, fmt.Sprintf("%s %q (now %q)", label, col, real))
+		} else {
 			gone = append(gone, fmt.Sprintf("%s %q", label, col))
 		}
 	}
@@ -429,7 +441,7 @@ func mappingPatchError(err error) error {
 		return fmt.Errorf("not updated: it changed in LaunchDarkly after this run read it; rerun to pick up the change")
 	case strings.Contains(err.Error(), "Columns do not match query results"):
 		// LaunchDarkly reruns the query on any mapping change and compares the columns exactly.
-		return fmt.Errorf("not updated: LaunchDarkly reran its query to check the change, and the warehouse now returns different columns than the data source lists. Run its query preview in LaunchDarkly and save it to refresh the columns, then rerun")
+		return fmt.Errorf("not updated: LaunchDarkly reran its query to check the change, and the warehouse now returns different columns than the data source lists. Rerun to refresh them; if this repeats, run its query preview in LaunchDarkly and save it, then rerun")
 	}
 	return err
 }
