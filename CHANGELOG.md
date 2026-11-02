@@ -56,12 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sources with or without the constant event key. Each mapping the export defines itself (its timestamp column, its
   id-type mappings, and a value column only when it names one) is matched case-insensitively to the data source's
   listed columns, and only fields that differ are patched, after the same `test` ops as `--overwrite`; a data source
-  that already matches gets no PATCH. Before patching a data source, or when its listed columns lack an export
-  column, the run previews its query. When the warehouse returns other columns, such as one added to the table since
-  the data source was created, the patch also replaces the column list with the preview's, which LaunchDarkly
-  requires to equal the query's, and the mappings are matched to the new list (`columns: added TEAM_ID`). A data
-  source whose preview fails, or whose query no longer returns a column its mappings use, is not updated. Context kinds are added or moved to another
-  column. A kind the export does not map, such as one renamed by hand in LaunchDarkly, is kept (note code
+  that already matches gets no PATCH. Before patching a data source, or when its listed columns lack or mistype an
+  export column, the run previews its query with the environment's own experimentation integration. When the
+  warehouse returns other columns, such as one added to the table since the data source was created, the patch also
+  replaces the column list with the preview's, which LaunchDarkly requires to equal the query's, and the mappings are
+  matched to the new list (`columns: added TEAM_ID`). A data source whose query no longer returns a column its
+  mappings use, by its exact name, is not updated. A failed preview, a table or view data source, one on another
+  integration, or an environment with no integration of its own leaves the listed columns in use. Context kinds are
+  added or moved to another column. A kind the export does not map, such as one renamed by hand in LaunchDarkly,
+  is kept (note code
   `context_kind_not_in_export`). With `--remove-unmapped-contexts`, such kinds are removed instead, except those
   bound metrics use as analysis or randomization units, which are kept and named on one line per run
   (`context_kind_kept`). An export kind is added even when another kind maps the same column. A mapping is left as it
@@ -77,8 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no data source of its own reads the numerator's, which `--overwrite`'s event-key check now counts too.
   `--overwrite` also checks the type of a fallback timestamp or value column. A `--dry-run` with `--ld-key`,
   `--ld-project`, and `--ld-environment` prints each changed field (`timestamp: TS → CREATED_AT`), and the report
-  records each update as note code `mappings_updated` with a `changes` list in the same form, which `--overwrite`'s
-  warnings now use too.
+  records each update as note code `mappings_updated` with a `changes` list in the same form (led by `columns: ...`
+  when the column list was refreshed), which `--overwrite`'s warnings now use too.
 
 
 ### Added
