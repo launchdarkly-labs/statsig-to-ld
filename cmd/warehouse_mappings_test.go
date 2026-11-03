@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -89,9 +90,9 @@ func TestUpdateMappings_WrappedSourceGetsExportMappings(t *testing.T) {
 	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm)}
 	e := runMappings(t, f, nil)
 
-	if e.report.DataSources.Updated != 1 || f.patchCount != 1 || len(f.previews) != 0 || f.metricsReads != 0 {
-		t.Fatalf("report %+v patches=%d previews=%d metricsReads=%d errors=%q, want one PATCH and no preview or metrics read",
-			e.report.DataSources, f.patchCount, len(f.previews), f.metricsReads, e.report.Errors)
+	if e.report.DataSources.Updated != 1 || f.patchCount != 1 || len(f.previews) != 1 || f.previews[0] != wantCheckoutSQL || f.metricsReads != 0 {
+		t.Fatalf("report %+v patches=%d previews=%q metricsReads=%d errors=%q, want one PATCH, a preview of its own query, and no metrics read",
+			e.report.DataSources, f.patchCount, f.previews, f.metricsReads, e.report.Errors)
 	}
 	ops := f.patches["checkout-events"]
 	want := `test /sqlQuery
@@ -128,7 +129,7 @@ func TestUpdateMappings_UnwrappedWithoutOverwriteChangesOnlyMappings(t *testing.
 	want := `test /sqlQuery
 test /columnMappings
 replace /columnMappings/contexts/user "UID"`
-	if got := opLines(f.patches["checkout-events"]); got != want || len(f.previews) != 0 {
+	if got := opLines(f.patches["checkout-events"]); got != want || len(f.previews) != 1 {
 		t.Errorf("ops:\n%s\nwant:\n%s\npreviews=%d", got, want, len(f.previews))
 	}
 	// Still lacks the constant event key, so the summary line stays.
@@ -142,8 +143,8 @@ func TestUpdateMappings_NoChangesSkipsThePatch(t *testing.T) {
 		"contexts": map[string]any{"user": "UID", "account": "ACCOUNT_ID"}}
 	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm)}
 	e := runMappings(t, f, nil)
-	if f.patchCount != 0 || e.report.DataSources.Skipped != 1 || len(e.report.Warnings) != 0 || len(e.report.Notes) != 0 {
-		t.Errorf("patches=%d report %+v warnings=%q notes=%+v, want a quiet skip", f.patchCount, e.report.DataSources, e.report.Warnings, e.report.Notes)
+	if f.patchCount != 0 || len(f.previews) != 0 || e.report.DataSources.Skipped != 1 || len(e.report.Warnings) != 0 || len(e.report.Notes) != 0 {
+		t.Errorf("patches=%d previews=%d report %+v warnings=%q notes=%+v, want a quiet skip", f.patchCount, len(f.previews), e.report.DataSources, e.report.Warnings, e.report.Notes)
 	}
 }
 
@@ -298,7 +299,7 @@ func TestUpdateMappings_PatchErrorsSayWhatToDo(t *testing.T) {
 	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}}
 	for body, want := range map[string]string{
 		`{"code":"invalid_request","message":"Error applying json-patch document"}`: "not updated: it changed in LaunchDarkly after this run read it; rerun to pick up the change",
-		`{"code":"invalid_request","message":"Columns do not match query results"}`: "not updated: LaunchDarkly reran its query to check the change, and the warehouse now returns different columns than the data source lists. Run its query preview in LaunchDarkly and save it to refresh the columns, then rerun",
+		`{"code":"invalid_request","message":"Columns do not match query results"}`: "not updated: LaunchDarkly reran its query to check the change, and the warehouse now returns different columns than the data source lists. Rerun to refresh them; if this repeats, run its query preview in LaunchDarkly and save it, then rerun",
 	} {
 		f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm), patchStatus: http.StatusBadRequest, patchBody: body}
 		e := runMappings(t, f, nil)
@@ -368,8 +369,8 @@ func TestUpdateMappings_DryRun(t *testing.T) {
 	if strings.Join(l.warnings, "\n") != strings.Join(wantWarnings, "\n") {
 		t.Errorf("warnings:\n%s\nwant:\n%s", strings.Join(l.warnings, "\n"), strings.Join(wantWarnings, "\n"))
 	}
-	if f.patchCount != 0 || len(f.created) != 0 || len(f.previews) != 2 {
-		t.Errorf("patches=%d created=%d previews=%d, want Page Views previewed and no writes", f.patchCount, len(f.created), len(f.previews))
+	if f.patchCount != 0 || len(f.created) != 0 || len(f.previews) != 4 {
+		t.Errorf("patches=%d created=%d previews=%d, want Page Views and the two mapping updates previewed, and no writes", f.patchCount, len(f.created), len(f.previews))
 	}
 
 	e.ldReadable = false
@@ -434,8 +435,9 @@ func TestUpdateMappings_EditedWrapperKeepsItsQuery(t *testing.T) {
 	cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "UID", "account": "ACCOUNT_ID"}, "valueColumn": "ORDER_TOTAL"}
 	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL+"\nWHERE ts > '2024-01-01'", cm)}
 	e := runMappings(t, f, func(e *migrationEngine) { e.overwrite = true })
-	if got := opLines(f.patches["checkout-events"]); got != "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/timestampColumn \"CREATED_AT\"" || len(f.previews) != 0 {
-		t.Errorf("ops:\n%s\npreviews=%d", got, len(f.previews))
+	if got := opLines(f.patches["checkout-events"]); got != "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/timestampColumn \"CREATED_AT\"" ||
+		len(f.previews) != 1 || f.previews[0] != wantCheckoutSQL+"\nWHERE ts > '2024-01-01'" {
+		t.Errorf("ops:\n%s\npreviews=%q, want only its own query previewed", got, f.previews)
 	}
 	if e.report.DataSources.Updated != 1 || len(e.report.Notes) != 2 || e.report.Notes[0].Code != noteEditedConstantKey || e.report.Notes[1].Code != noteMappingsUpdated {
 		t.Errorf("report %+v notes=%+v", e.report.DataSources, e.report.Notes)
@@ -599,13 +601,14 @@ func TestUpdateMappings_ChecksColumnTypes(t *testing.T) {
 			`1 data source(s) did not take some mappings from the Statsig export, because the export's column has the wrong type: timestamp "CREATED_AT" (TEXT), value "ORDER_TOTAL" (VARCHAR(16)) on checkout-events. A timestamp column needs a timestamp or date type, and a value column a numeric one; correct the column in Statsig, or cast it in the query, then rerun.`},
 		{"parameterized types", "timestamp_ntz(9)", "NUMBER(38,2)", "replace /columnMappings/timestampColumn \"CREATED_AT\"\nadd /columnMappings/valueColumn \"ORDER_TOTAL\"", ""},
 		{"BigQuery types", "DATETIME", "FLOAT64", "replace /columnMappings/timestampColumn \"CREATED_AT\"\nadd /columnMappings/valueColumn \"ORDER_TOTAL\"", ""},
+		// Only a list nothing previewed can lack types.
 		{"unknown types", "", "", "replace /columnMappings/timestampColumn \"CREATED_AT\"\nadd /columnMappings/valueColumn \"ORDER_TOTAL\"", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cols := typedCols([2]string{"TS", "TIMESTAMP_NTZ"}, [2]string{"CREATED_AT", tc.tsType}, [2]string{"UID", "TEXT"},
 				[2]string{"ORDER_TOTAL", tc.valueType}, [2]string{"LD_EVENT_KEY", "TEXT"})
 			cm := map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "UID"}, "columns": cols}
-			f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm)}
+			f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, cm), noIntegration: tc.tsType == ""}
 			e := runMappings(t, f, func(e *migrationEngine) {
 				e.metricSources[0]["idTypeMapping"] = []any{map[string]any{"statsigUnitID": "userID", "column": "uid"}}
 			})
@@ -857,5 +860,246 @@ func TestWarehouse_RemoveUnmappedContextsNeedsUpdateMappings(t *testing.T) {
 	t.Cleanup(func() { whFlagRemoveUnmapped, whFlagStatsigExportFile = false, "" })
 	if err := runWarehouse(warehouseCmd, nil); err == nil || err.Error() != "--remove-unmapped-contexts requires --update-mappings" {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func colsJSON(t *testing.T, cols []any) string {
+	t.Helper()
+	var parts []string
+	for _, c := range cols {
+		raw, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts = append(parts, string(raw))
+	}
+	return strings.Join(parts, ",")
+}
+
+func withTeam(e *migrationEngine) {
+	e.metricSources[0]["idTypeMapping"] = append(e.metricSources[0]["idTypeMapping"].([]any),
+		map[string]any{"statsigUnitID": "team", "column": "team_id"})
+}
+
+// teamAddedList lists a data source on integrationKey whose mappings match
+// mappingSource's, from before the warehouse table gained TEAM_ID.
+func teamAddedList(t *testing.T, integrationKey string) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"items": []any{map[string]any{
+		"key": "checkout-events", "environmentKey": "production", "integrationKey": integrationKey, "sqlQuery": wantCheckoutSQL,
+		"columnMappings": map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "CREATED_AT", "valueColumn": "ORDER_TOTAL",
+			"contexts": map[string]any{"user": "UID", "account": "ACCOUNT_ID"}, "columns": mappingColumns()},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+const snowflakeKey = "snowflake-experimentation"
+
+// teamMissingWarning is the warning when the data source keeps its listed columns.
+const teamMissingWarning = `1 data source(s) did not take some mappings from the Statsig export, because their columns do not include the export's: context team "team_id" on checkout-events. Correct the columns in Statsig, or add them to the data source's query, then rerun.`
+
+func TestUpdateMappings_TakesColumnsTheQueryNowReturns(t *testing.T) {
+	fresh := append(mappingColumns(), map[string]any{"name": "TEAM_ID", "type": "TEXT"})
+	f := &fakeLD{t: t, list: teamAddedList(t, snowflakeKey), previewCols: colsJSON(t, fresh)}
+	e := runMappings(t, f, withTeam)
+
+	want := "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/columns [" + colsJSON(t, fresh) + "]\nadd /columnMappings/contexts/team \"TEAM_ID\""
+	if got := opLines(f.patches["checkout-events"]); got != want {
+		t.Errorf("ops:\n%s\nwant:\n%s", got, want)
+	}
+	if len(f.previews) != 1 || f.previews[0] != wantCheckoutSQL {
+		t.Errorf("previews = %q, want the data source's own query", f.previews)
+	}
+	wantNote := reportNote{Code: noteMappingsUpdated, DataSource: "checkout-events", Changes: []string{"columns: added TEAM_ID", "context team: (none) → TEAM_ID"}}
+	if e.report.DataSources.Updated != 1 || len(e.report.Notes) != 1 || !reflect.DeepEqual(e.report.Notes[0], wantNote) || len(e.report.Warnings) != 0 {
+		t.Errorf("report %+v notes=%+v warnings=%q errors=%q", e.report.DataSources, e.report.Notes, e.report.Warnings, e.report.Errors)
+	}
+}
+
+func TestUpdateMappings_FallsBackToTheListedColumnsWhenThePreviewFails(t *testing.T) {
+	for name, f := range map[string]*fakeLD{
+		"failed":     {t: t, list: teamAddedList(t, snowflakeKey), previewStatus: http.StatusBadRequest},
+		"no columns": {t: t, list: teamAddedList(t, snowflakeKey), previewCols: `{"name":"TEAM_ID"},{"name":"LD_EVENT_KEY"}`},
+	} {
+		e := runMappings(t, f, withTeam)
+		if len(f.previews) != 1 || f.patchCount != 0 || e.report.DataSources.Skipped != 1 || len(e.report.Errors) != 0 ||
+			len(e.report.Warnings) != 1 || e.report.Warnings[0] != teamMissingWarning {
+			t.Errorf("%s: previews=%d patches=%d report %+v errors=%q warnings=%q", name, len(f.previews), f.patchCount, e.report.DataSources, e.report.Errors, e.report.Warnings)
+		}
+	}
+
+	// A change the listed columns allow is still sent, without a column list.
+	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "valueColumn": "ORDER_TOTAL",
+		"contexts": map[string]any{"user": "UID", "account": "ACCOUNT_ID"}}), previewStatus: http.StatusBadRequest}
+	runMappings(t, f, nil)
+	if got := opLines(f.patches["checkout-events"]); got != "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/timestampColumn \"CREATED_AT\"" {
+		t.Errorf("ops:\n%s\nwant the timestamp change only", got)
+	}
+}
+
+func TestUpdateMappings_PreviewsOnlyWithTheDataSourcesOwnIntegration(t *testing.T) {
+	fresh := colsJSON(t, append(mappingColumns(), map[string]any{"name": "TEAM_ID", "type": "TEXT"}))
+	for name, f := range map[string]*fakeLD{
+		"another project's integration": {t: t, list: teamAddedList(t, snowflakeKey), previewCols: fresh, foreignIntegration: true},
+		"data source on another one":    {t: t, list: teamAddedList(t, "databricks-experimentation"), previewCols: fresh},
+		"table data source":             {t: t, list: strings.Replace(teamAddedList(t, snowflakeKey), `"sqlQuery"`, `"tableName"`, 1), previewCols: fresh},
+	} {
+		e := runMappings(t, f, withTeam)
+		if len(f.previews) != 0 || f.patchCount != 0 || !slices.Contains(e.report.Warnings, teamMissingWarning) {
+			t.Errorf("%s: previews=%q patches=%d warnings=%q, want the listed columns used", name, f.previews, f.patchCount, e.report.Warnings)
+		}
+	}
+}
+
+func TestUpdateMappings_PreviewsWhenAListedTypeIsStale(t *testing.T) {
+	listed := mappingColumns()
+	listed[1] = map[string]any{"name": "CREATED_AT", "type": "TEXT"}
+	f := &fakeLD{t: t, list: dsList(t, wantCheckoutSQL, map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "valueColumn": "ORDER_TOTAL",
+		"contexts": map[string]any{"user": "UID", "account": "ACCOUNT_ID"}, "columns": listed}), previewCols: colsJSON(t, mappingColumns())}
+	e := runMappings(t, f, nil)
+	want := "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/columns [" + colsJSON(t, mappingColumns()) + "]\nreplace /columnMappings/timestampColumn \"CREATED_AT\""
+	if got := opLines(f.patches["checkout-events"]); got != want || len(e.report.Warnings) != 0 {
+		t.Errorf("ops:\n%s\nwant:\n%s\nwarnings=%q", got, want, e.report.Warnings)
+	}
+	if len(e.report.Notes) != 1 || strings.Join(e.report.Notes[0].Changes, "; ") != "columns: changed CREATED_AT; timestamp: TS → CREATED_AT" {
+		t.Errorf("notes = %+v", e.report.Notes)
+	}
+}
+
+func TestUpdateMappings_KindsBeingRemovedNeedNotBeInTheQuery(t *testing.T) {
+	listed := append(mappingColumns(), map[string]any{"name": "DEVICE_ID", "type": "TEXT"})
+	list := dsList(t, wantCheckoutSQL, map[string]any{"keyColumn": "LD_EVENT_KEY", "timestampColumn": "CREATED_AT", "valueColumn": "ORDER_TOTAL",
+		"contexts": map[string]any{"user": "UID", "account": "ACCOUNT_ID", "device": "DEVICE_ID"}, "columns": listed})
+	fresh := colsJSON(t, append(mappingColumns(), map[string]any{"name": "TEAM_ID", "type": "TEXT"}))
+
+	f := &fakeLD{t: t, list: list, previewCols: fresh, metrics: `[]`}
+	runMappings(t, f, func(e *migrationEngine) { withTeam(e); e.removeUnmapped = true })
+	want := "test /sqlQuery\ntest /columnMappings\nreplace /columnMappings/columns [" + fresh + "]\nremove /columnMappings/contexts/device\nadd /columnMappings/contexts/team \"TEAM_ID\""
+	if got := opLines(f.patches["checkout-events"]); got != want {
+		t.Errorf("ops:\n%s\nwant:\n%s", got, want)
+	}
+
+	f = &fakeLD{t: t, list: list, previewCols: fresh}
+	e := runMappings(t, f, withTeam)
+	if f.patchCount != 0 || len(e.report.Errors) != 1 || !strings.Contains(e.report.Errors[0], `its mappings use: context device "DEVICE_ID".`) {
+		t.Errorf("without --remove-unmapped-contexts: patches=%d errors=%q", f.patchCount, e.report.Errors)
+	}
+}
+
+func TestUnlistedMappings(t *testing.T) {
+	cols := newColumnSet(typedCols([2]string{"TS", "TIMESTAMP_NTZ"}, [2]string{"UID", "TEXT"}, [2]string{"TOTAL", "NUMBER"}, [2]string{"LD_EVENT_KEY", "TEXT"}, [2]string{"DEVICE_ID", "TEXT"}))
+	full := func() mappingDiff {
+		return mappingDiff{timestamp: "TS", value: "TOTAL", contexts: map[string]string{"user": "UID"}}
+	}
+	for _, tc := range []struct {
+		name, key string
+		edit      func(*mappingDiff)
+		want      string
+	}{
+		{"all listed", "LD_EVENT_KEY", nil, ""},
+		{"key column", "EVENT_KEY", nil, `key "EVENT_KEY"`},
+		{"timestamp", "LD_EVENT_KEY", func(d *mappingDiff) { d.timestamp = "CREATED_AT" }, `timestamp "CREATED_AT"`},
+		{"value", "LD_EVENT_KEY", func(d *mappingDiff) { d.value = "AMOUNT" }, `value "AMOUNT"`},
+		{"context", "LD_EVENT_KEY", func(d *mappingDiff) { d.contexts["account"] = "ACCOUNT_ID" }, `context account "ACCOUNT_ID"`},
+		{"case only", "LD_EVENT_KEY", func(d *mappingDiff) { d.contexts["device"] = "device_id" }, `context device "device_id" (now "DEVICE_ID")`},
+	} {
+		d := full()
+		if tc.edit != nil {
+			tc.edit(&d)
+		}
+		if got := strings.Join(unlistedMappings(map[string]any{"keyColumn": tc.key}, d, cols), ", "); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestUpdateMappings_RefusesWhenTheQueryDropsAMappedColumn(t *testing.T) {
+	fresh := typedCols([2]string{"CREATED_AT", "TIMESTAMP_NTZ"}, [2]string{"UID", "TEXT"}, [2]string{"TEAM_ID", "TEXT"},
+		[2]string{"ORDER_TOTAL", "NUMBER"}, [2]string{"LD_EVENT_KEY", "TEXT"})
+	f := &fakeLD{t: t, list: teamAddedList(t, snowflakeKey), previewCols: colsJSON(t, fresh)}
+	e := runMappings(t, f, withTeam)
+	want := `Data source "Checkout Events": not updated: its query no longer returns columns its mappings use: context account "ACCOUNT_ID". Map them to columns the query returns in LaunchDarkly, or restore them in the query, then rerun`
+	if f.patchCount != 0 || e.report.DataSources.Failed != 1 || len(e.report.Errors) != 1 || e.report.Errors[0] != want {
+		t.Errorf("patches=%d report %+v errors=%q\nwant %q", f.patchCount, e.report.DataSources, e.report.Errors, want)
+	}
+}
+
+func TestUpdateMappings_DryRunListsRefreshedColumns(t *testing.T) {
+	t.Chdir(t.TempDir())
+	run := func(f *fakeLD) dryRunListing {
+		srv := f.server()
+		defer srv.Close()
+		e := newPhase3Engine(t, srv.URL, false)
+		e.dryRun, e.ldReadable, e.updateMappings = true, true, true
+		e.metricSources = []map[string]any{mappingSource()}
+		withTeam(e)
+		return e.dryRunDataSources("snowflake")
+	}
+	fresh := append(mappingColumns(), map[string]any{"name": "TEAM_ID", "type": "TEXT"})
+	f := &fakeLD{t: t, list: teamAddedList(t, snowflakeKey), previewCols: colsJSON(t, fresh)}
+	l := run(f)
+	want := "Checkout Events (query): would update mappings\n        columns: added TEAM_ID\n        context team: (none) → TEAM_ID"
+	if len(l.lines) != 1 || l.lines[0] != want || len(l.warnings) != 0 || f.patchCount != 0 {
+		t.Errorf("lines = %q\nwant %q\nwarnings=%q patches=%d", l.lines, want, l.warnings, f.patchCount)
+	}
+
+	// Without the environment's integration nothing is previewed, so the listed columns decide.
+	for name, f := range map[string]*fakeLD{
+		"none":                          {t: t, list: teamAddedList(t, snowflakeKey), previewCols: colsJSON(t, fresh), noIntegration: true},
+		"another project's integration": {t: t, list: teamAddedList(t, snowflakeKey), previewCols: colsJSON(t, fresh), foreignIntegration: true},
+	} {
+		l = run(f)
+		if len(l.lines) != 1 || l.lines[0] != "1 existing data source(s): would skip (no mapping changes)" ||
+			len(l.warnings) != 1 || l.warnings[0] != teamMissingWarning || len(f.previews) != 0 {
+			t.Errorf("%s: lines=%q warnings=%q previews=%d", name, l.lines, l.warnings, len(f.previews))
+		}
+	}
+
+	// A refusal names the columns.
+	noAccount := typedCols([2]string{"CREATED_AT", "TIMESTAMP_NTZ"}, [2]string{"UID", "TEXT"}, [2]string{"TEAM_ID", "TEXT"},
+		[2]string{"ORDER_TOTAL", "NUMBER"}, [2]string{"LD_EVENT_KEY", "TEXT"})
+	l = run(&fakeLD{t: t, list: teamAddedList(t, snowflakeKey), previewCols: colsJSON(t, noAccount)})
+	if want := `Checkout Events (query): would refuse (its query no longer returns context account "ACCOUNT_ID")`; len(l.lines) != 1 || l.lines[0] != want {
+		t.Errorf("lines = %q, want %q", l.lines, want)
+	}
+}
+
+func TestSameColumns_ComparesAsLaunchDarklyDoes(t *testing.T) {
+	listed := []any{
+		map[string]any{"name": "TS", "type": "TIMESTAMP_NTZ", "length": nil},
+		map[string]any{"name": "UID", "type": "TEXT", "length": float64(64), "nullable": true},
+	}
+	for _, tc := range []struct {
+		name  string
+		fresh []map[string]any
+		same  bool
+	}{
+		{"in another order, null and absent alike", []map[string]any{
+			{"name": "UID", "type": "TEXT", "length": float64(64), "nullable": true}, {"name": "TS", "type": "TIMESTAMP_NTZ"}}, true},
+		{"a new length", []map[string]any{
+			{"name": "TS", "type": "TIMESTAMP_NTZ"}, {"name": "UID", "type": "TEXT", "length": float64(128), "nullable": true}}, false},
+		{"now nullable", []map[string]any{
+			{"name": "TS", "type": "TIMESTAMP_NTZ", "nullable": true}, {"name": "UID", "type": "TEXT", "length": float64(64), "nullable": true}}, false},
+		{"a precision", []map[string]any{
+			{"name": "TS", "type": "TIMESTAMP_NTZ", "precision": float64(9)}, {"name": "UID", "type": "TEXT", "length": float64(64), "nullable": true}}, false},
+		{"a scale", []map[string]any{
+			{"name": "TS", "type": "TIMESTAMP_NTZ", "scale": float64(0)}, {"name": "UID", "type": "TEXT", "length": float64(64), "nullable": true}}, false},
+		{"a new column", []map[string]any{
+			{"name": "TS", "type": "TIMESTAMP_NTZ"}, {"name": "UID", "type": "TEXT", "length": float64(64), "nullable": true}, {"name": "TEAM_ID", "type": "TEXT"}}, false},
+	} {
+		if got := sameColumns(listed, tc.fresh); got != tc.same {
+			t.Errorf("%s: sameColumns = %v, want %v", tc.name, got, tc.same)
+		}
+	}
+}
+
+func TestColumnsChange(t *testing.T) {
+	listed := typedCols([2]string{"TS", "TIMESTAMP_NTZ"}, [2]string{"OLD", "TEXT"}, [2]string{"AMOUNT", "NUMBER"})
+	fresh := []map[string]any{{"name": "TS", "type": "TIMESTAMP_NTZ"}, {"name": "AMOUNT", "type": "FLOAT"}, {"name": "B", "type": "TEXT"}, {"name": "A", "type": "TEXT"}}
+	if got, want := columnsChange(listed, fresh), "columns: added A, B; removed OLD; changed AMOUNT"; got != want {
+		t.Errorf("columnsChange = %q, want %q", got, want)
 	}
 }

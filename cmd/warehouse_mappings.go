@@ -14,7 +14,8 @@ import (
 )
 
 // --update-mappings moves an existing data source's timestamp, value, and context
-// mappings to the Statsig export's, leaving its query, key column, and columns alone.
+// mappings to the Statsig export's, leaving its query and key column alone; its column
+// list changes only to match the query.
 // --remove-unmapped-contexts also removes the context kinds the export does not map.
 
 const (
@@ -230,8 +231,14 @@ func approxColumns(old map[string]any, t warehouse.ExportMappings) columnSet {
 	return newColumnSet(cols)
 }
 
-// planMappings turns the plan for an existing data source into a mapping update.
-func (e *migrationEngine) planMappings(plan dataSourcePlan, ds, source map[string]any) dataSourcePlan {
+// previewIntegration is the environment's own experimentation integration, which previews
+// existing data sources' queries; configID is "" when there is none.
+type previewIntegration struct{ key, configID string }
+
+// planMappings turns the plan for an existing data source into a mapping update. Without
+// --overwrite, a data source that would change, or whose columns lack or mistype the
+// export's, is previewed first: the warehouse may return columns changed since it was listed.
+func (e *migrationEngine) planMappings(plan dataSourcePlan, ds, source map[string]any, preview previewIntegration) dataSourcePlan {
 	if !e.updateMappings || ds == nil || (plan.action != planSkip && plan.action != planUpdate) {
 		return plan
 	}
@@ -243,20 +250,18 @@ func (e *migrationEngine) planMappings(plan dataSourcePlan, ds, source map[strin
 	if overwrite {
 		cols = approxColumns(old, mp.target)
 	}
-	d := diffMappings(old, mp.target, cols, false, nil)
-	if removeKinds := e.removeUnmapped && len(d.keptKinds) > 0; d.dropsValue || removeKinds {
-		bound, err := e.boundMetrics(key)
-		if err != nil {
-			return plan.refuse("could not check bound metrics", boundMetricsUnchecked(err))
+	d, err := e.exportDiff(key, old, mp, cols)
+	if err != nil {
+		return plan.refuse("could not check bound metrics", boundMetricsUnchecked(err))
+	}
+	var fresh []map[string]any
+	if !overwrite && (len(d.ops) > 0 || len(d.missing) > 0 || len(d.wrongType) > 0) {
+		if fresh = e.freshColumns(ds, preview); fresh != nil {
+			cols = newColumnSet(fresh)
+			if d, err = e.exportDiff(key, old, mp, cols); err != nil {
+				return plan.refuse("could not check bound metrics", boundMetricsUnchecked(err))
+			}
 		}
-		if d.dropsValue {
-			mp.readers = valueReaders(bound)
-		}
-		if removeKinds {
-			mp.kindUsers, mp.keepKinds = kindUsers(bound, d.keptKinds)
-			mp.remove = slices.DeleteFunc(slices.Clone(d.keptKinds), func(k string) bool { return slices.Contains(mp.keepKinds, k) })
-		}
-		d = diffMappings(old, mp.target, cols, len(mp.readers) > 0, mp.remove)
 	}
 	mp.changes = d.changes
 	mp.issues = mappingIssues(key, d, mp)
@@ -268,12 +273,150 @@ func (e *migrationEngine) planMappings(plan dataSourcePlan, ds, source map[strin
 		plan.reason, plan.markDone = "no mapping changes", true
 		return plan
 	}
+	if fresh != nil {
+		if gone := strings.Join(unlistedMappings(old, d, cols), ", "); gone != "" {
+			return plan.refuse("its query no longer returns "+gone, fmt.Errorf("not updated: its query no longer returns columns its mappings use: %s. Map them to columns the query returns in LaunchDarkly, or restore them in the query, then rerun", gone))
+		}
+		// LaunchDarkly requires the listed columns to equal the query's.
+		d.ops = append([]launchdarkly.JSONPatchOp{{Op: "replace", Path: "/columnMappings/columns", Value: fresh}}, d.ops...)
+		mp.changes = append([]string{columnsChange(old["columns"], fresh)}, mp.changes...)
+	}
 	if reason, err := e.guardRemovals(key, old, d.ops, cols); err != nil {
 		return plan.refuse(reason, err)
 	}
 	mp.ops = d.ops
 	plan.action, plan.reason = planUpdateMappings, ""
 	return plan
+}
+
+// exportDiff is diffMappings within cols, after the bound-metric checks mp's options need.
+func (e *migrationEngine) exportDiff(key string, old map[string]any, mp *mappingPlan, cols columnSet) (mappingDiff, error) {
+	mp.readers, mp.kindUsers, mp.keepKinds, mp.remove = nil, nil, nil, nil
+	d := diffMappings(old, mp.target, cols, false, nil)
+	if removeKinds := e.removeUnmapped && len(d.keptKinds) > 0; d.dropsValue || removeKinds {
+		bound, err := e.boundMetrics(key)
+		if err != nil {
+			return d, err
+		}
+		if d.dropsValue {
+			mp.readers = valueReaders(bound)
+		}
+		if removeKinds {
+			mp.kindUsers, mp.keepKinds = kindUsers(bound, d.keptKinds)
+			mp.remove = slices.DeleteFunc(slices.Clone(d.keptKinds), func(k string) bool { return slices.Contains(mp.keepKinds, k) })
+		}
+		d = diffMappings(old, mp.target, cols, len(mp.readers) > 0, mp.remove)
+	}
+	return d, nil
+}
+
+// freshColumns previews ds's query and returns its columns. It returns nil, so the listed
+// columns are used, when they match, when the preview fails, or when ds has no SQL query
+// or is on an integration other than preview's.
+func (e *migrationEngine) freshColumns(ds map[string]any, preview previewIntegration) []map[string]any {
+	sql := jsonutil.GetStr(ds, "sqlQuery")
+	if k := jsonutil.GetStr(ds, "integrationKey"); preview.configID == "" || sql == "" || (k != "" && k != preview.key) {
+		return nil
+	}
+	res, err := e.ld.PreviewDataSource(e.ctx, preview.configID, sql)
+	fresh := warehouse.ExtractPreviewColumns(res)
+	if err == nil && len(fresh) == 0 {
+		err = errors.New("it returned no columns")
+	}
+	if err != nil {
+		if e.verbose {
+			output.Warn(fmt.Sprintf("Preview failed for %s, so its listed columns were used: %v", jsonutil.GetStr(ds, "key"), err))
+		}
+		return nil
+	}
+	if sameColumns(jsonutil.GetMap(ds, "columnMappings")["columns"], fresh) {
+		return nil
+	}
+	return fresh
+}
+
+// unlistedMappings names the mappings after d whose columns cols does not list by their
+// exact name, as LaunchDarkly requires.
+func unlistedMappings(old map[string]any, d mappingDiff, cols columnSet) []string {
+	var gone []string
+	check := func(label, col string) {
+		if col == "" || cols.exact[col] {
+			return
+		}
+		if real, ok := cols.find(col); ok {
+			gone = append(gone, fmt.Sprintf("%s %q (now %q)", label, col, real))
+		} else {
+			gone = append(gone, fmt.Sprintf("%s %q", label, col))
+		}
+	}
+	check("key", jsonutil.GetStr(old, "keyColumn"))
+	check("timestamp", d.timestamp)
+	check("value", d.value)
+	for _, kind := range slices.Sorted(maps.Keys(d.contexts)) {
+		check("context "+kind, d.contexts[kind])
+	}
+	return gone
+}
+
+// sameColumns compares column lists as LaunchDarkly does: every field, in any order.
+func sameColumns(listed any, fresh []map[string]any) bool {
+	a, n := columnFields(listed)
+	b, m := columnFields(fresh)
+	return n == m && maps.Equal(a, b)
+}
+
+// columnFields maps each column's name to the fields LaunchDarkly compares, with an absent
+// field equal to null, and counts the columns.
+func columnFields(columns any) (map[string]string, int) {
+	var cols []map[string]any
+	switch cs := columns.(type) {
+	case []map[string]any:
+		cols = cs
+	case []any:
+		for _, c := range cs {
+			if m, ok := c.(map[string]any); ok {
+				cols = append(cols, m)
+			}
+		}
+	}
+	fields := map[string]string{}
+	for _, c := range cols {
+		fields[jsonutil.GetStr(c, "name")] = fmt.Sprintf("%q %v %v %v %v", jsonutil.GetStr(c, "type"), c["length"], c["precision"], c["scale"], jsonutil.GetBool(c, "nullable"))
+	}
+	return fields, len(cols)
+}
+
+// columnsChange describes fresh against listed, as "columns: added A; removed B; changed C".
+func columnsChange(listed any, fresh []map[string]any) string {
+	before, _ := columnFields(listed)
+	after, _ := columnFields(fresh)
+	var added, removed, changed []string
+	for name, f := range after {
+		if was, ok := before[name]; !ok {
+			added = append(added, name)
+		} else if was != f {
+			changed = append(changed, name)
+		}
+	}
+	for name := range before {
+		if _, ok := after[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	var parts []string
+	for _, p := range []struct {
+		verb  string
+		names []string
+	}{{"added", added}, {"removed", removed}, {"changed", changed}} {
+		if len(p.names) > 0 {
+			slices.Sort(p.names)
+			parts = append(parts, p.verb+" "+strings.Join(p.names, ", "))
+		}
+	}
+	if len(parts) == 0 {
+		parts = []string{"refreshed"}
+	}
+	return "columns: " + strings.Join(parts, "; ")
 }
 
 // patchMappings applies a mapping-only update.
@@ -298,7 +441,7 @@ func mappingPatchError(err error) error {
 		return fmt.Errorf("not updated: it changed in LaunchDarkly after this run read it; rerun to pick up the change")
 	case strings.Contains(err.Error(), "Columns do not match query results"):
 		// LaunchDarkly reruns the query on any mapping change and compares the columns exactly.
-		return fmt.Errorf("not updated: LaunchDarkly reran its query to check the change, and the warehouse now returns different columns than the data source lists. Run its query preview in LaunchDarkly and save it to refresh the columns, then rerun")
+		return fmt.Errorf("not updated: LaunchDarkly reran its query to check the change, and the warehouse now returns different columns than the data source lists. Rerun to refresh them; if this repeats, run its query preview in LaunchDarkly and save it, then rerun")
 	}
 	return err
 }
