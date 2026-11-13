@@ -10,6 +10,7 @@ func TestCustomFields_ReadsKeyAndFormula(t *testing.T) {
 	source := map[string]any{"customFieldMapping": []any{
 		map[string]any{"key": "price_usd_cents", "formula": "price_usd/100"},
 		map[string]any{"fieldName": "event_key", "column": "event_key"},
+		map[string]any{"fieldName": "amount", "formula": "price_usd/100"},
 		map[string]any{"key": "no_formula"},
 	}}
 	want := []CustomField{{Key: "price_usd_cents", Formula: "price_usd/100"}, {Key: "no_formula"}}
@@ -77,21 +78,33 @@ func TestWithCustomFields_KeepsTheConstantKeyWrapperReadable(t *testing.T) {
 func TestWithCustomFields_RefusesWhatItCannotNest(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		field  CustomField
+		fields []CustomField
 		reason string
 	}{
-		{"no name", CustomField{"", "price_usd/100"}, "has no name"},
-		{"name is not an identifier", CustomField{"price (cents)", "price_usd/100"}, "letters, digits, and underscores"},
-		{"no formula", CustomField{"cents", "  "}, "has no formula"},
-		{"two statements", CustomField{"cents", "1; DROP TABLE orders"}, "single expression"},
-		{"Statsig macro", CustomField{"recent", "ts > {statsig_start_date}"}, "Statsig macros"},
-		{"unterminated string", CustomField{"label", "'cents"}, "could not read"},
+		{"name is not an identifier", []CustomField{{"price (cents)", "price_usd/100"}}, "letters, digits, and underscores"},
+		{"no formula", []CustomField{{"cents", "  "}}, "has no formula"},
+		{"two statements", []CustomField{{"cents", "1; DROP TABLE orders"}}, "single expression"},
+		{"Statsig macro", []CustomField{{"recent", "ts > {statsig_start_date}"}}, "Statsig macros"},
+		{"unterminated string", []CustomField{{"label", "'cents"}}, "could not read"},
+		{"names that differ only in case", []CustomField{{"cents", "1"}, {"CENTS", "2"}}, `more than one custom field named "CENTS"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := WithCustomFields("SELECT * FROM t", []CustomField{tc.field}, "snowflake")
+			_, err := WithCustomFields("SELECT * FROM t", tc.fields, "snowflake")
 			if err == nil || !strings.Contains(err.Error(), tc.reason) {
-				t.Errorf("err = %v, want one containing %q", err, tc.reason)
+				t.Errorf("WithCustomFields err = %v, want one containing %q", err, tc.reason)
+			}
+			if err := ValidateCustomFields(tc.fields, "snowflake"); err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Errorf("ValidateCustomFields err = %v, want one containing %q", err, tc.reason)
 			}
 		})
+	}
+}
+
+func TestDuplicateColumns_IgnoresCase(t *testing.T) {
+	if got := DuplicateColumns([]string{"TS", "PRICE", "USER_ID", "price"}); !reflect.DeepEqual(got, []string{"PRICE"}) {
+		t.Errorf("DuplicateColumns = %q, want [PRICE]", got)
+	}
+	if got := DuplicateColumns([]string{"TS", "PRICE"}); got != nil {
+		t.Errorf("no duplicates: %q", got)
 	}
 }

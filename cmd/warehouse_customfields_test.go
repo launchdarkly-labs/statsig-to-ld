@@ -144,11 +144,13 @@ func TestPhase3_UpdateCustomFieldsAddsThemInPlace(t *testing.T) {
 
 func TestPhase3_UpdateCustomFieldsLeavesOtherQueriesAlone(t *testing.T) {
 	handEdited := "SELECT *, 'checkout-events' AS LD_EVENT_KEY FROM (\nSELECT ts, user_id, price_usd/100 AS cents FROM analytics.events WHERE kind = 'checkout'\n) AS ld_src"
+	editedKey := strings.Replace(wantCheckoutSQL, "'checkout-events'", "'purchase'", 1)
 	for _, tc := range []struct {
 		name, sql, warning string
 	}{
 		{"already has them", wantCheckoutCustomSQL, ""},
 		{"edited in LaunchDarkly", handEdited, "Statsig SQL has changed"},
+		{"event key edited in LaunchDarkly", editedKey, "Statsig SQL has changed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Chdir(t.TempDir())
@@ -197,6 +199,72 @@ func TestDryRun_ReportsMissingCustomFields(t *testing.T) {
 				t.Errorf("warnings = %q", l.warnings)
 			}
 		})
+	}
+}
+
+var macroField = []any{map[string]any{"key": "recent", "formula": "ts > {statsig_start_date}"}}
+
+func TestDryRun_UnusableCustomFieldIsReportedWithoutPreviews(t *testing.T) {
+	t.Run("new data source is refused", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		e := newPhase3Engine(t, "http://unused", false)
+		e.dryRun = true
+		e.metricSources[0]["customFieldMapping"] = macroField
+		l := e.dryRunDataSources("snowflake")
+		if len(l.lines) != 1 || !strings.HasPrefix(l.lines[0], "Checkout Events (query): would refuse (") || !strings.Contains(l.lines[0], `Statsig custom field "recent"`) {
+			t.Errorf("lines = %q", l.lines)
+		}
+	})
+	t.Run("existing data source is kept with the reason", func(t *testing.T) {
+		for _, update := range []bool{false, true} {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: wrappedCheckoutWithSQL(t, wantCheckoutSQL), noIntegration: true}
+			srv := f.server()
+			defer srv.Close()
+			e := newPhase3Engine(t, srv.URL, false)
+			e.dryRun, e.ldReadable, e.updateCustomFields = true, true, update
+			e.metricSources[0]["customFieldMapping"] = macroField
+			l := e.dryRunDataSources("snowflake")
+			warned := strings.Join(l.warnings, " ")
+			if len(l.lines) != 1 || l.lines[0] != "Checkout Events (query): would skip (already has the constant event key)" ||
+				!strings.Contains(warned, `Statsig custom field "recent"`) || strings.Contains(warned, "Rerun with --update-custom-fields") {
+				t.Errorf("update=%v: lines=%q warnings=%q", update, l.lines, l.warnings)
+			}
+		}
+	})
+}
+
+func TestPhase3_CustomFieldPreviewProblemsFailTheSource(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		f      *fakeLD
+		reason string
+	}{
+		{"failed preview without the constant event key", &fakeLD{previewStatus: 400}, "custom fields failed"},
+		{"a field named like a source column", &fakeLD{previewCols: customFieldPreviewCols + `,{"name":"price_usd_cents","type":"NUMBER"}`}, `more than one column named "PRICE_USD_CENTS"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			tc.f.t = t
+			srv := tc.f.server()
+			defer srv.Close()
+			e := customFieldEngine(t, srv.URL)
+			e.constantEventKey = tc.f.previewStatus == 0
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if len(tc.f.created) != 0 || e.report.DataSources.Failed != 1 || len(e.report.Errors) != 1 || !strings.Contains(e.report.Errors[0], tc.reason) {
+				t.Errorf("created=%d failed=%d errors=%q, want %q", len(tc.f.created), e.report.DataSources.Failed, e.report.Errors, tc.reason)
+			}
+		})
+	}
+}
+
+func TestWarehouse_UpdateCustomFieldsNeedsTheConstantEventKey(t *testing.T) {
+	whFlagCustomFields, whFlagConstantEventKey, whFlagStatsigExportFile = true, false, "export.json"
+	t.Cleanup(func() { whFlagCustomFields, whFlagConstantEventKey, whFlagStatsigExportFile = false, true, "" })
+	if err := runWarehouse(warehouseCmd, nil); err == nil || !strings.HasPrefix(err.Error(), "--update-custom-fields requires --constant-event-key") {
+		t.Errorf("err = %v", err)
 	}
 }
 

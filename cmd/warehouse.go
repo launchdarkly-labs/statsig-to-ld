@@ -253,6 +253,9 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 	if whFlagRemoveUnmapped && !whFlagUpdateMappings {
 		return fmt.Errorf("--remove-unmapped-contexts requires --update-mappings")
 	}
+	if whFlagCustomFields && !whFlagConstantEventKey {
+		return fmt.Errorf("--update-custom-fields requires --constant-event-key: it adds custom fields only to data sources whose query this command wrapped")
+	}
 	var maintainerMapping map[string]string
 	if whFlagMaintainerMapping != "" {
 		var err error
@@ -876,14 +879,17 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 }
 
 // previewSource adds the source's custom fields to body's query and fills its columns
-// and mappings from the warehouse preview, as the run sends them. dropped reports a Statsig value column the query does not return;
-// rawErr, a failed preview of the Statsig query, which the run only logs.
+// and mappings from the warehouse preview, as the run sends them. dropped reports a
+// Statsig value column the query does not return; rawErr, a failed preview of the
+// Statsig query, which the run only logs.
 func (e *migrationEngine) previewSource(source, body map[string]any, name, whType, integrationConfigID string) (dropped bool, rawErr, err error) {
 	statsigValue := jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn")
 	previewSQL := warehouse.BuildPreviewSQL(source)
-	if has, err := warehouse.ApplyCustomFields(body, source, whType); err != nil {
+	hasFields, err := warehouse.ApplyCustomFields(body, source, whType)
+	if err != nil {
 		return false, nil, err
-	} else if has {
+	}
+	if hasFields {
 		previewSQL = jsonutil.GetStr(body, "sqlQuery")
 	}
 	var sourceColumns []string
@@ -902,6 +908,12 @@ func (e *migrationEngine) previewSource(source, body map[string]any, name, whTyp
 		} else if e.verbose {
 			output.Warn(fmt.Sprintf("Preview failed for %s: %v", name, err))
 		}
+	}
+	if hasFields && rawErr != nil {
+		return false, rawErr, fmt.Errorf("preview of the source SQL with its Statsig custom fields failed: %w", rawErr)
+	}
+	if dup := warehouse.DuplicateColumns(sourceColumns); hasFields && len(dup) > 0 {
+		return false, rawErr, fmt.Errorf("its query with Statsig custom fields returns more than one column named %s; rename the custom field in Statsig, then rerun", quoteAll(dup))
 	}
 	if e.constantEventKey {
 		if err := e.applyConstantEventKey(body, whType, integrationConfigID, sourceColumns); err != nil {
@@ -1010,6 +1022,15 @@ func (p dataSourcePlan) refuse(reason string, err error) dataSourcePlan {
 func (e *migrationEngine) planSource(source, body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string, preview previewIntegration) dataSourcePlan {
 	plan := e.planDataSource(source, body, existing, collisions, whType)
 	ds := existing[jsonutil.GetStr(body, "key")]
+	if plan.action == planCreate || plan.action == planUpdate {
+		if err := warehouse.ValidateCustomFields(warehouse.CustomFields(source), whType); err != nil {
+			verb := "not created"
+			if ds != nil {
+				verb = "not updated"
+			}
+			return plan.refuse(err.Error(), fmt.Errorf("%s: %w", verb, err))
+		}
+	}
 	conflicts := warehouse.ContextKindConflicts(source)
 	if plan.action == planUpdate && !e.updateMappings {
 		plan.kindConflicts = conflicts
@@ -1115,19 +1136,11 @@ func (e *migrationEngine) planDataSource(source, body map[string]any, existing m
 			return plan
 		}
 		if fields := warehouse.CustomFields(source); len(fields) > 0 {
-			if warehouse.SameSQL(inner, wrapper.Inner) {
-				if !e.updateCustomFields {
-					plan.reason, plan.note = "lacks its Statsig custom fields; --update-custom-fields can add them", noteCustomFieldsMissing
-					return plan
-				}
-				names := make([]string, len(fields))
-				for i, f := range fields {
-					names[i] = f.Key
-				}
-				return dataSourcePlan{action: planUpdate, reason: "adds custom fields " + quoteAll(names)}
+			if wrapper.EventKey == key && warehouse.SameSQL(inner, wrapper.Inner) {
+				return e.planCustomFields(plan, key, fields, whType)
 			}
-			if inner, err = warehouse.WithCustomFields(sql, fields, whType); err != nil {
-				return plan
+			if withFields, err := warehouse.WithCustomFields(sql, fields, whType); err == nil {
+				inner = withFields
 			}
 		}
 		if !warehouse.SameSQL(inner, wrapper.Inner) {
@@ -1169,6 +1182,24 @@ func (e *migrationEngine) planDataSource(source, body map[string]any, existing m
 		}
 	}
 	return dataSourcePlan{action: planUpdate, stale: stale}
+}
+
+// planCustomFields plans a data source whose query is the one this command wrapped,
+// without the source's custom fields.
+func (e *migrationEngine) planCustomFields(plan dataSourcePlan, key string, fields []warehouse.CustomField, whType string) dataSourcePlan {
+	if err := warehouse.ValidateCustomFields(fields, whType); err != nil {
+		plan.warning = fmt.Sprintf("Data source %q was kept without its Statsig custom fields: %v.", key, err)
+		return plan
+	}
+	if !e.updateCustomFields {
+		plan.reason, plan.note = "lacks its Statsig custom fields; --update-custom-fields can add them", noteCustomFieldsMissing
+		return plan
+	}
+	names := make([]string, len(fields))
+	for i, f := range fields {
+		names[i] = f.Key
+	}
+	return dataSourcePlan{action: planUpdate, reason: "adds custom fields " + quoteAll(names)}
 }
 
 // existingConstantKey classifies ds's query by its own warehouse type, else whType.

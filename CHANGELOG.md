@@ -11,11 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `warehouse`: Statsig custom fields (a name and a SQL formula on a metric source) are added to the data source's
   query as columns, inside the constant event key wrapper, so metrics that use them have the column. A source fails
-  when a field's name is not letters, digits, and underscores, or its formula is empty, has more than one statement,
-  or uses a Statsig macro. Data sources created without their custom fields are skipped, and the run prints one line
-  naming them (note code `custom_fields_missing`). `--update-custom-fields` adds the fields to those whose query is
-  still the one `warehouse` wrote, updating the query and column list in place and keeping the mappings; a query
-  edited in LaunchDarkly is left alone. Rerun `metrics convert` afterwards for the metrics that use them.
+  when a field's name is not letters, digits, and underscores, two fields share a name (ignoring case), a field shares
+  a name with a column the source returns, or a formula is empty, has more than one statement, or uses a Statsig
+  macro. Data sources created without their custom fields are skipped, and the run prints one line naming them (note
+  code `custom_fields_missing`). `--update-custom-fields` adds the fields to those whose query is still the one
+  `warehouse` wrote, updating the query and column list in place and keeping the mappings; a query edited in
+  LaunchDarkly is left alone. It requires the constant event key. Rerun `metrics convert` afterwards for the metrics
+  that use them.
 
 - `warehouse`: `--ld-maintainer-mapping` names a maintainer per Statsig source, instead of one `--ld-maintainer` for
   the whole run: a JSON object of Statsig metric source names to an email, a member ID, or `none`. Sources it does
