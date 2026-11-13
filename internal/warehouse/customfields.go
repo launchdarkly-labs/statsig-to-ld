@@ -69,20 +69,20 @@ func ValidateCustomFields(fields []CustomField, whType string) error {
 	return err
 }
 
-// DuplicateColumns names, as first listed, the columns listed more than once, ignoring case.
-func DuplicateColumns(names []string) []string {
-	first := map[string]string{}
-	reported := map[string]bool{}
-	var dup []string
-	for _, n := range names {
-		lower := strings.ToLower(n)
-		if f, ok := first[lower]; !ok {
-			first[lower] = n
-		} else if !reported[lower] {
-			dup, reported[lower] = append(dup, f), true
+// CollidingCustomFields names the fields whose column the query returns more than once,
+// ignoring case.
+func CollidingCustomFields(columns []string, fields []CustomField) []string {
+	count := map[string]int{}
+	for _, c := range columns {
+		count[strings.ToLower(c)]++
+	}
+	var out []string
+	for _, f := range fields {
+		if count[strings.ToLower(f.Key)] > 1 {
+			out = append(out, f.Key)
 		}
 	}
-	return dup
+	return out
 }
 
 func customFieldColumns(fields []CustomField, whType string) ([]string, error) {

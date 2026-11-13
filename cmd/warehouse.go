@@ -912,8 +912,8 @@ func (e *migrationEngine) previewSource(source, body map[string]any, name, whTyp
 	if hasFields && rawErr != nil {
 		return false, rawErr, fmt.Errorf("preview of the source SQL with its Statsig custom fields failed: %w", rawErr)
 	}
-	if dup := warehouse.DuplicateColumns(sourceColumns); hasFields && len(dup) > 0 {
-		return false, rawErr, fmt.Errorf("its query with Statsig custom fields returns more than one column named %s; rename the custom field in Statsig, then rerun", quoteAll(dup))
+	if names := warehouse.CollidingCustomFields(sourceColumns, warehouse.CustomFields(source)); len(names) > 0 {
+		return false, rawErr, fmt.Errorf("Statsig custom field(s) %s: the source SQL already returns a column by that name; rename them in Statsig, then rerun", quoteAll(names))
 	}
 	if e.constantEventKey {
 		if err := e.applyConstantEventKey(body, whType, integrationConfigID, sourceColumns); err != nil {

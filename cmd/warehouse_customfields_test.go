@@ -241,7 +241,7 @@ func TestPhase3_CustomFieldPreviewProblemsFailTheSource(t *testing.T) {
 		reason string
 	}{
 		{"failed preview without the constant event key", &fakeLD{previewStatus: 400}, "custom fields failed"},
-		{"a field named like a source column", &fakeLD{previewCols: customFieldPreviewCols + `,{"name":"price_usd_cents","type":"NUMBER"}`}, `more than one column named "PRICE_USD_CENTS"`},
+		{"a field named like a source column", &fakeLD{previewCols: customFieldPreviewCols + `,{"name":"price_usd_cents","type":"NUMBER"}`}, `Statsig custom field(s) "price_usd_cents"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Chdir(t.TempDir())
@@ -257,6 +257,20 @@ func TestPhase3_CustomFieldPreviewProblemsFailTheSource(t *testing.T) {
 				t.Errorf("created=%d failed=%d errors=%q, want %q", len(tc.f.created), e.report.DataSources.Failed, e.report.Errors, tc.reason)
 			}
 		})
+	}
+}
+
+func TestPhase3_DuplicatesInTheStatsigSQLAloneAreNotBlamedOnCustomFields(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, previewCols: customFieldPreviewCols + `,{"name":"user_id","type":"TEXT"}`}
+	srv := f.server()
+	defer srv.Close()
+	e := customFieldEngine(t, srv.URL)
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.created) != 1 || len(e.report.Errors) != 0 {
+		t.Errorf("created=%d errors=%q, want it created", len(f.created), e.report.Errors)
 	}
 }
 

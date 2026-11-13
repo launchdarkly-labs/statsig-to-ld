@@ -100,11 +100,12 @@ func TestWithCustomFields_RefusesWhatItCannotNest(t *testing.T) {
 	}
 }
 
-func TestDuplicateColumns_IgnoresCase(t *testing.T) {
-	if got := DuplicateColumns([]string{"TS", "PRICE", "USER_ID", "price"}); !reflect.DeepEqual(got, []string{"PRICE"}) {
-		t.Errorf("DuplicateColumns = %q, want [PRICE]", got)
+func TestCollidingCustomFields(t *testing.T) {
+	fields := []CustomField{{"price", "amount/100"}, {"cents", "amount"}}
+	if got := CollidingCustomFields([]string{"TS", "PRICE", "CENTS", "price"}, fields); !reflect.DeepEqual(got, []string{"price"}) {
+		t.Errorf("a field named like a source column, ignoring case: %q, want [price]", got)
 	}
-	if got := DuplicateColumns([]string{"TS", "PRICE"}); got != nil {
-		t.Errorf("no duplicates: %q", got)
+	if got := CollidingCustomFields([]string{"USER_ID", "user_id", "PRICE", "CENTS"}, fields); got != nil {
+		t.Errorf("duplicates in the source SQL alone: %q, want none", got)
 	}
 }
