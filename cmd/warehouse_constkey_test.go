@@ -1067,7 +1067,7 @@ func TestWarehouseCmd_FlagsBound(t *testing.T) {
 		"ld-key", "ld-url", "ld-project", "ld-environment", "ld-maintainer",
 		"warehouse-type", "dry-run", "resume", "only",
 		"overwrite", "force-overwrite", "update-mappings", "remove-unmapped-contexts", "constant-event-key", "verbose", "no-color",
-		"ld-maintainer-mapping", "update-maintainers",
+		"ld-maintainer-mapping", "update-maintainers", "update-custom-fields",
 	} {
 		if warehouseCmd.Flags().Lookup(name) == nil {
 			t.Errorf("flag --%s not registered on `warehouse`", name)

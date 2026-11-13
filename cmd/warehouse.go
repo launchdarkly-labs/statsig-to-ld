@@ -45,6 +45,7 @@ var (
 	whFlagRemoveUnmapped    bool
 	whFlagMaintainerMapping string
 	whFlagUpdateMaintainers bool
+	whFlagCustomFields      bool
 )
 
 var warehouseCmd = &cobra.Command{
@@ -123,6 +124,7 @@ func init() {
 	warehouseCmd.Flags().BoolVar(&whFlagOverwrite, "overwrite", false, "Update existing LD metric data sources that lack the constant event key in place: their query, key column, and column list (timestamp, value, and context mappings are kept while the new query returns them). Refuses a data source whose bound metrics use other event keys, whose value column or context kind columns the new query drops while bound metrics use them, or, with --constant-event-key=false, whose key column the new query no longer returns")
 	warehouseCmd.Flags().BoolVar(&whFlagForceOverwrite, "force-overwrite", false, "Like --overwrite, but also updates data sources whose bound metrics use other event keys and would match no rows afterwards; the run still lists those metrics")
 	warehouseCmd.Flags().BoolVar(&whFlagUpdateMappings, "update-mappings", false, "Correct existing LD metric data sources' timestamp, value, and context mappings from the Statsig export")
+	warehouseCmd.Flags().BoolVar(&whFlagCustomFields, "update-custom-fields", false, "Add the Statsig source's custom fields to existing data sources this command created without them. A data source whose query was edited in LaunchDarkly is left alone")
 	warehouseCmd.Flags().BoolVar(&whFlagRemoveUnmapped, "remove-unmapped-contexts", false, "With --update-mappings, also remove context kinds the Statsig export does not map, except those bound metrics use as analysis or randomization units")
 	warehouseCmd.Flags().BoolVar(&whFlagVerbose, "verbose", false, "Show detailed API request/response info")
 	warehouseCmd.Flags().BoolVar(&whFlagNoColor, "no-color", false, "Disable colored output")
@@ -165,6 +167,7 @@ const (
 	noteKeptConstantKey          = "constant_key_kept"
 	noteExistsWithoutConstantKey = "exists_without_constant_key"
 	noteValueColumnNotInQuery    = "statsig_value_column_not_in_query"
+	noteCustomFieldsMissing      = "custom_fields_missing"
 )
 
 // -- Migration Engine --
@@ -189,6 +192,8 @@ type migrationEngine struct {
 	updateMappings   bool
 	removeUnmapped   bool
 	ldReadable       bool
+
+	updateCustomFields bool
 
 	// maintainerMapping is --ld-maintainer-mapping; maintainers holds its resolved
 	// entries, by Statsig source name, and defaultMaintainer the run's.
@@ -295,6 +300,8 @@ func runWarehouse(cmd *cobra.Command, args []string) error {
 		updateMappings:   whFlagUpdateMappings,
 		removeUnmapped:   whFlagRemoveUnmapped,
 		ldReadable:       whFlagLDKey != "" && whFlagLDProject != "" && whFlagLDEnvironment != "",
+
+		updateCustomFields: whFlagCustomFields,
 
 		maintainerMapping: maintainerMapping,
 		updateMaintainers: whFlagUpdateMaintainers,
@@ -772,7 +779,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 
 	total := len(e.metricSources)
 	withoutConstantKey := 0
-	var droppedValue []string
+	var droppedValue, missingFields []string
 	for i, source := range e.metricSources {
 		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, e.maintainerFor(source))
 		key := jsonutil.GetStr(body, "key")
@@ -785,6 +792,9 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 		e.recordPlan(key, plan)
 		if plan.note == noteExistsWithoutConstantKey {
 			withoutConstantKey++
+		}
+		if plan.note == noteCustomFieldsMissing {
+			missingFields = append(missingFields, key)
 		}
 		switch plan.action {
 		case planSkip:
@@ -856,19 +866,28 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 	if msg := droppedValueSummary(droppedValue); msg != "" {
 		e.warn(msg)
 	}
+	if msg := missingCustomFieldsSummary(missingFields); msg != "" {
+		e.warn(msg)
+	}
 	for _, msg := range issueSummaries(e.issues) {
 		e.warn(msg)
 	}
 	return nil
 }
 
-// previewSource fills body's columns and mappings from the warehouse preview, as the
-// run sends them. dropped reports a Statsig value column the query does not return;
+// previewSource adds the source's custom fields to body's query and fills its columns
+// and mappings from the warehouse preview, as the run sends them. dropped reports a Statsig value column the query does not return;
 // rawErr, a failed preview of the Statsig query, which the run only logs.
 func (e *migrationEngine) previewSource(source, body map[string]any, name, whType, integrationConfigID string) (dropped bool, rawErr, err error) {
 	statsigValue := jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn")
+	previewSQL := warehouse.BuildPreviewSQL(source)
+	if has, err := warehouse.ApplyCustomFields(body, source, whType); err != nil {
+		return false, nil, err
+	} else if has {
+		previewSQL = jsonutil.GetStr(body, "sqlQuery")
+	}
 	var sourceColumns []string
-	if previewSQL := warehouse.BuildPreviewSQL(source); integrationConfigID != "" && previewSQL != "" {
+	if integrationConfigID != "" && previewSQL != "" {
 		preview, err := e.ld.PreviewDataSource(e.ctx, integrationConfigID, previewSQL)
 		rawErr = err
 		if err == nil {
@@ -897,6 +916,14 @@ func droppedValueSummary(keys []string) string {
 		return ""
 	}
 	return fmt.Sprintf("%d data source(s) did not get the value column their Statsig source defines, because their query does not return it: %s. Add the column to the Statsig source's query and to the data source's in LaunchDarkly, or set a value column on their numeric metrics.",
+		len(keys), strings.Join(keys, ", "))
+}
+
+func missingCustomFieldsSummary(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d data source(s) were created without their Statsig custom fields: %s. Rerun with --update-custom-fields to add them to their queries, then rerun metrics convert for the metrics that use them.",
 		len(keys), strings.Join(keys, ", "))
 }
 
@@ -981,7 +1008,7 @@ func (p dataSourcePlan) refuse(reason string, err error) dataSourcePlan {
 
 // planSource plans one Statsig source; the run and the dry run share it.
 func (e *migrationEngine) planSource(source, body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string, preview previewIntegration) dataSourcePlan {
-	plan := e.planDataSource(body, existing, collisions, whType)
+	plan := e.planDataSource(source, body, existing, collisions, whType)
 	ds := existing[jsonutil.GetStr(body, "key")]
 	conflicts := warehouse.ContextKindConflicts(source)
 	if plan.action == planUpdate && !e.updateMappings {
@@ -1029,7 +1056,7 @@ func kindConflictError(conflicts []warehouse.KindConflict, exists bool) error {
 	return fmt.Errorf("not created: %s. Keep one of them in the Statsig source's id-type mapping and rerun, or create the data source by hand", strings.Join(parts, "; "))
 }
 
-func (e *migrationEngine) planDataSource(body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string) dataSourcePlan {
+func (e *migrationEngine) planDataSource(source, body map[string]any, existing map[string]map[string]any, collisions map[string][]string, whType string) dataSourcePlan {
 	key := jsonutil.GetStr(body, "key")
 	if names, ok := collisions[key]; ok {
 		return dataSourcePlan{
@@ -1079,9 +1106,31 @@ func (e *migrationEngine) planDataSource(body map[string]any, existing map[strin
 		// Someone's edit that still projects the constant: never rewritten, whatever the flags.
 		return dataSourcePlan{action: planSkip, reason: "kept: edited in LaunchDarkly", note: noteEditedConstantKey, markDone: true}
 	case state == warehouse.ConstantKeyWrapped && e.constantEventKey:
-		// Never rewritten, even with --overwrite: a PATCH could only drop mappings edited since.
+		// Never rewritten by --overwrite: a PATCH could only drop mappings edited since.
+		// Adding custom fields to the query this command wrote drops none.
 		plan := dataSourcePlan{action: planSkip, reason: "already has the constant event key", markDone: true}
-		if inner, err := warehouse.PrepareSourceSQL(jsonutil.GetStr(body, "sqlQuery"), whType); err == nil && !warehouse.SameSQL(inner, wrapper.Inner) {
+		sql := jsonutil.GetStr(body, "sqlQuery")
+		inner, err := warehouse.PrepareSourceSQL(sql, whType)
+		if err != nil {
+			return plan
+		}
+		if fields := warehouse.CustomFields(source); len(fields) > 0 {
+			if warehouse.SameSQL(inner, wrapper.Inner) {
+				if !e.updateCustomFields {
+					plan.reason, plan.note = "lacks its Statsig custom fields; --update-custom-fields can add them", noteCustomFieldsMissing
+					return plan
+				}
+				names := make([]string, len(fields))
+				for i, f := range fields {
+					names[i] = f.Key
+				}
+				return dataSourcePlan{action: planUpdate, reason: "adds custom fields " + quoteAll(names)}
+			}
+			if inner, err = warehouse.WithCustomFields(sql, fields, whType); err != nil {
+				return plan
+			}
+		}
+		if !warehouse.SameSQL(inner, wrapper.Inner) {
 			plan.warning = fmt.Sprintf("Data source %q kept its query, but its Statsig SQL has changed since it was created; edit its SQL in LaunchDarkly if the change matters.", key)
 		}
 		return plan
@@ -1597,7 +1646,7 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 	collisions := keyCollisions(e.metricSources)
 	withoutConstantKey, unchanged := 0, 0
 	var issues []sourceIssue
-	var droppedValue []string
+	var droppedValue, missingFields []string
 	for _, source := range e.metricSources {
 		st := jsonutil.GetStr(source, "sourceType")
 		if st == "" {
@@ -1627,6 +1676,9 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 		if plan.note == noteExistsWithoutConstantKey {
 			withoutConstantKey++
 		}
+		if plan.note == noteCustomFieldsMissing {
+			missingFields = append(missingFields, key)
+		}
 		if plan.mappings != nil && plan.action == planSkip {
 			unchanged++
 		} else {
@@ -1643,6 +1695,9 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 		out.warnings = append(out.warnings, msg)
 	}
 	if msg := droppedValueSummary(droppedValue); msg != "" {
+		out.warnings = append(out.warnings, msg)
+	}
+	if msg := missingCustomFieldsSummary(missingFields); msg != "" {
 		out.warnings = append(out.warnings, msg)
 	}
 	out.warnings = append(out.warnings, issueSummaries(issues)...)
@@ -1744,6 +1799,9 @@ func dryRunOutcome(plan dataSourcePlan) string {
 		if len(plan.stale) > 0 {
 			return fmt.Sprintf("would update (--force-overwrite; these bound metrics would match no rows: %s)", strings.Join(plan.stale, ", "))
 		}
+		if plan.reason != "" {
+			return fmt.Sprintf("would update (%s)", plan.reason)
+		}
 		return "would update"
 	case planUpdateMappings:
 		return "would update mappings"
@@ -1769,6 +1827,9 @@ func (e *migrationEngine) writeDryRunBodies(whType string) {
 			problems++
 		} else if conflicts := warehouse.ContextKindConflicts(source); len(conflicts) > 0 {
 			body["error"] = kindConflictError(conflicts, false).Error()
+			problems++
+		} else if _, err := warehouse.ApplyCustomFields(body, source, whType); err != nil {
+			body["error"] = err.Error()
 			problems++
 		} else if _, err := warehouse.ApplyConstantEventKey(body, whType, nil); err != nil {
 			body["error"] = err.Error()
