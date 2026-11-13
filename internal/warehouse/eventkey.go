@@ -45,7 +45,8 @@ type sqlScan struct {
 	significant []int
 	semicolons  []int
 	// code is the SQL with comments and string literals blanked; offsets match the input.
-	code string
+	code        string
+	lineComment bool
 }
 
 // Snowflake and Redshift read "..." as a quoted identifier, not a string.
@@ -81,6 +82,7 @@ func scanSQL(sql, whType string) (sqlScan, error) {
 				i++
 			}
 			blank(start, i-1)
+			s.lineComment = true
 		case c == '/' && next == '*':
 			end := strings.Index(sql[i+2:], "*/")
 			if end < 0 {
