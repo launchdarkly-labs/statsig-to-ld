@@ -44,6 +44,8 @@ type fakeLD struct {
 	previewStatus        int
 	// filterPreviewStatus fails previews of a query with SQL filter columns.
 	filterPreviewStatus int
+	// failPreview fails, with 400, the previews whose SQL it returns true for.
+	failPreview func(sql string) bool
 	// integrationStatus fails the integration lists of integrationStatusKeys, or of
 	// every key when that is empty; missingIntegrations 404. extraIntegrations are
 	// integration keys besides snowflake-experimentation set up for proj/production.
@@ -91,11 +93,14 @@ func (f *fakeLD) server() *httptest.Server {
 			sql := r.URL.Query().Get("sqlQuery")
 			f.previews = append(f.previews, sql)
 			filtered := f.filterPreviewStatus != 0 && strings.Contains(sql, ") AS statsig_filters")
-			if status := f.previewStatus; status != 0 || filtered || (f.wrappedPreviewStatus != 0 && strings.HasPrefix(sql, "SELECT *, '")) {
+			failed := f.failPreview != nil && f.failPreview(sql)
+			if status := f.previewStatus; status != 0 || filtered || failed || (f.wrappedPreviewStatus != 0 && strings.HasPrefix(sql, "SELECT *, '")) {
 				switch {
 				case status != 0:
 				case filtered:
 					status = f.filterPreviewStatus
+				case failed:
+					status = http.StatusBadRequest
 				default:
 					status = f.wrappedPreviewStatus
 				}

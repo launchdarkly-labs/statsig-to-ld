@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Statsig `sql_filter` criteria convert. `warehouse` reads the Statsig metrics and adds each SQL filter on a source to
   its data source's query as a true/false column, outside the custom fields; `metrics convert` turns the criterion into
   a filter on that column. The column's name is a hash of the filter's SQL, so the commands need no mapping file. A
-  filter with more than one statement or a Statsig macro, or all of a source's filters when its preview fails with
-  them, are left out with one line per run (`sql_filter_unusable`, `sql_filters_preview_failed`), and their metrics
+  filter with more than one statement, unbalanced parentheses, or a Statsig macro, or the new filters of a source
+  whose preview fails with them, are left out with one line per run (`sql_filter_unusable`, `sql_filters_preview_failed`), and their metrics
   stay lossy. `--update-custom-fields` adds the columns to data sources created without them. A metric whose data
   source lacks the column stays lossy (filter blocked code `sql_filter_column_missing`).
 

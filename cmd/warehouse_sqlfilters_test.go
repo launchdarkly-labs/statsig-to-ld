@@ -147,6 +147,13 @@ func TestPhase3_SQLFiltersThatCannotBeAddedAreLeftOut(t *testing.T) {
 			[]string{"were written without columns for their metrics' Statsig SQL filters", "SQL compilation error on checkout-events"},
 		},
 		{
+			"the Statsig SQL fails the preview too",
+			&fakeLD{failPreview: func(sql string) bool { return !strings.HasPrefix(sql, "SELECT *, '") }},
+			nil,
+			noteSQLFiltersPreviewFailed,
+			[]string{"were written without columns for their metrics' Statsig SQL filters", "SQL compilation error on checkout-events"},
+		},
+		{
 			"one uses a Statsig macro",
 			&fakeLD{},
 			[]string{"ts > {statsig_start_date}"},
@@ -229,6 +236,86 @@ func TestPhase3_SQLFilterColumnsAlreadyThereAreLeftAlone(t *testing.T) {
 	}
 	if f.patchCount != 0 || len(e.report.Notes) != 0 || len(e.report.Warnings) != 0 {
 		t.Errorf("patches=%d notes=%+v warnings=%q", f.patchCount, e.report.Notes, e.report.Warnings)
+	}
+}
+
+// A filter that fails the preview does not hold back the custom fields.
+func TestPhase3_UpdateCustomFieldsAddsTheFieldsWhenAFilterFailsThePreview(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, list: wrappedCheckoutWithSQL(t, wantCheckoutSQL), previewCols: customFieldPreviewCols,
+		failPreview: func(sql string) bool { return strings.Contains(sql, "plan_tier") }}
+	srv := f.server()
+	defer srv.Close()
+
+	e := sqlFilterEngine(t, srv.URL)
+	e.metricSources[0]["customFieldMapping"] = centsField
+	e.updateCustomFields = true
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if e.report.DataSources.Updated != 1 || len(e.report.Errors) != 0 {
+		t.Fatalf("report=%+v errors=%q", e.report.DataSources, e.report.Errors)
+	}
+	if ops := f.patches["checkout-events"]; len(ops) < 3 || ops[2].Path != "/sqlQuery" || ops[2].Value != wantCheckoutCustomSQL {
+		t.Errorf("ops = %+v\nwant sqlQuery\n%s", ops, wantCheckoutCustomSQL)
+	}
+	if want := []reportNote{{Code: noteSQLFiltersPreviewFailed, DataSource: "checkout-events"}}; !reflect.DeepEqual(e.report.Notes, want) {
+		t.Errorf("notes = %+v, want %+v", e.report.Notes, want)
+	}
+}
+
+// With --constant-event-key=false the SQL filter layer is outermost. --overwrite keeps
+// its columns, which bound metrics may filter on.
+func TestPhase3_OverwriteKeepsSQLFilterColumns(t *testing.T) {
+	regionExpr := "(region = 'EU') AS " + statsig.SQLFilterColumn("region = 'EU'")
+	list, err := json.Marshal(map[string]any{"items": []any{map[string]any{
+		"key": "checkout-events", "sqlQuery": withFilterLayer(checkoutRawInner, regionExpr),
+		"columnMappings": map[string]any{"keyColumn": "EVENT_NAME", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}, "columns": []any{}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name        string
+		failPreview func(string) bool
+		want        string
+		notes       []reportNote
+	}{
+		{"adds the new filter", nil, wrappedCheckout(withFilterLayer(checkoutRawInner, regionExpr, planTierExpr)), nil},
+		{
+			"the new filter fails the preview",
+			func(sql string) bool { return strings.Contains(sql, "plan_tier") },
+			wrappedCheckout(withFilterLayer(checkoutRawInner, regionExpr)),
+			[]reportNote{{Code: noteSQLFiltersPreviewFailed, DataSource: "checkout-events"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: string(list), previewCols: filterPreviewCols, failPreview: tc.failPreview}
+			srv := f.server()
+			defer srv.Close()
+
+			e := sqlFilterEngine(t, srv.URL)
+			e.overwrite = true
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if e.report.DataSources.Updated != 1 {
+				t.Fatalf("report=%+v errors=%q", e.report.DataSources, e.report.Errors)
+			}
+			var got any
+			for _, op := range f.patches["checkout-events"] {
+				if op.Op != "test" && op.Path == "/sqlQuery" {
+					got = op.Value
+				}
+			}
+			if got != tc.want {
+				t.Errorf("sqlQuery =\n%v\nwant\n%s", got, tc.want)
+			}
+			if len(e.report.Notes) != len(tc.notes) || len(tc.notes) > 0 && !reflect.DeepEqual(e.report.Notes, tc.notes) {
+				t.Errorf("notes = %+v, want %+v", e.report.Notes, tc.notes)
+			}
+		})
 	}
 }
 

@@ -86,6 +86,7 @@ func TestWithCustomFields_RefusesWhatItCannotNest(t *testing.T) {
 		{"two statements", []CustomField{{"cents", "1; DROP TABLE orders"}}, "single expression"},
 		{"Statsig macro", []CustomField{{"recent", "ts > {statsig_start_date}"}}, "Statsig macros"},
 		{"unterminated string", []CustomField{{"label", "'cents"}}, "could not read"},
+		{"unbalanced parentheses", []CustomField{{"cents", "(price_usd*100"}}, "could not read"},
 		{"names that differ only in case", []CustomField{{"cents", "1"}, {"CENTS", "2"}}, `more than one custom field named "CENTS"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -85,6 +85,9 @@ func TestValidateSQLFilter_RefusesWhatItCannotNest(t *testing.T) {
 		{"ts > {statsig_start_date}", "Statsig macros"},
 		{"a = 1; DROP TABLE t", "single expression"},
 		{"name = 'unterminated", "could not read"},
+		// Closing the parentheses it sits in would let it add columns or rows.
+		{"TRUE) AS sql_filter_deadbeef, (FALSE", "could not read"},
+		{"(plan_tier > 2", "could not read"},
 	} {
 		f := SQLFilterColumns([]string{tc.sql})[0]
 		err := ValidateSQLFilter(f, "snowflake")

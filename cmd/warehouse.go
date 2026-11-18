@@ -938,17 +938,14 @@ func (e *migrationEngine) previewSource(source, body map[string]any, plan dataSo
 	if err != nil {
 		return r, err
 	}
-	// Only the metrics that use a SQL filter need its column, so a create goes ahead without them.
-	if rawErr != nil && len(cols.Filters) > 0 && !plan.addsColumns {
-		without := warehouse.SourceColumns{Fields: cols.Fields}
-		p, has, retryErr, err := e.previewWith(source, body, sql, without, name, whType, integrationConfigID)
+	// Only the metrics that use a SQL filter need its column, so the write goes ahead without the new ones.
+	if rawErr != nil && plan.retry != nil {
+		p, has, retryErr, err := e.previewWith(source, body, sql, *plan.retry, name, whType, integrationConfigID)
 		if err != nil {
 			return r, err
 		}
-		if retryErr == nil {
-			r.issues = append(r.issues, sourceIssue{code: noteSQLFiltersPreviewFailed, key: jsonutil.GetStr(body, "key"), detail: failureReason(rawErr)})
-		}
-		preview, hasCols, rawErr, cols = p, has, retryErr, without
+		r.issues = append(r.issues, sourceIssue{code: noteSQLFiltersPreviewFailed, key: jsonutil.GetStr(body, "key"), detail: failureReason(rawErr)})
+		preview, hasCols, rawErr, cols = p, has, retryErr, *plan.retry
 	}
 	r.rawErr = rawErr
 	var sourceColumns []string
@@ -1116,6 +1113,9 @@ type dataSourcePlan struct {
 	// an update that only adds some.
 	columns     warehouse.SourceColumns
 	addsColumns bool
+	// retry, when set, is written instead of columns if their preview fails: it leaves
+	// out the SQL filter columns the data source does not have yet.
+	retry *warehouse.SourceColumns
 }
 
 // refuse turns p into a refusal, keeping its note and warning.
@@ -1131,7 +1131,7 @@ func (e *migrationEngine) planSource(source, body map[string]any, cols warehouse
 	ds := existing[jsonutil.GetStr(body, "key")]
 	if plan.action == planCreate || plan.action == planUpdate {
 		if !plan.addsColumns {
-			plan.columns = cols
+			plan.columns, plan.retry = withExistingSQLFilters(cols, ds)
 		}
 		if err := warehouse.ValidateCustomFields(cols.Fields, whType); err != nil {
 			verb := "not created"
@@ -1310,7 +1310,24 @@ func (e *migrationEngine) planAddedColumns(plan dataSourcePlan, key string, miss
 		plan.reason, plan.note = "lacks "+strings.Join(lacks, " and ")+"; --update-custom-fields can add them", noteCustomFieldsMissing
 		return plan
 	}
-	return dataSourcePlan{action: planUpdate, reason: "adds " + strings.Join(adds, " and "), columns: merged, addsColumns: true}
+	update := dataSourcePlan{action: planUpdate, reason: "adds " + strings.Join(adds, " and "), columns: merged, addsColumns: true}
+	// Without the custom fields, the fallback would rewrite the query unchanged.
+	if len(missing.Fields) > 0 && len(missing.Filters) > 0 {
+		kept := slices.DeleteFunc(slices.Clone(merged.Filters), func(f warehouse.CustomField) bool { return slices.Contains(missing.Filters, f) })
+		update.retry = &warehouse.SourceColumns{Fields: merged.Fields, Filters: kept}
+	}
+	return update
+}
+
+// withExistingSQLFilters adds to cols the SQL filter columns ds's query has, which
+// bound metrics may filter on, and gives the columns without the new ones.
+func withExistingSQLFilters(cols warehouse.SourceColumns, ds map[string]any) (warehouse.SourceColumns, *warehouse.SourceColumns) {
+	kept := warehouse.SQLFiltersIn(jsonutil.GetStr(ds, "sqlQuery"))
+	cols.Filters = warehouse.MergeSQLFilters(kept, cols.Filters)
+	if len(cols.Filters) == len(kept) {
+		return cols, nil
+	}
+	return cols, &warehouse.SourceColumns{Fields: cols.Fields, Filters: kept}
 }
 
 func columnNames(fields []warehouse.CustomField) []string {

@@ -1,6 +1,7 @@
 package warehouse
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -107,6 +108,9 @@ func customFieldExpr(f CustomField, whType string) (string, error) {
 func selectExpression(label, noun, text, whType string) (expr string, lineComment bool, err error) {
 	expr = strings.TrimSpace(text)
 	scan, err := scanSQL(expr, whType)
+	if err == nil && scan.unbalanced {
+		err = errors.New("its parentheses do not balance")
+	}
 	if err != nil {
 		return "", false, fmt.Errorf("%s: could not read its %s: %w", label, noun, err)
 	}

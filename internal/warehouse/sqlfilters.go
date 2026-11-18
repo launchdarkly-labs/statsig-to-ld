@@ -118,14 +118,29 @@ func MissingColumns(query, sql string, c SourceColumns, whType string) (missing,
 		return SourceColumns{}, SourceColumns{}, false
 	}
 	merged.Fields = c.Fields
-	merged.Filters = append(merged.Filters, have...)
-	for _, f := range c.Filters {
-		if !slices.ContainsFunc(have, func(h CustomField) bool { return h.Key == f.Key }) {
-			missing.Filters = append(missing.Filters, f)
-			merged.Filters = append(merged.Filters, f)
-		}
+	merged.Filters = MergeSQLFilters(have, c.Filters)
+	if len(merged.Filters) > len(have) {
+		missing.Filters = slices.Clone(merged.Filters[len(have):])
 	}
 	return missing, merged, true
+}
+
+// SQLFiltersIn lists the SQL filter columns of the layer BuildSourceQuery adds, when
+// query has it outermost.
+func SQLFiltersIn(query string) []CustomField {
+	_, have := splitSQLFilters(query)
+	return have
+}
+
+// MergeSQLFilters returns have, then the filters in want that have lacks.
+func MergeSQLFilters(have, want []CustomField) []CustomField {
+	merged := slices.Clone(have)
+	for _, f := range want {
+		if !slices.ContainsFunc(have, func(h CustomField) bool { return h.Key == f.Key }) {
+			merged = append(merged, f)
+		}
+	}
+	return merged
 }
 
 // splitSQLFilters undoes the SQL filter layer BuildSourceQuery adds. Each column's

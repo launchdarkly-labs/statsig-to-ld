@@ -438,7 +438,7 @@ func criteriaDetail(criteria []statsig.Criterion) string {
 // convertTermCriteria maps one term's Statsig criteria onto a LaunchDarkly metric
 // filter, or records a lossy reason and returns nil when it cannot.
 //
-// warehouseNative and hasDataSource are both required for a filter to be emitted:
+// warehouseNative and a data source (dsKey) are both required for a filter to be emitted:
 //
 //   - Cloud (SDK-event) criteria are not converted yet. See the TODO below for what
 //     that would take. LaunchDarkly does support filters on hosted metrics, so this
@@ -523,6 +523,9 @@ func convertTermCriteria(
 			criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), dsKey, columnPhrase(missing), detail)
 		blocked(FilterBlockedSQLFilterColumn, "sql_filter")
 		return nil
+	}
+	if len(columns) == 0 && slices.ContainsFunc(criteria, func(c statsig.Criterion) bool { _, ok := c.SQLFilter(); return ok }) {
+		result.addNote(WarnColumnUnverified)
 	}
 
 	result.addWarning(WarnFilterApplied,

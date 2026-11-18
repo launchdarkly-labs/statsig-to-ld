@@ -81,6 +81,17 @@ func TestConvert_WHN_SQLFilterWithoutItsColumnIsLossy(t *testing.T) {
 	}
 }
 
+// Only warehouse adds the column, so a data source whose columns are unknown may lack it.
+func TestConvert_WHN_SQLFilterOnUnknownColumnsIsNotedUnverified(t *testing.T) {
+	res := mustConvert(t, sqlFilterSum, Options{LDDataSource: "ld-checkout"})
+	if res.IsLossy() || res.LDMetric.Filters == nil {
+		t.Fatalf("want the filter applied; LossyReasons=%v", res.LossyReasons)
+	}
+	if !slices.Contains(res.NoteCodes, WarnColumnUnverified) {
+		t.Errorf("NoteCodes = %v, want %s", res.NoteCodes, WarnColumnUnverified)
+	}
+}
+
 // The event key matches every row, so an unfiltered term would count the whole source.
 func TestConvert_WHN_SQLFilterWithoutItsColumnOnAConstantKeySourceIsNotCreated(t *testing.T) {
 	res := mustConvert(t, sqlFilterSum, Options{
