@@ -5,10 +5,10 @@ import "testing"
 // warehouse and metrics convert each derive the column name, possibly in different
 // versions, so the scheme is pinned.
 func TestSQLFilterColumn_IsPinnedAndIgnoresSurroundingSpace(t *testing.T) {
-	if got := SQLFilterColumn("plan_tier > 2"); got != "sql_filter_6e400426" {
-		t.Errorf("SQLFilterColumn = %q, want sql_filter_6e400426", got)
+	if got := SQLFilterColumn("plan_tier > 2"); got != "sql_filter_6e4004268a3c8fc1" {
+		t.Errorf("SQLFilterColumn = %q, want sql_filter_6e4004268a3c8fc1", got)
 	}
-	if got := SQLFilterColumn("  plan_tier > 2\n"); got != "sql_filter_6e400426" {
+	if got := SQLFilterColumn("  plan_tier > 2\n"); got != "sql_filter_6e4004268a3c8fc1" {
 		t.Errorf("surrounding space changed the column: %q", got)
 	}
 	if SQLFilterColumn("plan_tier > 3") == SQLFilterColumn("plan_tier > 2") {

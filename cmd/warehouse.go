@@ -126,7 +126,7 @@ func init() {
 	warehouseCmd.Flags().BoolVar(&whFlagOverwrite, "overwrite", false, "Update existing LD metric data sources that lack the constant event key in place: their query, key column, and column list (timestamp, value, and context mappings are kept while the new query returns them). Refuses a data source whose bound metrics use other event keys, whose value column or context kind columns the new query drops while bound metrics use them, or, with --constant-event-key=false, whose key column the new query no longer returns")
 	warehouseCmd.Flags().BoolVar(&whFlagForceOverwrite, "force-overwrite", false, "Like --overwrite, but also updates data sources whose bound metrics use other event keys and would match no rows afterwards; the run still lists those metrics")
 	warehouseCmd.Flags().BoolVar(&whFlagUpdateMappings, "update-mappings", false, "Correct existing LD metric data sources' timestamp, value, and context mappings from the Statsig export")
-	warehouseCmd.Flags().BoolVar(&whFlagCustomFields, "update-custom-fields", false, "Add the Statsig source's custom fields, and a column for each SQL filter its metrics use, to existing data sources this command created without them. A data source whose query was edited in LaunchDarkly is left alone")
+	warehouseCmd.Flags().BoolVar(&whFlagCustomFields, "update-custom-fields", false, "Add the Statsig source's custom fields, and a column for each SQL filter its metrics use, to existing data sources this command created without them. A data source whose query was edited in LaunchDarkly is left alone, but a filter column removed there is added back")
 	warehouseCmd.Flags().BoolVar(&whFlagRemoveUnmapped, "remove-unmapped-contexts", false, "With --update-mappings, also remove context kinds the Statsig export does not map, except those bound metrics use as analysis or randomization units")
 	warehouseCmd.Flags().BoolVar(&whFlagVerbose, "verbose", false, "Show detailed API request/response info")
 	warehouseCmd.Flags().BoolVar(&whFlagNoColor, "no-color", false, "Disable colored output")
@@ -482,16 +482,20 @@ func (e *migrationEngine) phase1Export() error {
 	e.metricSources = detailed
 
 	fmt.Fprint(os.Stderr, "  Fetching metrics for their SQL filters... ")
-	metrics, err := e.sg.ListAllMetrics(e.ctx)
-	if err != nil {
-		return fmt.Errorf("could not read the Statsig metrics, whose SQL filters their data sources need: %w", err)
+	e.sqlFilters = nil
+	if metrics, err := e.sg.ListAllMetrics(e.ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "failed")
+		if e.only != "warehouse" {
+			e.warn(fmt.Sprintf("Could not read the Statsig metrics, so data sources get no columns for their metrics' Statsig SQL filters: %v. Once the metrics can be read, rerun with --update-custom-fields to add the columns.", err))
+		}
+	} else {
+		e.sqlFilters = converter.SQLFilters(metrics)
+		n := 0
+		for _, filters := range e.sqlFilters {
+			n += len(filters)
+		}
+		fmt.Fprintf(os.Stderr, "found %d on %d metric sources\n", n, len(e.sqlFilters))
 	}
-	e.sqlFilters = converter.SQLFilters(metrics)
-	n := 0
-	for _, filters := range e.sqlFilters {
-		n += len(filters)
-	}
-	fmt.Fprintf(os.Stderr, "found %d on %d metric sources\n", n, len(e.sqlFilters))
 
 	sqlConfig := warehouse.ExtractFromSQLParsing(e.metricSources)
 	e.whPrefilled = warehouse.MergeConfigs(sqlConfig, whConfig)
@@ -504,7 +508,9 @@ func (e *migrationEngine) phase1Export() error {
 		"warehouse_connection":       e.whConnections,
 		"warehouse_config_prefilled": e.whPrefilled,
 		"metric_sources":             e.metricSources,
-		"metric_sql_filters":         e.sqlFilters,
+	}
+	if e.sqlFilters != nil {
+		exportData["metric_sql_filters"] = e.sqlFilters
 	}
 	raw, _ := json.MarshalIndent(exportData, "", "  ")
 	_ = os.WriteFile(exportPath, raw, 0o644)
@@ -531,7 +537,7 @@ func (e *migrationEngine) phase1LoadFromFile() {
 	if raw, ok := data["metric_sql_filters"]; ok {
 		e.sqlFilters = exportedSQLFilters(raw)
 	} else {
-		e.warn(fmt.Sprintf("%s lists no SQL filters: an older version wrote it. Data sources get no columns for their metrics' Statsig SQL filters; if metrics use them, rerun without --statsig-export-file to export again.", e.exportFile))
+		e.warn(fmt.Sprintf("%s lists no SQL filters: an older version wrote it, or the run that did could not read the Statsig metrics. Data sources get no columns for their metrics' Statsig SQL filters; if metrics use them, rerun without --statsig-export-file to export again.", e.exportFile))
 	}
 
 	whConfig := map[string]string{}
@@ -829,7 +835,6 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 		output.Progress(i+1, total, name, "")
 
 		cols, colIssues := e.sourceColumns(source, key, whType)
-		e.recordIssues(colIssues)
 		// Planned before the Statsig SQL preview so a source that is not written costs none.
 		plan := e.planSource(source, body, cols, existing, collisions, whType, preview)
 		e.recordPlan(key, plan)
@@ -872,6 +877,7 @@ func (e *migrationEngine) phase3aMigrateDataSources() error {
 			e.failDataSource(key, name, err)
 			continue
 		}
+		e.recordIssues(colIssues)
 		e.recordIssues(r.issues)
 		if r.dropped {
 			droppedValue = append(droppedValue, key)
@@ -958,6 +964,9 @@ func (e *migrationEngine) previewSource(source, body map[string]any, plan dataSo
 				sourceColumns = append(sourceColumns, jsonutil.GetStr(c, "name"))
 			}
 		}
+	}
+	if len(sourceColumns) == 0 {
+		warehouse.ListSQLFilterColumns(jsonutil.GetMap(body, "columnMappings"), cols.Filters)
 	}
 	if hasCols && rawErr != nil {
 		return r, fmt.Errorf("preview of the source SQL with %s failed: %w", columnsPhrase(cols), rawErr)
@@ -1131,7 +1140,7 @@ func (e *migrationEngine) planSource(source, body map[string]any, cols warehouse
 	ds := existing[jsonutil.GetStr(body, "key")]
 	if plan.action == planCreate || plan.action == planUpdate {
 		if !plan.addsColumns {
-			plan.columns, plan.retry = withExistingSQLFilters(cols, ds)
+			plan.columns, plan.retry = withExistingSQLFilters(cols, ds, whType)
 		}
 		if err := warehouse.ValidateCustomFields(cols.Fields, whType); err != nil {
 			verb := "not created"
@@ -1249,6 +1258,8 @@ func (e *migrationEngine) planDataSource(body map[string]any, cols warehouse.Sou
 		case ok && missing.Empty():
 		case ok && wrapper.EventKey == key:
 			return e.planAddedColumns(plan, key, missing, merged, whType)
+		case ok:
+			plan.warning = fmt.Sprintf("Data source %q kept its query without %s, because its event key was edited in LaunchDarkly; add them to its query there if its metrics need them.", key, lacksPhrase(missing))
 		default:
 			plan.warning = fmt.Sprintf("Data source %q kept its query, but its Statsig SQL has changed since it was created; edit its SQL in LaunchDarkly if the change matters.", key)
 		}
@@ -1297,17 +1308,15 @@ func (e *migrationEngine) planAddedColumns(plan dataSourcePlan, key string, miss
 		plan.warning = fmt.Sprintf("Data source %q was kept without its Statsig custom fields: %v.", key, err)
 		return plan
 	}
-	var lacks, adds []string
+	var adds []string
 	if len(missing.Fields) > 0 {
-		lacks = append(lacks, "its Statsig custom fields")
 		adds = append(adds, "custom fields "+quoteAll(columnNames(missing.Fields)))
 	}
 	if len(missing.Filters) > 0 {
-		lacks = append(lacks, "columns for its metrics' Statsig SQL filters")
 		adds = append(adds, "SQL filter columns "+quoteAll(columnNames(missing.Filters)))
 	}
 	if !e.updateCustomFields {
-		plan.reason, plan.note = "lacks "+strings.Join(lacks, " and ")+"; --update-custom-fields can add them", noteCustomFieldsMissing
+		plan.reason, plan.note = "lacks "+lacksPhrase(missing)+"; --update-custom-fields can add them", noteCustomFieldsMissing
 		return plan
 	}
 	update := dataSourcePlan{action: planUpdate, reason: "adds " + strings.Join(adds, " and "), columns: merged, addsColumns: true}
@@ -1319,10 +1328,21 @@ func (e *migrationEngine) planAddedColumns(plan dataSourcePlan, key string, miss
 	return update
 }
 
+func lacksPhrase(missing warehouse.SourceColumns) string {
+	var lacks []string
+	if len(missing.Fields) > 0 {
+		lacks = append(lacks, "its Statsig custom fields")
+	}
+	if len(missing.Filters) > 0 {
+		lacks = append(lacks, "columns for its metrics' Statsig SQL filters")
+	}
+	return strings.Join(lacks, " and ")
+}
+
 // withExistingSQLFilters adds to cols the SQL filter columns ds's query has, which
 // bound metrics may filter on, and gives the columns without the new ones.
-func withExistingSQLFilters(cols warehouse.SourceColumns, ds map[string]any) (warehouse.SourceColumns, *warehouse.SourceColumns) {
-	kept := warehouse.SQLFiltersIn(jsonutil.GetStr(ds, "sqlQuery"))
+func withExistingSQLFilters(cols warehouse.SourceColumns, ds map[string]any, whType string) (warehouse.SourceColumns, *warehouse.SourceColumns) {
+	kept := warehouse.SQLFiltersIn(jsonutil.GetStr(ds, "sqlQuery"), whType)
 	cols.Filters = warehouse.MergeSQLFilters(kept, cols.Filters)
 	if len(cols.Filters) == len(kept) {
 		return cols, nil
@@ -1822,8 +1842,10 @@ func (e *migrationEngine) dryRunDataSources(whType string) dryRunListing {
 		body := warehouse.MapMetricSourceToDataSource(source, e.environmentKey, integrationKey, "")
 		key := jsonutil.GetStr(body, "key")
 		cols, colIssues := e.sourceColumns(source, key, whType)
-		issues = append(issues, colIssues...)
 		plan := e.planSource(source, body, cols, existing, collisions, whType, preview)
+		if plan.action == planCreate || plan.action == planUpdate {
+			issues = append(issues, colIssues...)
+		}
 		e.recordPlan(key, plan)
 		outcome := dryRunOutcome(plan)
 		var changes []string
@@ -2004,6 +2026,8 @@ func (e *migrationEngine) writeDryRunBodies(whType string) {
 		} else if _, err := warehouse.ApplyConstantEventKey(body, whType, nil); err != nil {
 			body["error"] = err.Error()
 			problems++
+		} else {
+			warehouse.ListSQLFilterColumns(jsonutil.GetMap(body, "columnMappings"), cols.Filters)
 		}
 		bodies = append(bodies, body)
 	}

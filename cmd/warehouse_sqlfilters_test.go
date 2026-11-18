@@ -18,8 +18,8 @@ import (
 
 const (
 	checkoutRawInner  = "SELECT ts, user_id FROM analytics.events WHERE kind = 'checkout'"
-	planTierCol       = "sql_filter_6e400426"
-	filterPreviewCols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"SQL_FILTER_6E400426","type":"BOOLEAN"}`
+	planTierCol       = "sql_filter_6e4004268a3c8fc1"
+	filterPreviewCols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"SQL_FILTER_6E4004268A3C8FC1","type":"BOOLEAN"}`
 )
 
 func withFilterLayer(inner string, cols ...string) string {
@@ -78,9 +78,25 @@ func TestPhase1_ExportRecordsTheMetricsSQLFilters(t *testing.T) {
 		t.Errorf("loaded sqlFilters = %#v warnings=%q, want %#v", loaded.sqlFilters, loaded.report.Warnings, want)
 	}
 
+	// Only the SQL filters need the metrics, so the run goes on without them.
 	metricsStatus = http.StatusForbidden
-	if err := e.phase1Export(); err == nil || !strings.Contains(err.Error(), "SQL filters") {
-		t.Errorf("a failed metrics read: err = %v", err)
+	for _, only := range []string{"", "warehouse"} {
+		e.only, e.report.Warnings = only, nil
+		if err := e.phase1Export(); err != nil {
+			t.Fatal(err)
+		}
+		if e.sqlFilters != nil {
+			t.Errorf("sqlFilters = %#v after a failed read", e.sqlFilters)
+		}
+		if warned := len(e.report.Warnings) == 1 && strings.Contains(e.report.Warnings[0], "--update-custom-fields"); warned != (only == "") {
+			t.Errorf("--only %q: warnings = %q", only, e.report.Warnings)
+		}
+	}
+	// An export file from that run lists no SQL filters, so a run from it warns too.
+	files, _ = filepath.Glob("statsig_export_*.json")
+	raw, err := os.ReadFile(files[len(files)-1])
+	if err != nil || strings.Contains(string(raw), "metric_sql_filters") {
+		t.Errorf("export = %s (%v), want no metric_sql_filters", raw, err)
 	}
 }
 
@@ -124,10 +140,31 @@ func TestPhase3_SQLFiltersAreAddedToTheQuery(t *testing.T) {
 			if got := f.created[0]["sqlQuery"]; got != tc.want {
 				t.Errorf("sqlQuery =\n%v\nwant\n%s", got, tc.want)
 			}
-			if cols := fmt.Sprint(f.created[0]["columnMappings"].(map[string]any)["columns"]); !strings.Contains(cols, "SQL_FILTER_6E400426") {
+			if cols := fmt.Sprint(f.created[0]["columnMappings"].(map[string]any)["columns"]); !strings.Contains(cols, "SQL_FILTER_6E4004268A3C8FC1") {
 				t.Errorf("columns = %s, want the SQL filter's column", cols)
 			}
 		})
+	}
+}
+
+// metrics convert checks a filter's column against the column list, which only the
+// preview fills in.
+func TestPhase3_SQLFilterColumnsAreListedWithoutAPreview(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, noIntegration: true}
+	srv := f.server()
+	defer srv.Close()
+
+	e := sqlFilterEngine(t, srv.URL)
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.previews) != 0 || len(f.created) != 1 {
+		t.Fatalf("previews=%d created=%d errors=%q", len(f.previews), len(f.created), e.report.Errors)
+	}
+	cols := fmt.Sprint(f.created[0]["columnMappings"].(map[string]any)["columns"])
+	if !strings.Contains(cols, "map[name:"+planTierCol+" type:BOOLEAN]") {
+		t.Errorf("columns = %s, want the SQL filter's column", cols)
 	}
 }
 
@@ -194,6 +231,11 @@ func TestPhase3_UpdateCustomFieldsAddsSQLFilterColumns(t *testing.T) {
 	}{
 		{"created before custom fields", wantCheckoutSQL, wrappedCheckout(withFilterLayer(checkoutCustomInner, planTierExpr))},
 		{"created with its custom fields", wantCheckoutCustomSQL, wrappedCheckout(withFilterLayer(checkoutCustomInner, planTierExpr))},
+		{
+			"created by an earlier version, whose custom fields are bare",
+			wrappedCheckout(strings.Replace(checkoutCustomInner, "(price_usd/100)", "price_usd/100", 1)),
+			wrappedCheckout(withFilterLayer(checkoutCustomInner, planTierExpr)),
+		},
 		{
 			"keeps a column Statsig no longer has a filter for",
 			wrappedCheckout(withFilterLayer(checkoutCustomInner, regionExpr)),
@@ -319,6 +361,52 @@ func TestPhase3_OverwriteKeepsSQLFilterColumns(t *testing.T) {
 	}
 }
 
+// A data source the run does not write says nothing about the filters it leaves out.
+func TestPhase3_UnusableSQLFiltersOfSourcesNotWrittenAreNotReported(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry run %v", dryRun), func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: wrappedCheckoutWithSQL(t, wrappedCheckout(withFilterLayer(checkoutRawInner, planTierExpr))), previewCols: filterPreviewCols}
+			srv := f.server()
+			defer srv.Close()
+
+			e := sqlFilterEngine(t, srv.URL, "plan_tier > 2", "ts > {statsig_start_date}")
+			e.updateCustomFields = true
+			var warnings []string
+			if dryRun {
+				e.dryRun, e.ldReadable = true, true
+				warnings = e.dryRunDataSources("snowflake").warnings
+			} else {
+				if err := e.phase3aMigrateDataSources(); err != nil {
+					t.Fatal(err)
+				}
+				warnings = e.report.Warnings
+			}
+			if f.patchCount != 0 || len(e.report.Notes) != 0 || len(warnings) != 0 {
+				t.Errorf("patches=%d notes=%+v warnings=%q", f.patchCount, e.report.Notes, warnings)
+			}
+		})
+	}
+}
+
+func TestPhase3_SourceWithAnEditedEventKeyIsKeptWithTheReason(t *testing.T) {
+	t.Chdir(t.TempDir())
+	edited := strings.Replace(wrappedCheckout(checkoutRawInner), "'checkout-events'", "'checkout'", 1)
+	f := &fakeLD{t: t, list: wrappedCheckoutWithSQL(t, edited), previewCols: filterPreviewCols}
+	srv := f.server()
+	defer srv.Close()
+
+	e := sqlFilterEngine(t, srv.URL)
+	e.updateCustomFields = true
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	warned := strings.Join(e.report.Warnings, " ")
+	if f.patchCount != 0 || len(e.report.Warnings) != 1 || !strings.Contains(warned, "event key was edited in LaunchDarkly") || strings.Contains(warned, "Statsig SQL has changed") {
+		t.Errorf("patches=%d warnings=%q", f.patchCount, e.report.Warnings)
+	}
+}
+
 // Without its columns the update would rewrite the query unchanged.
 func TestPhase3_UpdateWhoseSQLFiltersFailThePreviewFails(t *testing.T) {
 	t.Chdir(t.TempDir())
@@ -374,6 +462,9 @@ func TestWriteDryRunBodies_IncludesSQLFilters(t *testing.T) {
 	}
 	var bodies []map[string]any
 	if err := json.Unmarshal(raw, &bodies); err != nil || len(bodies) != 1 || bodies[0]["sqlQuery"] != wrappedCheckout(withFilterLayer(checkoutRawInner, planTierExpr)) {
-		t.Errorf("data-source-bodies.json = %s (%v), want the query with its SQL filter columns", raw, err)
+		t.Fatalf("data-source-bodies.json = %s (%v), want the query with its SQL filter columns", raw, err)
+	}
+	if cols := fmt.Sprint(bodies[0]["columnMappings"].(map[string]any)["columns"]); !strings.Contains(cols, "map[name:"+planTierCol+" type:BOOLEAN]") {
+		t.Errorf("columns = %s, want the SQL filter's column", cols)
 	}
 }

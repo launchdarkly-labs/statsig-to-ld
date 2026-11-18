@@ -33,13 +33,13 @@ func TestWithCustomFields_AddsEachFieldAsAColumn(t *testing.T) {
 			"one field, trailing terminator dropped",
 			"SELECT ts, user_id, price_usd FROM analytics.orders;",
 			[]CustomField{{"price_usd_cents", "price_usd/100"}},
-			"SELECT *, price_usd/100 AS price_usd_cents FROM (\nSELECT ts, user_id, price_usd FROM analytics.orders\n) AS statsig_src",
+			"SELECT *, (price_usd/100) AS price_usd_cents FROM (\nSELECT ts, user_id, price_usd FROM analytics.orders\n) AS statsig_src",
 		},
 		{
 			"fields keep their order",
 			"SELECT * FROM analytics.orders",
 			[]CustomField{{"cents", " price_usd * 100 "}, {"is_big", "CASE WHEN price_usd > 100 THEN 1 ELSE 0 END"}},
-			"SELECT *, price_usd * 100 AS cents, CASE WHEN price_usd > 100 THEN 1 ELSE 0 END AS is_big FROM (\nSELECT * FROM analytics.orders\n) AS statsig_src",
+			"SELECT *, (price_usd * 100) AS cents, (CASE WHEN price_usd > 100 THEN 1 ELSE 0 END) AS is_big FROM (\nSELECT * FROM analytics.orders\n) AS statsig_src",
 		},
 		{
 			"a line comment cannot swallow the alias",

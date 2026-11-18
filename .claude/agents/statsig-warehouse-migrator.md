@@ -72,7 +72,7 @@ Two-command sequence: warehouse setup, then metric definitions.
 The warehouse subcommand prints the recommended `metrics convert` command at the end of every successful run.
 
 The warehouse step runs three phases:
-- **Phase 1**: Exports warehouse connection config + metric sources from Statsig
+- **Phase 1**: Exports warehouse connection config, metric sources, and the metrics' SQL filters from Statsig
 - **Phase 2**: Sets up data export and experimentation integrations in LD (interactive — prompts for Snowflake/BigQuery/Databricks/Redshift config, generates SQL scripts)
 - **Phase 3**: Creates LD metric data sources, writes `source-mapping.json`
 
@@ -155,7 +155,7 @@ The tool loads `migration_state.json` and skips already-created data sources / c
 Fetches from Statsig:
 - `wh_connections` — warehouse connection config (host, database, schema, warehouse)
 - `metric_source/list` — metric sources (tables/queries with column mappings)
-- `metrics/list`: read only for the metrics' SQL filters (`sql_filter` criteria), each of which becomes a true/false column on its source's data source
+- `metrics/list`: read only for the metrics' SQL filters (`sql_filter` criteria), each of which becomes a true/false column on its source's data source. If they cannot be read, the run warns and data sources get no filter columns
 
 Saves to `statsig_export_<timestamp>.json` for reuse, with the SQL filters under `metric_sql_filters`. Metric definitions are **not** converted here; `metrics convert` re-fetches them itself when it runs.
 

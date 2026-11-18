@@ -23,5 +23,5 @@ func (c Criterion) SQLFilter() (string, bool) {
 // name from the SQL alone.
 func SQLFilterColumn(sql string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(sql)))
-	return "sql_filter_" + hex.EncodeToString(sum[:4])
+	return "sql_filter_" + hex.EncodeToString(sum[:8])
 }

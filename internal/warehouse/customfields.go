@@ -38,7 +38,13 @@ func CustomFields(source map[string]any) []CustomField {
 
 // WithCustomFields nests sql in a SELECT that adds each field as a column.
 func WithCustomFields(sql string, fields []CustomField, whType string) (string, error) {
-	cols, err := customFieldColumns(fields, whType)
+	return withCustomFields(sql, fields, whType, false)
+}
+
+// withCustomFields leaves formulas without a line comment unparenthesized when bare,
+// as versions before the SQL filters wrote them.
+func withCustomFields(sql string, fields []CustomField, whType string, bare bool) (string, error) {
+	cols, err := customFieldColumns(fields, whType, bare)
 	if err != nil {
 		return "", err
 	}
@@ -51,7 +57,7 @@ func WithCustomFields(sql string, fields []CustomField, whType string) (string, 
 
 // ValidateCustomFields reports the first field WithCustomFields would refuse.
 func ValidateCustomFields(fields []CustomField, whType string) error {
-	_, err := customFieldColumns(fields, whType)
+	_, err := customFieldColumns(fields, whType, false)
 	return err
 }
 
@@ -71,7 +77,7 @@ func CollidingCustomFields(columns []string, fields []CustomField) []string {
 	return out
 }
 
-func customFieldColumns(fields []CustomField, whType string) ([]string, error) {
+func customFieldColumns(fields []CustomField, whType string, bare bool) ([]string, error) {
 	cols := make([]string, len(fields))
 	seen := map[string]bool{}
 	for i, f := range fields {
@@ -80,7 +86,7 @@ func customFieldColumns(fields []CustomField, whType string) ([]string, error) {
 			return nil, fmt.Errorf("Statsig source has more than one custom field named %q; rename one in Statsig, then rerun", f.Key)
 		}
 		seen[lower] = true
-		expr, err := customFieldExpr(f, whType)
+		expr, err := customFieldExpr(f, whType, bare)
 		if err != nil {
 			return nil, err
 		}
@@ -89,7 +95,7 @@ func customFieldColumns(fields []CustomField, whType string) ([]string, error) {
 	return cols, nil
 }
 
-func customFieldExpr(f CustomField, whType string) (string, error) {
+func customFieldExpr(f CustomField, whType string, bare bool) (string, error) {
 	if !reColumnName.MatchString(f.Key) {
 		return "", fmt.Errorf("Statsig custom field %q: a column name must be letters, digits, and underscores; rename the field in Statsig, then rerun", f.Key)
 	}
@@ -97,10 +103,19 @@ func customFieldExpr(f CustomField, whType string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if lineComment {
-		return "(\n" + formula + "\n)", nil
+	if bare && !lineComment {
+		return formula, nil
 	}
-	return formula, nil
+	return parenthesize(formula, lineComment), nil
+}
+
+// parenthesize encloses an expression so it cannot close what it sits in, and on
+// lines of its own when a "--" comment would run into what follows.
+func parenthesize(expr string, lineComment bool) string {
+	if lineComment {
+		return "(\n" + expr + "\n)"
+	}
+	return "(" + expr + ")"
 }
 
 // selectExpression checks that text can sit in a SELECT list, naming it label in

@@ -18,7 +18,7 @@ const (
 	sqlFiltersTail = "\n) AS " + sqlFiltersAlias
 )
 
-var reSQLFilterAlias = regexp.MustCompile(`\) AS (sql_filter_[0-9a-f]{8})`)
+var reSQLFilterAlias = regexp.MustCompile(`\) AS (sql_filter_[0-9a-f]{16})`)
 
 // SourceColumns are the columns this command adds to a source's query: its custom
 // fields, then a true/false column for each Statsig SQL filter its metrics use.
@@ -78,6 +78,19 @@ func BuildSourceQuery(sql string, c SourceColumns, whType string) (string, error
 	return sqlFiltersHead + strings.Join(cols, ", ") + " FROM (\n" + sql + sqlFiltersTail, nil
 }
 
+// ListSQLFilterColumns adds filters' columns to cm's fallback column list, which a
+// preview would replace.
+func ListSQLFilterColumns(cm map[string]any, filters []CustomField) {
+	cols, ok := cm["columns"].([]FallbackColumn)
+	if !ok {
+		return
+	}
+	for _, f := range filters {
+		cols = append(cols, FallbackColumn{Name: f.Key, Type: "BOOLEAN"})
+	}
+	cm["columns"] = cols
+}
+
 // ValidateSQLFilter reports why BuildSourceQuery would refuse f.
 func ValidateSQLFilter(f CustomField, whType string) error {
 	_, err := sqlFilterExpr(f, whType)
@@ -89,10 +102,7 @@ func sqlFilterExpr(f CustomField, whType string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if lineComment {
-		return "(\n" + sql + "\n)", nil
-	}
-	return "(" + sql + ")", nil
+	return parenthesize(sql, lineComment), nil
 }
 
 // MissingColumns compares query, the inner query of a data source this command
@@ -101,7 +111,7 @@ func sqlFilterExpr(f CustomField, whType string) (string, error) {
 // other custom fields. merged is what an update writes: c, plus the SQL filter
 // columns query has and c lacks, which a bound metric may still filter on.
 func MissingColumns(query, sql string, c SourceColumns, whType string) (missing, merged SourceColumns, ok bool) {
-	base, have := splitSQLFilters(query)
+	base, have := splitSQLFilters(query, whType)
 	prepared, err := PrepareSourceSQL(sql, whType)
 	if err != nil {
 		return SourceColumns{}, SourceColumns{}, false
@@ -110,8 +120,7 @@ func MissingColumns(query, sql string, c SourceColumns, whType string) (missing,
 	case SameSQL(base, prepared):
 		missing.Fields = c.Fields
 	case len(c.Fields) > 0:
-		withFields, err := WithCustomFields(sql, c.Fields, whType)
-		if err != nil || !SameSQL(base, withFields) {
+		if !hasCustomFields(base, sql, c.Fields, whType) {
 			return SourceColumns{}, SourceColumns{}, false
 		}
 	default:
@@ -125,10 +134,21 @@ func MissingColumns(query, sql string, c SourceColumns, whType string) (missing,
 	return missing, merged, true
 }
 
+// hasCustomFields reports whether query is sql with fields, as this version or an
+// earlier one wrote them.
+func hasCustomFields(query, sql string, fields []CustomField, whType string) bool {
+	for _, bare := range []bool{false, true} {
+		if built, err := withCustomFields(sql, fields, whType, bare); err == nil && SameSQL(query, built) {
+			return true
+		}
+	}
+	return false
+}
+
 // SQLFiltersIn lists the SQL filter columns of the layer BuildSourceQuery adds, when
 // query has it outermost.
-func SQLFiltersIn(query string) []CustomField {
-	_, have := splitSQLFilters(query)
+func SQLFiltersIn(query, whType string) []CustomField {
+	_, have := splitSQLFilters(query, whType)
 	return have
 }
 
@@ -145,17 +165,29 @@ func MergeSQLFilters(have, want []CustomField) []CustomField {
 
 // splitSQLFilters undoes the SQL filter layer BuildSourceQuery adds. Each column's
 // name must be the one its SQL hashes to, so an edited filter is not taken for one.
-func splitSQLFilters(query string) (string, []CustomField) {
+func splitSQLFilters(query, whType string) (string, []CustomField) {
+	if base, filters, ok := readSQLFilters(query, whType); ok {
+		return base, filters
+	}
+	if strings.Contains(query, "\r\n") {
+		if base, filters, ok := readSQLFilters(strings.ReplaceAll(query, "\r\n", "\n"), whType); ok {
+			return base, filters
+		}
+	}
+	return query, nil
+}
+
+func readSQLFilters(query, whType string) (string, []CustomField, bool) {
 	q := strings.TrimSpace(query)
 	if !strings.HasPrefix(q, sqlFiltersHead+"(") || !strings.HasSuffix(q, sqlFiltersTail) {
-		return query, nil
+		return "", nil, false
 	}
 	rest := q[len(sqlFiltersHead) : len(q)-len(sqlFiltersTail)]
 	var filters []CustomField
 	for {
-		f, n, ok := nextSQLFilter(rest)
+		f, n, ok := nextSQLFilter(rest, whType)
 		if !ok {
-			return query, nil
+			return "", nil, false
 		}
 		filters = append(filters, f)
 		rest = rest[n:]
@@ -164,20 +196,24 @@ func splitSQLFilters(query string) (string, []CustomField) {
 			continue
 		}
 		if inner, ok := strings.CutPrefix(rest, " FROM (\n"); ok {
-			return inner, filters
+			return inner, filters, true
 		}
-		return query, nil
+		return "", nil, false
 	}
 }
 
-// nextSQLFilter reads "(<sql>) AS <column>" at the start of s.
-func nextSQLFilter(s string) (CustomField, int, bool) {
+// nextSQLFilter reads "(<sql>) AS <column>" at the start of s. An alias inside a
+// string or comment of the SQL is not its end.
+func nextSQLFilter(s, whType string) (CustomField, int, bool) {
 	if !strings.HasPrefix(s, "(") {
 		return CustomField{}, 0, false
 	}
 	for _, m := range reSQLFilterAlias.FindAllStringSubmatchIndex(s, -1) {
 		sql, col := strings.TrimSpace(s[1:m[0]]), s[m[2]:m[3]]
-		if statsig.SQLFilterColumn(sql) == col {
+		if statsig.SQLFilterColumn(sql) != col {
+			continue
+		}
+		if scan, err := scanSQL(sql, whType); err == nil && !scan.unbalanced {
 			return CustomField{Key: col, Formula: sql}, m[1], true
 		}
 	}

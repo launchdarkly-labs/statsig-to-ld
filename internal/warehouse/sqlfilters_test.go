@@ -4,11 +4,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 )
 
 const (
 	planTier      = "plan_tier > 2"
-	planTierCol   = "sql_filter_6e400426"
+	planTierCol   = "sql_filter_6e4004268a3c8fc1"
 	commentFilter = "-- paid plans only\nplan_tier > 2 OR is_partner = TRUE"
 )
 
@@ -33,7 +35,7 @@ func TestBuildSourceQuery_AddsSQLFiltersOutsideCustomFields(t *testing.T) {
 		{
 			"custom fields only",
 			SourceColumns{Fields: centsField},
-			"SELECT *, price_usd*100 AS cents FROM (\nSELECT * FROM analytics.orders\n) AS statsig_src",
+			"SELECT *, (price_usd*100) AS cents FROM (\nSELECT * FROM analytics.orders\n) AS statsig_src",
 		},
 		{
 			"filters only",
@@ -45,7 +47,7 @@ func TestBuildSourceQuery_AddsSQLFiltersOutsideCustomFields(t *testing.T) {
 			"both",
 			SourceColumns{Fields: centsField, Filters: SQLFilterColumns([]string{planTier, "cents > 500"})},
 			"SELECT *, (plan_tier > 2) AS " + planTierCol + ", (cents > 500) AS " + SQLFilterColumns([]string{"cents > 500"})[0].Key +
-				" FROM (\nSELECT *, price_usd*100 AS cents FROM (\nSELECT * FROM analytics.orders\n) AS statsig_src\n) AS statsig_filters",
+				" FROM (\nSELECT *, (price_usd*100) AS cents FROM (\nSELECT * FROM analytics.orders\n) AS statsig_src\n) AS statsig_filters",
 		},
 		{
 			"a line comment cannot swallow the alias",
@@ -124,6 +126,7 @@ func TestMissingColumns(t *testing.T) {
 		wantMerged  SourceColumns
 	}{
 		{"created before custom fields", sql, want, want},
+		{"created by an earlier version, whose custom fields are bare", "SELECT *, price_usd*100 AS cents FROM (\n" + sql + "\n) AS statsig_src", SourceColumns{Filters: filters}, want},
 		{"created with custom fields only", build(SourceColumns{Fields: centsField}), SourceColumns{Filters: filters}, want},
 		{"has some filters", build(SourceColumns{Fields: centsField, Filters: filters[:1]}), SourceColumns{Filters: filters[1:]}, want},
 		{"has everything", build(want), SourceColumns{}, want},
@@ -158,6 +161,28 @@ func TestMissingColumns(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, _, ok := MissingColumns(query, sql, want, "snowflake"); ok {
 				t.Error("recognized a query this command did not write from this SQL")
+			}
+		})
+	}
+}
+
+func TestMissingColumns_ReadsBackTrickyQueries(t *testing.T) {
+	const sql = "SELECT * FROM analytics.orders"
+	// The alias it quotes is the one its own first characters hash to.
+	decoy := "x = 'a) AS " + statsig.SQLFilterColumn("x = 'a") + "'"
+	c := SourceColumns{Fields: centsField, Filters: SQLFilterColumns([]string{decoy, planTier})}
+	q, err := BuildSourceQuery(sql, c, "snowflake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, query := range map[string]string{
+		"a filter that quotes a column alias": q,
+		"CRLF line endings":                   strings.ReplaceAll(q, "\n", "\r\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			missing, merged, ok := MissingColumns(query, sql, c, "snowflake")
+			if !ok || !missing.Empty() || !reflect.DeepEqual(merged, c) {
+				t.Errorf("MissingColumns = %+v, %+v, %v; want nothing missing", missing, merged, ok)
 			}
 		})
 	}

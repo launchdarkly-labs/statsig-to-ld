@@ -374,15 +374,15 @@ A Statsig metric source can define custom fields: a name and a SQL formula that 
 
 ```sql
 SELECT *, 'orders' AS LD_EVENT_KEY FROM (
-SELECT *, price_usd/100 AS price_usd_cents FROM (
+SELECT *, (price_usd/100) AS price_usd_cents FROM (
 <the Statsig source SQL, without a trailing semicolon>
 ) AS statsig_src
 ) AS ld_src
 ```
 
-The field's name is the column's alias, so Snowflake stores it upper case; `metrics convert` rewrites the columns a metric uses to the case the data source stores. A source fails, with the reason, when a field's name is not letters, digits, and underscores, two fields share a name (ignoring case), a field shares a name with a column the source returns (checked when the query is previewed), or a formula is empty, has more than one statement, or uses a Statsig macro. A data source this command already wrapped keeps its query instead, with a warning naming the field; `--overwrite` refuses to update one without the wrapper.
+The field's name is the column's alias, so Snowflake stores it upper case; `metrics convert` rewrites the columns a metric uses to the case the data source stores. A source fails, with the reason, when a field's name is not letters, digits, and underscores, two fields share a name (ignoring case), a field shares a name with a column the source returns (checked when the query is previewed), or a formula is empty, has more than one statement or unbalanced parentheses, or uses a Statsig macro. A data source this command already wrapped keeps its query instead, with a warning naming the field; `--overwrite` refuses to update one without the wrapper.
 
-Data sources created by an earlier version lack their custom fields. A run skips them and prints one line naming them (note code `custom_fields_missing`). `--update-custom-fields` adds the fields to each one whose query is still the one `warehouse` wrote: its query and column list are updated in place, its mappings are kept, and the patch first tests what the run listed, as `--overwrite` does. A query edited in LaunchDarkly since, including its event key literal, is left alone, with the changed-SQL warning. The flag requires the constant event key. Then rerun `metrics convert`: a metric that uses a custom field is skipped as lossy while its data source lacks the column.
+Data sources created by an earlier version lack their custom fields. A run skips them and prints one line naming them (note code `custom_fields_missing`). `--update-custom-fields` adds the fields to each one whose query is still the one `warehouse` wrote: its query and column list are updated in place, its mappings are kept, and the patch first tests what the run listed, as `--overwrite` does. A query edited in LaunchDarkly since, including its event key literal, is left alone, with a warning. The flag requires the constant event key. Then rerun `metrics convert`: a metric that uses a custom field is skipped as lossy while its data source lacks the column.
 
 ### SQL filters
 
@@ -390,17 +390,17 @@ A Statsig metric can filter its source with raw SQL (a `sql_filter` criterion), 
 
 ```sql
 SELECT *, 'orders' AS LD_EVENT_KEY FROM (
-SELECT *, (plan_tier > 2) AS sql_filter_6e400426 FROM (
+SELECT *, (plan_tier > 2) AS sql_filter_6e4004268a3c8fc1 FROM (
 <the Statsig source SQL, with its custom fields>
 ) AS statsig_filters
 ) AS ld_src
 ```
 
-`metrics convert` turns the criterion into the filter `sql_filter_6e400426 in [true]`, combined with the term's other criteria (see [Metric filter criteria](#metric-filter-criteria)). The column's name is a hash of the filter's SQL, so both commands name it alike with no mapping file. A row whose filter is NULL is left out, as in Statsig's `WHERE`. Only metrics that `metrics convert` converts count: a metric's filters go on its source, and a ratio's denominator filters on the denominator's source.
+`metrics convert` turns the criterion into the filter `sql_filter_6e4004268a3c8fc1 in [true]`, combined with the term's other criteria (see [Metric filter criteria](#metric-filter-criteria)). The column's name is a hash of the filter's SQL, so both commands name it alike with no mapping file. A row whose filter is NULL is left out, as in Statsig's `WHERE`. Only metrics that `metrics convert` converts count: a metric's filters go on its source, and a ratio's denominator filters on the denominator's source.
 
-A filter that has more than one statement, unbalanced parentheses, or a Statsig macro is left out of the query (note code `sql_filter_unusable`), and so are the filters a data source does not have yet when its preview fails with them (`sql_filters_preview_failed`). The data source is still written, the run prints one line per code naming them, and the metrics that use those filters stay lossy.
+A filter that has more than one statement, unbalanced parentheses, or a Statsig macro is left out of the query (note code `sql_filter_unusable`), and so are the filters a data source does not have yet when its preview fails with them (`sql_filters_preview_failed`). The data source is still written, the run prints one line per code naming them, and the metrics that use those filters stay lossy; `metrics convert` names a filter `warehouse` cannot add. If the Statsig metrics cannot be read, the run warns and data sources get no filter columns.
 
-A data source created without the columns is skipped with the same note and line as missing custom fields (`custom_fields_missing`), and `--update-custom-fields` adds them the same way. It keeps a column whose filter Statsig no longer has, since a converted metric may still filter on it, and so does `--overwrite`. When the preview with new filter columns fails, it still adds the missing custom fields; a data source missing only filter columns is not updated. An export file written by an earlier version lists no SQL filters: the run warns, and data sources get no filter columns.
+A data source created without the columns is skipped with the same note and line as missing custom fields (`custom_fields_missing`), and `--update-custom-fields` adds them the same way. It keeps a column whose filter Statsig no longer has, since a converted metric may still filter on it, and so does `--overwrite`. When the preview with new filter columns fails, it still adds the missing custom fields; a data source missing only filter columns is not updated. A filter column removed in LaunchDarkly is added back while a Statsig metric still uses its filter. Without a preview, the column list names each filter column as `BOOLEAN`. An export file written by an earlier version, or by a run that could not read the Statsig metrics, lists no SQL filters: the run warns, and data sources get no filter columns.
 
 ### Correcting mappings
 
@@ -537,7 +537,7 @@ statsig-to-ld warehouse \
 | `--overwrite` | `false` | Update existing LD metric data sources that lack the constant event key in place: the query, key column, and column list change; timestamp, value, and context mappings are kept while the new query returns them. With the constant event key on, refuses a data source whose bound metrics use other event keys; either way, refuses one whose value column or context kind columns the new query drops while bound metrics use them; with `--constant-event-key=false`, keeps the existing key column and refuses when the new query does not return it. Data sources that already have the constant, or whose wrapper was edited in LaunchDarkly, never have their query rewritten by it. Without it, existing data sources are skipped. See [The constant event key](#the-constant-event-key). |
 | `--force-overwrite` | `false` | Implies `--overwrite`, and also updates data sources whose bound metrics would match no rows afterwards, listing those metrics. Like `--convert-lossy` and `--accept-data-loss`, it opts into a known loss. |
 | `--update-mappings` | `false` | Correct existing data sources' timestamp, value, and context mappings in place from the Statsig export, with or without the constant event key; key, query, key column, and bound metrics are kept, and the column list is refreshed from a preview of the query when the warehouse returns other columns. Adds or moves context kinds, and removes them only with `--remove-unmapped-contexts`. Checks column types, and keeps a value column bound numeric metrics read. With `--overwrite`, an updated query takes its mappings from the export. See [Correcting mappings](#correcting-mappings). |
-| `--update-custom-fields` | `false` | Add the Statsig source's custom fields, and a column for each SQL filter its metrics use, to existing data sources this command created without them, updating the query and column list in place and keeping the mappings. A query edited in LaunchDarkly is left alone. Requires the constant event key. See [Custom fields](#custom-fields) and [SQL filters](#sql-filters). |
+| `--update-custom-fields` | `false` | Add the Statsig source's custom fields, and a column for each SQL filter its metrics use, to existing data sources this command created without them, updating the query and column list in place and keeping the mappings. A query edited in LaunchDarkly is left alone, but a filter column removed there is added back. Requires the constant event key. See [Custom fields](#custom-fields) and [SQL filters](#sql-filters). |
 | `--remove-unmapped-contexts` | `false` | Requires `--update-mappings`. Also removes context kinds the Statsig export does not map, except those bound metrics use as analysis or randomization units. See [Correcting mappings](#correcting-mappings). |
 | `--constant-event-key` | `true` | Wrap each source's SQL to project the data source key as a constant event key column and use it as the key column. `--constant-event-key=false` sends the Statsig SQL unwrapped. |
 | `--verbose` | `false` | Show detailed API request/response info |
@@ -600,7 +600,7 @@ Statsig combines multiple criteria on one term with AND, and multiple values wit
 | `is_true` / `is_false` | `in` with the boolean `true` / `false` |
 | `sql_filter` | `in` with the boolean `true`, on the column `warehouse` adds for the filter ([SQL filters](#sql-filters)) |
 
-A `sql_filter` converts only while its data source has the filter's column. When `metrics convert` reads the data source's columns and the column is missing, the term stays lossy (filter blocked code `sql_filter_column_missing`); rerun `warehouse --update-custom-fields` to add it.
+A `sql_filter` converts only while its data source has the filter's column. When `metrics convert` reads the data source's columns and the column is missing, the term stays lossy (filter blocked code `sql_filter_column_missing`); rerun `warehouse --update-custom-fields` to add it. A filter `warehouse` cannot add (a Statsig macro, more than one statement, unbalanced parentheses) is lossy even when the columns are unknown; when they are unknown otherwise, the metric gets the `column_unverified` note.
 
 **Not converted.** `after_exposure` and `before_exposure` compare a column against each unit's exposure timestamp, which LaunchDarkly's date operators cannot express (they compare against a fixed date). A criterion is also unmappable if it sets `nullVacuousOverride`, has no column, uses a context-attribute type (`user`, `user_custom`), carries a non-numeric value for a numeric comparison, carries more than one value for a numeric comparison, has an empty-string value, or is a `sql_filter` without exactly one non-empty SQL value.
 

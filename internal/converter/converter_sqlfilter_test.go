@@ -92,6 +92,24 @@ func TestConvert_WHN_SQLFilterOnUnknownColumnsIsNotedUnverified(t *testing.T) {
 	}
 }
 
+// warehouse never adds a column for a filter it cannot nest, whatever the columns.
+func TestConvert_WHN_SQLFilterWarehouseCannotAddIsLossy(t *testing.T) {
+	raw := strings.Replace(sqlFilterSum, `"plan_tier > 2"`, `"ts > {statsig_start_date}"`, 1)
+	for name, cols := range map[string]map[string][]string{
+		"columns unknown": nil,
+		"column missing":  {"ld-checkout": {"EVENT", "PRICE_USD"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := mustConvert(t, raw, Options{LDDataSource: "ld-checkout", DataSourceColumns: cols})
+			if !res.IsLossy() || res.LDMetric.Filters != nil {
+				t.Fatalf("want lossy with no filter; Filters=%#v LossyReasons=%v", res.LDMetric.Filters, res.LossyReasons)
+			}
+			assertHasWarning(t, res.LossyReasons, "Statsig macro")
+			assertHasWarning(t, res.LossyReasons, "Fix it in Statsig")
+		})
+	}
+}
+
 // The event key matches every row, so an unfiltered term would count the whole source.
 func TestConvert_WHN_SQLFilterWithoutItsColumnOnAConstantKeySourceIsNotCreated(t *testing.T) {
 	res := mustConvert(t, sqlFilterSum, Options{

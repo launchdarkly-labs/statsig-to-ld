@@ -218,6 +218,7 @@ func TestCriteriaToFilter_RejectedConditions(t *testing.T) {
 		wantIn    string
 	}{
 		{"sql_filter without SQL", statsig.Criterion{Type: "metadata", Condition: "sql_filter"}, "one non-empty value"},
+		{"sql_filter with blank SQL", statsig.Criterion{Type: "metadata", Condition: "sql_filter", Values: []string{"  "}}, "its SQL is empty"},
 		{"sql_filter with two snippets", statsig.Criterion{Type: "metadata", Condition: "sql_filter", Values: []string{"a = 1", "b = 2"}}, "has 2 value(s)"},
 		{"after_exposure", crit("ts", "after_exposure", "0"), "exposure time"},
 		{"before_exposure", crit("ts", "before_exposure", "0"), "exposure time"},

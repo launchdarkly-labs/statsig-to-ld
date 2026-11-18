@@ -9,6 +9,7 @@ import (
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/warehouse"
 )
 
 // LaunchDarkly metric filter operators. LaunchDarkly has no "equals"; equality is
@@ -209,8 +210,11 @@ func criterionToLeaf(c statsig.Criterion) (*launchdarkly.EventFilter, error) {
 	case "sql_filter":
 		sql, ok := c.SQLFilter()
 		if !ok {
-			return nil, unsupportedCoded(FilterBlockedValueCount, c.Condition, fmt.Sprintf(
-				"it should carry its SQL as one non-empty value, but has %d value(s)", len(c.Values)))
+			reason := fmt.Sprintf("it should carry its SQL as one non-empty value, but has %d value(s)", len(c.Values))
+			if len(c.Values) == 1 {
+				reason = "its SQL is empty"
+			}
+			return nil, unsupportedCoded(FilterBlockedValueCount, c.Condition, reason)
 		}
 		return &launchdarkly.EventFilter{
 			Type:      launchdarkly.EventFilterTypeEventProperty,
@@ -518,9 +522,14 @@ func convertTermCriteria(
 		return nil
 	}
 
-	if missing := missingSQLFilterColumns(criteria, columns); len(missing) > 0 {
-		result.addLossy(WarnFilterSQLFilterColumn, "DATA LOSS: %s %s not applied. Data source %q has no %s for the result of its Statsig SQL filter. If statsig-to-ld warehouse created the data source, rerun warehouse with --update-custom-fields to add it; otherwise add (<filter SQL>) AS <column> to the data source's query in LaunchDarkly. Then run metrics convert again. Dropped filters: [%s].",
-			criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), dsKey, columnPhrase(missing), detail)
+	if missing, unaddable := missingSQLFilterColumns(criteria, columns); len(missing) > 0 {
+		if unaddable {
+			result.addLossy(WarnFilterSQLFilterColumn, "DATA LOSS: %s %s not applied. Data source %q has no %s for the result of its Statsig SQL filter, and warehouse cannot add one: the filter uses a Statsig macro, has more than one statement or unbalanced parentheses, or could not be read. Fix it in Statsig, rerun warehouse with --update-custom-fields, then run metrics convert again. Dropped filters: [%s].",
+				criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), dsKey, columnPhrase(missing), detail)
+		} else {
+			result.addLossy(WarnFilterSQLFilterColumn, "DATA LOSS: %s %s not applied. Data source %q has no %s for the result of its Statsig SQL filter. If statsig-to-ld warehouse created the data source, rerun warehouse with --update-custom-fields to add it; otherwise add (<filter SQL>) AS <column> to the data source's query in LaunchDarkly. Then run metrics convert again. Dropped filters: [%s].",
+				criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), dsKey, columnPhrase(missing), detail)
+		}
 		blocked(FilterBlockedSQLFilterColumn, "sql_filter")
 		return nil
 	}
@@ -538,23 +547,25 @@ func convertTermCriteria(
 }
 
 // missingSQLFilterColumns names the SQL filter columns that columns lack, ignoring
-// case. It names none when columns are unknown.
-func missingSQLFilterColumns(criteria []statsig.Criterion, columns []string) []string {
-	if len(columns) == 0 {
-		return nil
-	}
-	var missing []string
+// case, and reports whether warehouse cannot add one. With columns unknown it names
+// only those. Metric filters work only on Snowflake, so the SQL is read as Snowflake's.
+func missingSQLFilterColumns(criteria []statsig.Criterion, columns []string) (missing []string, unaddable bool) {
 	for _, c := range criteria {
 		sql, ok := c.SQLFilter()
 		if !ok {
 			continue
 		}
-		col := statsig.SQLFilterColumn(sql)
-		if !slices.ContainsFunc(columns, func(name string) bool { return strings.EqualFold(name, col) }) {
-			missing = append(missing, col)
+		f := warehouse.SQLFilterColumns([]string{sql})[0]
+		if slices.ContainsFunc(columns, func(name string) bool { return strings.EqualFold(name, f.Key) }) {
+			continue
+		}
+		bad := warehouse.ValidateSQLFilter(f, "snowflake") != nil
+		if bad || len(columns) > 0 {
+			missing = append(missing, f.Key)
+			unaddable = unaddable || bad
 		}
 	}
-	return missing
+	return missing, unaddable
 }
 
 func columnPhrase(names []string) string {
