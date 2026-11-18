@@ -42,6 +42,8 @@ type fakeLD struct {
 	// wrappedPreviewStatus fails previews of the wrapped SQL; previewStatus, every preview.
 	wrappedPreviewStatus int
 	previewStatus        int
+	// filterPreviewStatus fails previews of a query with SQL filter columns.
+	filterPreviewStatus int
 	// integrationStatus fails the integration lists of integrationStatusKeys, or of
 	// every key when that is empty; missingIntegrations 404. extraIntegrations are
 	// integration keys besides snowflake-experimentation set up for proj/production.
@@ -88,8 +90,13 @@ func (f *fakeLD) server() *httptest.Server {
 		case strings.HasSuffix(r.URL.Path, "/metric-data-source-preview"):
 			sql := r.URL.Query().Get("sqlQuery")
 			f.previews = append(f.previews, sql)
-			if status := f.previewStatus; status != 0 || (f.wrappedPreviewStatus != 0 && strings.HasPrefix(sql, "SELECT *, '")) {
-				if status == 0 {
+			filtered := f.filterPreviewStatus != 0 && strings.Contains(sql, ") AS statsig_filters")
+			if status := f.previewStatus; status != 0 || filtered || (f.wrappedPreviewStatus != 0 && strings.HasPrefix(sql, "SELECT *, '")) {
+				switch {
+				case status != 0:
+				case filtered:
+					status = f.filterPreviewStatus
+				default:
 					status = f.wrappedPreviewStatus
 				}
 				w.WriteHeader(status)

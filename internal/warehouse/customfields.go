@@ -35,21 +35,6 @@ func CustomFields(source map[string]any) []CustomField {
 	return out
 }
 
-// ApplyCustomFields adds source's custom fields to a MapMetricSourceToDataSource body's
-// query. It reports whether source has any.
-func ApplyCustomFields(body, source map[string]any, whType string) (bool, error) {
-	fields := CustomFields(source)
-	if len(fields) == 0 {
-		return false, nil
-	}
-	sql, err := WithCustomFields(j.GetStr(body, "sqlQuery"), fields, whType)
-	if err != nil {
-		return true, fmt.Errorf("data source %q: %w", j.GetStr(body, "key"), err)
-	}
-	body["sqlQuery"] = sql
-	return true, nil
-}
-
 // WithCustomFields nests sql in a SELECT that adds each field as a column.
 func WithCustomFields(sql string, fields []CustomField, whType string) (string, error) {
 	cols, err := customFieldColumns(fields, whType)
@@ -107,22 +92,32 @@ func customFieldExpr(f CustomField, whType string) (string, error) {
 	if !reColumnName.MatchString(f.Key) {
 		return "", fmt.Errorf("Statsig custom field %q: a column name must be letters, digits, and underscores; rename the field in Statsig, then rerun", f.Key)
 	}
-	formula := strings.TrimSpace(f.Formula)
-	scan, err := scanSQL(formula, whType)
+	formula, lineComment, err := selectExpression(fmt.Sprintf("Statsig custom field %q", f.Key), "formula", f.Formula, whType)
 	if err != nil {
-		return "", fmt.Errorf("Statsig custom field %q: could not read its formula: %w", f.Key, err)
+		return "", err
 	}
-	if len(scan.significant) == 0 {
-		return "", fmt.Errorf("Statsig custom field %q has no formula; set one in Statsig, then rerun", f.Key)
-	}
-	if m := reStatsigMacro.FindAllString(scan.code, -1); len(m) > 0 {
-		return "", fmt.Errorf("Statsig custom field %q: its formula uses Statsig macros %v, which LaunchDarkly does not expand; replace them in Statsig, then rerun", f.Key, uniqueStrings(m))
-	}
-	if len(scan.semicolons) > 0 {
-		return "", fmt.Errorf("Statsig custom field %q: its formula must be a single expression; fix it in Statsig, then rerun", f.Key)
-	}
-	if scan.lineComment {
+	if lineComment {
 		return "(\n" + formula + "\n)", nil
 	}
 	return formula, nil
+}
+
+// selectExpression checks that text can sit in a SELECT list, naming it label in
+// errors. lineComment reports a "--" comment, which must not run into what follows.
+func selectExpression(label, noun, text, whType string) (expr string, lineComment bool, err error) {
+	expr = strings.TrimSpace(text)
+	scan, err := scanSQL(expr, whType)
+	if err != nil {
+		return "", false, fmt.Errorf("%s: could not read its %s: %w", label, noun, err)
+	}
+	if len(scan.significant) == 0 {
+		return "", false, fmt.Errorf("%s has no %s; set one in Statsig, then rerun", label, noun)
+	}
+	if m := reStatsigMacro.FindAllString(scan.code, -1); len(m) > 0 {
+		return "", false, fmt.Errorf("%s: its %s uses Statsig macros %v, which LaunchDarkly does not expand; replace them in Statsig, then rerun", label, noun, uniqueStrings(m))
+	}
+	if len(scan.semicolons) > 0 {
+		return "", false, fmt.Errorf("%s: its %s must be a single expression; fix it in Statsig, then rerun", label, noun)
+	}
+	return expr, scan.lineComment, nil
 }

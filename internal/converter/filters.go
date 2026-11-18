@@ -3,6 +3,7 @@ package converter
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -83,7 +84,46 @@ const (
 	// FilterBlockedDuplicateLocation means the metric carried criteria on both
 	// warehouseNative and metricEvents, and only the warehouseNative ones convert.
 	FilterBlockedDuplicateLocation = "criteria_in_two_locations"
+	// FilterBlockedSQLFilterColumn means the data source lacks the column that holds
+	// a Statsig SQL filter's result.
+	FilterBlockedSQLFilterColumn = "sql_filter_column_missing"
 )
+
+// SQLFilters lists, by Statsig source name, the SQL filters of the metrics this
+// package converts, each once, in the order first seen.
+func SQLFilters(metrics []statsig.Metric) map[string][]string {
+	out := map[string][]string{}
+	add := func(source string, criteria []statsig.Criterion) {
+		if source == "" {
+			return
+		}
+		for _, c := range criteria {
+			if sql, ok := c.SQLFilter(); ok && !slices.Contains(out[source], sql) {
+				out[source] = append(out[source], sql)
+			}
+		}
+	}
+	for i := range metrics {
+		m := &metrics[i]
+		if !m.IsWarehouseNative() || !m.HasWarehouseAggregation() {
+			continue
+		}
+		num := m.NumeratorSourceName()
+		if m.EffectiveType() == "ratio" {
+			add(num, m.NumeratorCriteria())
+			den := m.WarehouseNative.DenominatorMetricSourceName
+			if den == "" {
+				den = num
+			}
+			add(den, m.WarehouseNative.DenominatorCriteria)
+			continue
+		}
+		if _, err := termSpecFor(m.EffectiveType()); err == nil {
+			add(num, m.NumeratorCriteria())
+		}
+	}
+	return out
+}
 
 // criteriaToFilter converts one term's Statsig filter criteria into a
 // LaunchDarkly metric filter.
@@ -161,13 +201,23 @@ func criterionToLeaf(c statsig.Criterion) (*launchdarkly.EventFilter, error) {
 			"it filters on %q, but a warehouse-native metric in LaunchDarkly can only filter on a column from its data source", c.Type))
 	}
 
-	// Conditions that can never map are rejected before the column check, so the
-	// reason names the condition. sql_filter in particular never carries a column,
-	// so the column check would otherwise mask the real explanation.
+	// These carry no column, or can never map, so they are handled before the
+	// column check.
 	switch c.Condition {
+	// statsig-to-ld warehouse adds each SQL filter to its data source's query as a
+	// true/false column, so the filter becomes a check on that column.
 	case "sql_filter":
-		return nil, unsupported(c.Condition,
-			"it is a raw SQL snippet, which cannot be turned into a LaunchDarkly filter")
+		sql, ok := c.SQLFilter()
+		if !ok {
+			return nil, unsupportedCoded(FilterBlockedValueCount, c.Condition, fmt.Sprintf(
+				"it should carry its SQL as one non-empty value, but has %d value(s)", len(c.Values)))
+		}
+		return &launchdarkly.EventFilter{
+			Type:      launchdarkly.EventFilterTypeEventProperty,
+			Attribute: statsig.SQLFilterColumn(sql),
+			Op:        ldOpIn,
+			Values:    []any{true},
+		}, nil
 
 	// TODO: support Statsig's "is after exposure" filtering.
 	//
@@ -419,12 +469,15 @@ func criteriaDetail(criteria []statsig.Criterion) string {
 //     non_null have no mapping there at all.
 //  4. Hosted filters sit behind a different feature gate than warehouse-native
 //     ones, so the save-time behaviour differs.
+//
+// dsKey is the term's data source, and columns its columns when known.
 func convertTermCriteria(
 	result *Result,
 	termLabel string,
 	criteria []statsig.Criterion,
 	warehouseNative bool,
-	hasDataSource bool,
+	dsKey string,
+	columns []string,
 ) *launchdarkly.EventFilter {
 	if len(criteria) == 0 {
 		return nil
@@ -445,7 +498,7 @@ func convertTermCriteria(
 		return nil
 	}
 
-	if !hasDataSource {
+	if dsKey == "" {
 		result.addLossy(WarnFilterNoDataSource, "DATA LOSS: %s %s not applied. LaunchDarkly metric filters need a warehouse data source and this metric is not bound to one. Pass --ld-data-source or --source-mapping and run again to convert the filters. Dropped filters: [%s].",
 			criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), detail)
 		blocked(FilterBlockedNoDataSource, "")
@@ -465,6 +518,13 @@ func convertTermCriteria(
 		return nil
 	}
 
+	if missing := missingSQLFilterColumns(criteria, columns); len(missing) > 0 {
+		result.addLossy(WarnFilterSQLFilterColumn, "DATA LOSS: %s %s not applied. Data source %q has no %s for the result of its Statsig SQL filter. If statsig-to-ld warehouse created the data source, rerun warehouse with --update-custom-fields to add it; otherwise add (<filter SQL>) AS <column> to the data source's query in LaunchDarkly. Then run metrics convert again. Dropped filters: [%s].",
+			criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), dsKey, columnPhrase(missing), detail)
+		blocked(FilterBlockedSQLFilterColumn, "sql_filter")
+		return nil
+	}
+
 	result.addWarning(WarnFilterApplied,
 		"converted %s into a LaunchDarkly metric filter (metric filters only work on Snowflake data sources today)",
 		criteriaPhrase(len(criteria), termLabel))
@@ -472,4 +532,35 @@ func convertTermCriteria(
 		Term: termLabel, Criteria: len(criteria), Applied: true,
 	})
 	return filter
+}
+
+// missingSQLFilterColumns names the SQL filter columns that columns lack, ignoring
+// case. It names none when columns are unknown.
+func missingSQLFilterColumns(criteria []statsig.Criterion, columns []string) []string {
+	if len(columns) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, c := range criteria {
+		sql, ok := c.SQLFilter()
+		if !ok {
+			continue
+		}
+		col := statsig.SQLFilterColumn(sql)
+		if !slices.ContainsFunc(columns, func(name string) bool { return strings.EqualFold(name, col) }) {
+			missing = append(missing, col)
+		}
+	}
+	return missing
+}
+
+func columnPhrase(names []string) string {
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = strconv.Quote(n)
+	}
+	if len(names) == 1 {
+		return "column " + quoted[0]
+	}
+	return "columns " + strings.Join(quoted, ", ")
 }

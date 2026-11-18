@@ -219,7 +219,7 @@ func TestConvert_ConstKey_UnconvertedFilterBlocksMetric(t *testing.T) {
 	raw := `{"type":"user_warehouse","name":"Pro Checkouts","id":"Pro Checkouts::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"count","metricSourceName":"Checkout Events",
 	    "criteria":[{"type":"metadata","column":"plan","condition":"in","values":["pro"]},
-	                {"type":"metadata","condition":"sql_filter","values":["plan_tier > 2"]}]}}`
+	                {"type":"metadata","column":"ts","condition":"after_exposure","values":[]}]}}`
 	res := mustConvert(t, raw, constKeyOpts())
 	if !res.IsBlocked() || !hasCode(res.BlockingCodes, WarnUnfilteredConstantKey) {
 		t.Fatalf("want blocked by %s; blocking=%v warnings=%v", WarnUnfilteredConstantKey, res.BlockingReasons, res.Warnings)
