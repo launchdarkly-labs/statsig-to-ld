@@ -47,6 +47,8 @@ type sqlScan struct {
 	// code is the SQL with comments and string literals blanked; offsets match the input.
 	code        string
 	lineComment bool
+	// unbalanced reports a ")" with no "(" before it, or a "(" left open.
+	unbalanced bool
 }
 
 // Snowflake and Redshift read "..." as a quoted identifier, not a string.
@@ -66,7 +68,7 @@ func scanSQL(sql, whType string) (sqlScan, error) {
 		}
 	}
 	backslashEscapes := whType != "redshift"
-	n := len(sql)
+	n, depth := len(sql), 0
 	for i := 0; i < n; i++ {
 		c := sql[i]
 		next := byte(0)
@@ -115,12 +117,20 @@ func scanSQL(sql, whType string) (sqlScan, error) {
 		case c == ';':
 			s.semicolons = append(s.semicolons, i)
 			s.significant = append(s.significant, i)
+		case c == '(':
+			depth++
+			s.significant = append(s.significant, i)
+		case c == ')':
+			depth--
+			s.unbalanced = s.unbalanced || depth < 0
+			s.significant = append(s.significant, i)
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f':
 		default:
 			s.significant = append(s.significant, i)
 		}
 	}
 	s.code = string(code)
+	s.unbalanced = s.unbalanced || depth != 0
 	return s, nil
 }
 

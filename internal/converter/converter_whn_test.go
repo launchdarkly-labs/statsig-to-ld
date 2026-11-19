@@ -138,14 +138,14 @@ func TestConvert_WHN_Criteria_ConvertsToFilter(t *testing.T) {
 }
 
 func TestConvert_WHN_UnmappableCriteria_StaysLossyWithNoFilter(t *testing.T) {
-	// sql_filter is arbitrary SQL with no column. All-or-nothing: the term gets no
+	// after_exposure has no LaunchDarkly equivalent. All-or-nothing: the term gets no
 	// filter at all and stays lossy, rather than a partially applied filter that
 	// would silently match MORE rows than the original.
 	raw := `{
 	  "type":"user_warehouse","name":"Filtered Rev","id":"Filtered Rev::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout","valueColumn":"price_usd",
 	    "criteria":[{"type":"metadata","column":"event","condition":"in","values":["purchase"]},
-	                {"type":"metadata","condition":"sql_filter","values":["user_id IN (SELECT 1)"]}]}}`
+	                {"type":"metadata","column":"ts","condition":"after_exposure","values":[]}]}}`
 	res := mustConvert(t, raw, Options{LDDataSource: "snowflake-ds"})
 	if !res.IsLossy() {
 		t.Errorf("an unmappable criterion should keep the conversion lossy; LossyReasons=%v", res.LossyReasons)
@@ -153,7 +153,7 @@ func TestConvert_WHN_UnmappableCriteria_StaysLossyWithNoFilter(t *testing.T) {
 	if res.LDMetric.Filters != nil {
 		t.Errorf("no filter should be emitted when any criterion is unmappable, got %#v", res.LDMetric.Filters)
 	}
-	assertHasWarning(t, res.LossyReasons, "sql_filter")
+	assertHasWarning(t, res.LossyReasons, "after_exposure")
 	// The dropped criteria are spelled out so they can be rebuilt by hand.
 	assertHasWarning(t, res.LossyReasons, "Dropped filters:")
 }

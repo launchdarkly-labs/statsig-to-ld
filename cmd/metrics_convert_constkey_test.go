@@ -178,7 +178,7 @@ func filteredCheckoutMetric() statsig.Metric {
 	var m statsig.Metric
 	raw := `{"type":"user_warehouse","name":"Pro Checkouts","id":"Pro Checkouts::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"count","metricSourceName":"Checkout Events",
-	    "criteria":[{"type":"metadata","condition":"sql_filter","values":["plan_tier > 2"]}]}}`
+	    "criteria":[{"type":"metadata","column":"ts","condition":"after_exposure","values":[]}]}}`
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		panic(err)
 	}

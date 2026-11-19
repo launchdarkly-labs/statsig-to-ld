@@ -118,6 +118,7 @@ const (
 	WarnFilterCloudUnsupported   = "filter_cloud_metric_unsupported"
 	WarnFilterConditionBlocked   = "filter_condition_unsupported"
 	WarnFilterDuplicateLocations = "filter_criteria_in_two_locations"
+	WarnFilterSQLFilterColumn    = "filter_sql_filter_column_missing"
 )
 
 // FilterOutcome records what happened to one metric term's Statsig filter
@@ -528,9 +529,13 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	// Resolved here, after the data source binding, because a filter is only
 	// meaningful once LaunchDarkly knows the metric reads warehouse columns.
 	// ---------------------------------------------------------------
+	filterDS := ""
+	if result.LDMetric.DataSource != nil {
+		filterDS = result.LDMetric.DataSource.Key
+	}
 	result.LDMetric.Filters = convertTermCriteria(
 		result, termCriteriaLabel, termCriteria,
-		sg.IsWarehouseNative(), result.LDMetric.DataSource != nil)
+		sg.IsWarehouseNative(), filterDS, opts.DataSourceColumns[filterDS])
 
 	if result.LDMetric.DataSource != nil {
 		m := &result.LDMetric
@@ -1249,10 +1254,10 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	// while the other stays lossy.
 	// ---------------------------------------------------------------
 	result.LDMetric.Filters = convertTermCriteria(
-		result, "numerator", numEv.Criteria, sg.IsWarehouseNative(), numDS != "")
+		result, "numerator", numEv.Criteria, sg.IsWarehouseNative(), numDS, opts.DataSourceColumns[numDS])
 	if result.LDMetric.Denominator != nil {
 		result.LDMetric.Denominator.Filters = convertTermCriteria(
-			result, "denominator", denEv.Criteria, sg.IsWarehouseNative(), denDS != "")
+			result, "denominator", denEv.Criteria, sg.IsWarehouseNative(), denDS, opts.DataSourceColumns[denDS])
 	}
 
 	whnNumConst := sg.IsWarehouseNative() && numHasConst

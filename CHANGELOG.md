@@ -9,11 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Statsig `sql_filter` criteria convert. `warehouse` reads the Statsig metrics and adds each SQL filter on a source to
+  its data source's query as a true/false column, outside the custom fields; `metrics convert` turns the criterion into
+  a filter on that column. The column's name is a hash of the filter's SQL, so the commands need no mapping file. A
+  filter with more than one statement, unbalanced parentheses, or a Statsig macro, or the new filters of a source
+  whose preview fails with them, are left out with one line per run (`sql_filter_unusable`, `sql_filters_preview_failed`), and their metrics
+  stay lossy. `--update-custom-fields` adds the columns to data sources created without them. A metric whose data
+  source lacks the column stays lossy (filter blocked code `sql_filter_column_missing`).
+
 - `warehouse`: Statsig custom fields (a name and a SQL formula on a metric source) are added to the data source's
   query as columns, inside the constant event key wrapper, so metrics that use them have the column. A source fails
   when a field's name is not letters, digits, and underscores, two fields share a name (ignoring case), a field shares
-  a name with a column the source returns (checked when the query is previewed), or a formula is empty, has more than one statement, or uses a Statsig
-  macro. Data sources created without their custom fields are skipped, and the run prints one line naming them (note
+  a name with a column the source returns (checked when the query is previewed), or a formula is empty, has more than one statement or unbalanced parentheses, or uses a Statsig
+  macro. Each formula is parenthesized; queries written before that are still recognized. Data sources created without their custom fields are skipped, and the run prints one line naming them (note
   code `custom_fields_missing`). `--update-custom-fields` adds the fields to those whose query is still the one
   `warehouse` wrote, updating the query and column list in place and keeping the mappings; a query edited in
   LaunchDarkly is left alone. It requires the constant event key. Rerun `metrics convert` afterwards for the metrics

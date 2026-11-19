@@ -472,6 +472,8 @@ func issueSummaries(issues []sourceIssue) []string {
 		{noteExportColumnNotInQuery, "%d data source(s) did not take some mappings from the Statsig export, because their columns do not include the export's: %s. Correct the columns in Statsig, or add them to the data source's query, then rerun."},
 		{noteExportColumnWrongType, "%d data source(s) did not take some mappings from the Statsig export, because the export's column has the wrong type: %s. A timestamp column needs a timestamp or date type, and a value column a numeric one; correct the column in Statsig, or cast it in the query, then rerun."},
 		{noteContextKindKept, "%d data source(s) kept context kinds the Statsig export does not map, because bound metrics use them as analysis or randomization units: %s. Change those metrics' units in LaunchDarkly and refresh them on running experiments, then rerun to remove them."},
+		{noteSQLFilterUnusable, "%d Statsig SQL filter(s) were left out of their data source's query, because they use a Statsig macro, have more than one statement or unbalanced parentheses, or could not be read: %s. The metrics that use them stay unconverted; fix the filters in Statsig, then rerun."},
+		{noteSQLFiltersPreviewFailed, "%d data source(s) were written without columns for their metrics' Statsig SQL filters, because previewing the query with them failed: %s. If a filter caused the error, fix it in Statsig; then rerun with --update-custom-fields to add the columns."},
 	} {
 		if entries := byCode[s.code]; len(entries) > 0 {
 			lines = append(lines, fmt.Sprintf(s.text, len(entries), strings.Join(entries, "; ")))

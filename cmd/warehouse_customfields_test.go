@@ -13,7 +13,7 @@ var centsField = []any{map[string]any{"key": "price_usd_cents", "formula": "pric
 
 const customFieldPreviewCols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"PRICE_USD_CENTS","type":"NUMBER"}`
 
-const checkoutCustomInner = "SELECT *, price_usd/100 AS price_usd_cents FROM (\nSELECT ts, user_id FROM analytics.events WHERE kind = 'checkout'\n) AS statsig_src"
+const checkoutCustomInner = "SELECT *, (price_usd/100) AS price_usd_cents FROM (\nSELECT ts, user_id FROM analytics.events WHERE kind = 'checkout'\n) AS statsig_src"
 
 const wantCheckoutCustomSQL = "SELECT *, 'checkout-events' AS LD_EVENT_KEY FROM (\n" + checkoutCustomInner + "\n) AS ld_src"
 
@@ -150,7 +150,7 @@ func TestPhase3_UpdateCustomFieldsLeavesOtherQueriesAlone(t *testing.T) {
 	}{
 		{"already has them", wantCheckoutCustomSQL, ""},
 		{"edited in LaunchDarkly", handEdited, "Statsig SQL has changed"},
-		{"event key edited in LaunchDarkly", editedKey, "Statsig SQL has changed"},
+		{"event key edited in LaunchDarkly", editedKey, "event key was edited in LaunchDarkly"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Chdir(t.TempDir())

@@ -217,7 +217,9 @@ func TestCriteriaToFilter_RejectedConditions(t *testing.T) {
 		criterion statsig.Criterion
 		wantIn    string
 	}{
-		{"sql_filter", statsig.Criterion{Type: "metadata", Condition: "sql_filter", Values: []string{"1=1"}}, "raw SQL snippet"},
+		{"sql_filter without SQL", statsig.Criterion{Type: "metadata", Condition: "sql_filter"}, "one non-empty value"},
+		{"sql_filter with blank SQL", statsig.Criterion{Type: "metadata", Condition: "sql_filter", Values: []string{"  "}}, "its SQL is empty"},
+		{"sql_filter with two snippets", statsig.Criterion{Type: "metadata", Condition: "sql_filter", Values: []string{"a = 1", "b = 2"}}, "has 2 value(s)"},
 		{"after_exposure", crit("ts", "after_exposure", "0"), "exposure time"},
 		{"before_exposure", crit("ts", "before_exposure", "0"), "exposure time"},
 		{"unknown condition", crit("col", "zzz_nonsense", "x"), "no matching filter operator"},
@@ -264,7 +266,7 @@ func TestCriteriaToFilter_OneBadCriterionRejectsWholeTerm(t *testing.T) {
 	_, err := criteriaToFilter([]statsig.Criterion{
 		crit("event", "in", "purchase"),
 		crit("page", "=", "checkout"),
-		statsig.Criterion{Type: "metadata", Condition: "sql_filter", Values: []string{"1=1"}},
+		crit("ts", "after_exposure"),
 	})
 	if err == nil {
 		t.Fatal("a single unmappable criterion must reject the entire term")
@@ -350,7 +352,7 @@ func TestConvertRatio_DroppedCriteriaAreLossy(t *testing.T) {
 	  "type":"user_warehouse","name":"Rev per Visit","id":"Rev per Visit::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"ratio",
 	    "metricSourceName":"Checkout","valueColumn":"revenue","numeratorAggregation":"sum",
-	    "criteria":[{"type":"metadata","condition":"sql_filter","values":["1=1"]}],
+	    "criteria":[{"type":"metadata","column":"ts","condition":"after_exposure","values":[]}],
 	    "denominatorMetricSourceName":"Visits","denominatorValueColumn":"visit_id","denominatorAggregation":"count"}}`
 	res := mustConvert(t, raw, Options{SourceMapping: map[string]string{
 		"Checkout": "ld-checkout",
