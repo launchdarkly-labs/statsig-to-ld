@@ -26,10 +26,18 @@ func translateSQLFilter(sql string) ([]launchdarkly.EventFilter, bool) {
 	return n.filters()
 }
 
+// SQLFilterFitsColumns reports whether sql becomes clauses whose columns have types
+// that fit, by lowercase column name in types.
+func SQLFilterFitsColumns(sql string, types map[string]string) bool {
+	clauses, ok := translateSQLFilter(sql)
+	return ok && clausesFitTypes(clauses, types)
+}
+
 // sqlFilterTranslations returns, by criterion index, the clauses each of a term's
-// SQL filters becomes. It returns none when the term would then hold more clauses
-// than LaunchDarkly allows, so each SQL filter keeps its column.
-func sqlFilterTranslations(criteria []statsig.Criterion) map[int][]launchdarkly.EventFilter {
+// SQL filters becomes, when their columns' types fit (types, by lowercase name; nil
+// when unknown). It returns none when the term would then hold more clauses than
+// LaunchDarkly allows, so each SQL filter keeps its column.
+func sqlFilterTranslations(criteria []statsig.Criterion, types map[string]string) map[int][]launchdarkly.EventFilter {
 	out := map[int][]launchdarkly.EventFilter{}
 	leaves := len(criteria)
 	for i, c := range criteria {
@@ -37,7 +45,7 @@ func sqlFilterTranslations(criteria []statsig.Criterion) map[int][]launchdarkly.
 		if !ok {
 			continue
 		}
-		if clauses, ok := translateSQLFilter(sql); ok {
+		if clauses, ok := translateSQLFilter(sql); ok && (types == nil || clausesFitTypes(clauses, types)) {
 			out[i] = clauses
 			leaves--
 			for _, f := range clauses {
@@ -49,6 +57,52 @@ func sqlFilterTranslations(criteria []statsig.Criterion) map[int][]launchdarkly.
 		return nil
 	}
 	return out
+}
+
+// clausesFitTypes reports whether each clause's column, by lowercase name in types,
+// holds the kind of value the clause compares. LaunchDarkly compares a column's text,
+// which matches SQL's comparison only then: SQL also casts 1 or 'TRUE' to true, and
+// '10' to a decimal column's 10.00.
+func clausesFitTypes(clauses []launchdarkly.EventFilter, types map[string]string) bool {
+	for _, c := range clauses {
+		if c.Type == launchdarkly.EventFilterTypeGroup {
+			for _, v := range c.Values {
+				if child, ok := v.(launchdarkly.EventFilter); !ok || !clausesFitTypes([]launchdarkly.EventFilter{child}, types) {
+					return false
+				}
+			}
+			continue
+		}
+		t, ok := types[strings.ToLower(c.Attribute)]
+		if !ok || !clauseFitsType(c, t) {
+			return false
+		}
+	}
+	return true
+}
+
+// clauseFitsType reads colType as LaunchDarkly's preview stores it: the warehouse
+// driver's type name, which for Snowflake's NUMBER is FIXED.
+func clauseFitsType(c launchdarkly.EventFilter, colType string) bool {
+	t := strings.ToUpper(strings.TrimSpace(colType))
+	if i := strings.IndexByte(t, '('); i >= 0 {
+		t = strings.TrimSpace(t[:i])
+	}
+	switch c.Op {
+	case ldOpLessThan, ldOpLessThanOrEqual, ldOpGreaterThan, ldOpGreaterThanOrEqual:
+		return numericColumnTypes[t]
+	case ldOpIn:
+		if _, ok := c.Values[0].(bool); ok {
+			return t == "BOOLEAN" || t == "BOOL"
+		}
+	}
+	return !strings.ContainsAny(t, "<[") && (strings.Contains(t, "CHAR") || strings.Contains(t, "TEXT") || strings.Contains(t, "STRING"))
+}
+
+var numericColumnTypes = map[string]bool{
+	"NUMBER": true, "FIXED": true, "DECIMAL": true, "DEC": true, "NUMERIC": true, "INT": true, "INTEGER": true,
+	"BIGINT": true, "SMALLINT": true, "TINYINT": true, "BYTEINT": true, "FLOAT": true, "FLOAT4": true,
+	"FLOAT8": true, "DOUBLE": true, "DOUBLE PRECISION": true, "REAL": true, "DECFLOAT": true,
 }
 
 // leafCount counts f's clauses, as LaunchDarkly's limit does.

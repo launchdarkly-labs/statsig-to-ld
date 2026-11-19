@@ -49,20 +49,54 @@ func SQLFilterColumns(sqls []string, taken ...string) []CustomField {
 }
 
 // RenumberSQLFilters renumbers each filter of c whose column columns, a query's
-// result columns, holds more than once, ignoring case. It reports whether it renamed one.
-func RenumberSQLFilters(c SourceColumns, columns []string) (SourceColumns, bool) {
+// result columns, holds more than once, ignoring case, except those named in keep. It
+// reports whether it renamed one.
+func RenumberSQLFilters(c SourceColumns, columns []string, keep ...string) (SourceColumns, bool) {
 	clash := CollidingCustomFields(columns, c.Filters)
 	if len(clash) == 0 {
 		return c, false
 	}
 	used := usedNames(append(slices.Clone(columns), columnNames(c.All())...))
 	c.Filters = slices.Clone(c.Filters)
+	renamed := false
 	for i, f := range c.Filters {
-		if slices.Contains(clash, f.Key) {
+		if slices.Contains(clash, f.Key) && !slices.Contains(keep, f.Key) {
 			c.Filters[i].Key = freeName(statsig.SQLFilterColumn(f.Formula), used)
+			renamed = true
 		}
 	}
-	return c, true
+	return c, renamed
+}
+
+// ColumnTypes maps the lowercase name of each column in columns, a data source's
+// column list, to its type. It is nil when the list names none.
+func ColumnTypes(columns any) map[string]string {
+	var out map[string]string
+	add := func(m map[string]any) {
+		if name := j.GetStr(m, "name"); name != "" {
+			if out == nil {
+				out = map[string]string{}
+			}
+			out[strings.ToLower(name)] = j.GetStr(m, "type")
+		}
+	}
+	switch cols := columns.(type) {
+	case []any:
+		for _, c := range cols {
+			if m, ok := c.(map[string]any); ok {
+				add(m)
+			}
+		}
+	case []map[string]any:
+		for _, m := range cols {
+			add(m)
+		}
+	case []FallbackColumn:
+		for _, c := range cols {
+			add(map[string]any{"name": c.Name, "type": c.Type})
+		}
+	}
+	return out
 }
 
 // SameSQLFilter reports whether a and b are one filter's SQL.
@@ -94,7 +128,7 @@ func freeName(base string, used map[string]bool) string {
 // own, numbered, or the hash an earlier version used.
 func namedAfter(col, sql string) bool {
 	base := statsig.SQLFilterColumn(sql)
-	if strings.EqualFold(col, base) || strings.EqualFold(col, legacySQLFilterColumn(sql)) {
+	if strings.EqualFold(col, base) || strings.EqualFold(col, LegacySQLFilterColumn(sql)) {
 		return true
 	}
 	if len(col) <= len(base)+1 || !strings.EqualFold(col[:len(base)+1], base+"_") {
@@ -104,7 +138,9 @@ func namedAfter(col, sql string) bool {
 	return err == nil && n >= 2 && strconv.Itoa(n) == col[len(base)+1:]
 }
 
-func legacySQLFilterColumn(sql string) string {
+// LegacySQLFilterColumn is the name an earlier version gave sql's column, a hash
+// unique to the SQL.
+func LegacySQLFilterColumn(sql string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(sql)))
 	return "sql_filter_" + hex.EncodeToString(sum[:8])
 }

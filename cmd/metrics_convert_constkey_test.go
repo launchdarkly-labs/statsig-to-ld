@@ -365,7 +365,7 @@ func TestFetchDataSourceKeys_ReadsSQLFilterColumns(t *testing.T) {
 		" FROM (\nSELECT * FROM analytics.orders\n) AS statsig_filters"
 	ds := func(key, sql string) map[string]any {
 		return map[string]any{"key": key, "sqlQuery": sql, "integrationKey": "snowflake-experimentation",
-			"columnMappings": map[string]any{"keyColumn": "LD_EVENT_KEY", "columns": []any{}}}
+			"columnMappings": map[string]any{"keyColumn": "LD_EVENT_KEY", "columns": []any{map[string]any{"name": "IS_TEST", "type": "BOOLEAN"}}}}
 	}
 	list, _ := json.Marshal(map[string]any{"items": []any{
 		ds("wrapped", "SELECT *, 'wrapped' AS LD_EVENT_KEY FROM (\n"+layer+"\n) AS ld_src"),
@@ -386,5 +386,14 @@ func TestFetchDataSourceKeys_ReadsSQLFilterColumns(t *testing.T) {
 		if got := info.filters[key]; !reflect.DeepEqual(got, want) {
 			t.Errorf("filters[%s] = %+v, want %+v", key, got, want)
 		}
+		if got := info.types[key]; !reflect.DeepEqual(got, map[string]string{"is_test": "BOOLEAN"}) {
+			t.Errorf("types[%s] = %v, want is_test BOOLEAN", key, got)
+		}
+	}
+	var opts converter.Options
+	info.apply(&opts)
+	if !reflect.DeepEqual(opts.DataSourceColumnTypes, info.types) || !reflect.DeepEqual(opts.DataSourceSQLFilters, info.filters) ||
+		!reflect.DeepEqual(opts.DataSourceColumns, info.cols) || !reflect.DeepEqual(opts.ConstantEventKeys, info.keys) {
+		t.Errorf("apply set %+v", opts)
 	}
 }

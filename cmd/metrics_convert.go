@@ -322,7 +322,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		convOpts.ConstantEventKeys, convOpts.DataSourceColumns, convOpts.DataSourceSQLFilters = dsInfo.keys, dsInfo.cols, dsInfo.filters
+		dsInfo.apply(&convOpts)
 	}
 
 	// Fetch metrics
@@ -587,6 +587,8 @@ type dataSourceInfo struct {
 	// keys maps a data source key to the constant event key it projects.
 	keys map[string]string
 	cols map[string][]string
+	// types maps each data source's columns, by lowercase name, to their types.
+	types map[string]map[string]string
 	// filters lists the SQL filter columns each data source's query adds.
 	filters map[string][]warehouse.CustomField
 	fetched bool
@@ -595,10 +597,16 @@ type dataSourceInfo struct {
 	assumed  []string
 }
 
+// apply hands opts what convert read from the data sources.
+func (d dataSourceInfo) apply(opts *converter.Options) {
+	opts.ConstantEventKeys, opts.DataSourceColumns = d.keys, d.cols
+	opts.DataSourceColumnTypes, opts.DataSourceSQLFilters = d.types, d.filters
+}
+
 // fetchDataSourceKeys reads each LD data source's constant event key and columns. With
 // assume, mapped data sources LaunchDarkly cannot report on count as constant-key.
 func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sourceMapping map[string]string, defaultDS string, assume, dryRun bool) (dataSourceInfo, error) {
-	info := dataSourceInfo{keys: map[string]string{}, cols: map[string][]string{}, filters: map[string][]warehouse.CustomField{}}
+	info := dataSourceInfo{keys: map[string]string{}, cols: map[string][]string{}, types: map[string]map[string]string{}, filters: map[string][]warehouse.CustomField{}}
 	listed := map[string]bool{}
 	if ldClient != nil {
 		list, err := ldClient.ListMetricDataSources(ctx)
@@ -632,6 +640,9 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 							info.cols[key] = append(info.cols[key], name)
 						}
 					}
+				}
+				if types := warehouse.ColumnTypes(jsonutil.GetSlice(cm, "columns")); types != nil {
+					info.types[key] = types
 				}
 			}
 		}

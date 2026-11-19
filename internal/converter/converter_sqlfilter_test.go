@@ -1,6 +1,8 @@
 package converter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"reflect"
 	"slices"
@@ -45,11 +47,15 @@ func TestConvert_WHN_SQLFilterFiltersOnItsColumn(t *testing.T) {
 	}
 }
 
+// planTierQueryFilters is how the data source's query pairs the filter with its column.
+var planTierQueryFilters = []warehouse.CustomField{{Key: planTierColumn, Formula: "COALESCE(plan_tier, 0) > 2"}}
+
 func TestConvert_WHN_SQLFilterTakesTheDataSourceColumnCase(t *testing.T) {
 	upper := strings.ToUpper(planTierColumn)
 	res := mustConvert(t, sqlFilterSum, Options{
-		LDDataSource:      "ld-checkout",
-		DataSourceColumns: map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", upper}},
+		LDDataSource:         "ld-checkout",
+		DataSourceColumns:    map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", upper}},
+		DataSourceSQLFilters: map[string][]warehouse.CustomField{"ld-checkout": planTierQueryFilters},
 	})
 	if res.IsLossy() {
 		t.Fatalf("LossyReasons=%v", res.LossyReasons)
@@ -137,6 +143,7 @@ func TestConvertRatio_SQLFilterPerTerm(t *testing.T) {
 			"ld-checkout": {"REVENUE", strings.ToUpper(planTierColumn)},
 			"ld-visits":   {"VISIT_ID"},
 		},
+		DataSourceSQLFilters: map[string][]warehouse.CustomField{"ld-checkout": planTierQueryFilters},
 	})
 	if got, want := res.LDMetric.Filters, sqlFilterLeaf(strings.ToUpper(planTierColumn)); got == nil || !reflect.DeepEqual(*got, want) {
 		t.Errorf("numerator Filters = %#v, want %#v", got, want)
@@ -172,11 +179,14 @@ func TestSQLFilters_ListsEachSourcesFiltersOnce(t *testing.T) {
 		  "criteria":[{"type":"metadata","condition":"sql_filter","values":["x = 1"]}]}]}`,
 	)
 	want := map[string][]string{
-		"Checkout": {"COALESCE(plan_tier, 0) > 2", "LOWER(region) = 'eu'"},
+		"Checkout": {"COALESCE(plan_tier, 0) > 2", "LOWER(region) = 'eu'", "NOT is_test"},
 		"Visits":   {"NOT COALESCE(is_bot, FALSE)", "COALESCE(is_new, FALSE)"},
 	}
 	if got := SQLFilters(metrics); !reflect.DeepEqual(got, want) {
 		t.Errorf("SQLFilters = %#v\nwant %#v", got, want)
+	}
+	if got, want := SQLFilterClauses(metrics), map[string][]string{"Checkout": {"NOT is_test"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("SQLFilterClauses = %#v\nwant %#v", got, want)
 	}
 }
 
@@ -219,14 +229,98 @@ func TestConvert_WHN_SimpleSQLFilterBecomesClauses(t *testing.T) {
 	}
 }
 
-func TestConvert_WHN_SimpleSQLFilterOnUnknownColumnsNeedsNoNote(t *testing.T) {
+// Without the data source's columns, neither their names nor their types are checked.
+func TestConvert_WHN_SimpleSQLFilterOnUnknownColumnsIsNotedUnverified(t *testing.T) {
 	res := mustConvert(t, translatableSum, Options{LDDataSource: "ld-checkout"})
 	if res.IsLossy() || res.LDMetric.Filters == nil {
 		t.Fatalf("want the filter applied; LossyReasons=%v", res.LossyReasons)
 	}
-	if slices.Contains(res.NoteCodes, WarnColumnUnverified) {
-		t.Errorf("NoteCodes = %v, want no %s", res.NoteCodes, WarnColumnUnverified)
+	if !slices.Contains(res.NoteCodes, WarnColumnUnverified) {
+		t.Errorf("NoteCodes = %v, want %s", res.NoteCodes, WarnColumnUnverified)
 	}
+}
+
+// LaunchDarkly compares a clause's values with the column's text, which matches SQL's
+// comparison only when the column holds that kind of value.
+func TestConvert_WHN_SQLFilterBecomesClausesOnlyOnColumnsOfTheRightType(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql, colType string
+		clauses            bool
+	}{
+		{"true/false on a boolean", "NOT is_test", "BOOLEAN", true},
+		{"true/false on a number", "NOT is_test", "FIXED", false},
+		{"true/false on text", "is_test = TRUE", "TEXT", false},
+		{"a string on text", "is_test = 'yes'", "VARCHAR(16777216)", true},
+		{"a string on a number", "is_test = '1'", "FIXED", false},
+		{"a string on a timestamp", "is_test = '2024-01-01'", "TIMESTAMP_NTZ", false},
+		{"LIKE on text", "is_test LIKE 'y%'", "TEXT", true},
+		{"a number on a number", "is_test > 0", "FIXED", true},
+		{"a number on text", "is_test > 0", "TEXT", false},
+		{"an OR checks each clause", "is_test OR is_refund", "BOOLEAN", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := strings.Replace(translatableSum, "NOT is_test AND NOT is_refund", tc.sql, 1)
+			col := statsig.SQLFilterColumn(tc.sql)
+			types := map[string]string{"event": "TEXT", "price_usd": "FIXED", "is_test": tc.colType}
+			res := mustConvert(t, raw, Options{
+				LDDataSource:          "ld-checkout",
+				DataSourceColumns:     map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", "IS_TEST", strings.ToUpper(col)}},
+				DataSourceColumnTypes: map[string]map[string]string{"ld-checkout": types},
+				DataSourceSQLFilters:  map[string][]warehouse.CustomField{"ld-checkout": {{Key: col, Formula: tc.sql}}},
+			})
+			if res.IsLossy() {
+				t.Fatalf("LossyReasons=%v", res.LossyReasons)
+			}
+			second := res.LDMetric.Filters.Values[1].(launchdarkly.EventFilter)
+			if usesColumn := second.Attribute == strings.ToUpper(col); usesColumn == tc.clauses {
+				t.Errorf("second clause = %#v, want clauses %v", second, tc.clauses)
+			}
+			if got := SQLFilterClauses(mustMetrics(t, raw))["Checkout"]; !reflect.DeepEqual(got, []string{tc.sql}) {
+				t.Errorf("SQLFilterClauses = %q, want the filter as a candidate for clauses", got)
+			}
+			if got := SQLFilterFitsColumns(tc.sql, types); got != tc.clauses {
+				t.Errorf("SQLFilterFitsColumns = %v, want %v", got, tc.clauses)
+			}
+		})
+	}
+}
+
+// A readable name is not unique to its SQL, so only the data source's own pairing of
+// SQL and column counts.
+func TestConvert_WHN_SQLFilterNeverTakesAnotherFiltersColumn(t *testing.T) {
+	const other = "LOWER(region) = 'EU'"
+	raw := strings.Replace(translatableSum, "NOT is_test AND NOT is_refund", "LOWER(region) = 'eu'", 1)
+	cols := map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", "LOWER_REGION_EQ_EU"}}
+	for name, filters := range map[string][]warehouse.CustomField{
+		"the column holds another filter": {{Key: "lower_region_eq_eu", Formula: other}},
+		"the query could not be read":     nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := mustConvert(t, raw, Options{LDDataSource: "ld-checkout", DataSourceColumns: cols,
+				DataSourceSQLFilters: map[string][]warehouse.CustomField{"ld-checkout": filters}})
+			if !res.IsLossy() || res.LDMetric.Filters != nil {
+				t.Errorf("want lossy with no filter; Filters=%#v", res.LDMetric.Filters)
+			}
+		})
+	}
+}
+
+// A column an earlier version named by hash is unique to its SQL, so its name is enough.
+func TestConvert_WHN_SQLFilterTakesAHashNamedColumnByName(t *testing.T) {
+	legacy := "SQL_FILTER_" + strings.ToUpper(hashPrefix("COALESCE(plan_tier, 0) > 2"))
+	res := mustConvert(t, sqlFilterSum, Options{LDDataSource: "ld-checkout",
+		DataSourceColumns: map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", legacy}}})
+	if res.IsLossy() {
+		t.Fatalf("LossyReasons=%v", res.LossyReasons)
+	}
+	if got := res.LDMetric.Filters.Values[1].(launchdarkly.EventFilter).Attribute; got != legacy {
+		t.Errorf("attribute = %q, want %q", got, legacy)
+	}
+}
+
+func hashPrefix(sql string) string {
+	sum := sha256.Sum256([]byte(sql))
+	return hex.EncodeToString(sum[:8])
 }
 
 // An OR sits inside the term's AND, within LaunchDarkly's three levels.
@@ -265,9 +359,8 @@ func testSQLFilterKeepsItsColumn(t *testing.T, sql string) {
 	if got := res.LDMetric.Filters.Values[1]; !reflect.DeepEqual(got, sqlFilterLeaf(col)) {
 		t.Errorf("second clause = %#v, want %#v", got, sqlFilterLeaf(col))
 	}
-	metrics := mustMetrics(t, raw)
-	if got := SQLFilters(metrics); !reflect.DeepEqual(got, map[string][]string{"Checkout": {sql}}) {
-		t.Errorf("SQLFilters = %#v, want the filter listed for its column", got)
+	if got := SQLFilterClauses(mustMetrics(t, raw)); len(got) != 0 {
+		t.Errorf("SQLFilterClauses = %#v, want the filter to need its column", got)
 	}
 }
 

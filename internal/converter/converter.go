@@ -72,6 +72,11 @@ type Options struct {
 	// matches columns case-sensitively, so metric columns are rewritten to this case.
 	DataSourceColumns map[string][]string
 
+	// DataSourceColumnTypes maps an LD data source key to its columns' warehouse types,
+	// by lowercase column name. A SQL filter becomes clauses only on columns whose type
+	// fits; without types, its column names and types go unchecked.
+	DataSourceColumnTypes map[string]map[string]string
+
 	// DataSourceSQLFilters lists, by LD data source key, the SQL filter columns its
 	// query adds, so a filter checks the column warehouse gave it.
 	DataSourceSQLFilters map[string][]warehouse.CustomField
@@ -540,7 +545,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	result.LDMetric.Filters = convertTermCriteria(
 		result, termCriteriaLabel, termCriteria,
-		sg.IsWarehouseNative(), filterDS, opts.DataSourceColumns[filterDS], opts.DataSourceSQLFilters[filterDS])
+		sg.IsWarehouseNative(), opts.termSource(filterDS))
 
 	if result.LDMetric.DataSource != nil {
 		m := &result.LDMetric
@@ -1259,10 +1264,10 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	// while the other stays lossy.
 	// ---------------------------------------------------------------
 	result.LDMetric.Filters = convertTermCriteria(
-		result, "numerator", numEv.Criteria, sg.IsWarehouseNative(), numDS, opts.DataSourceColumns[numDS], opts.DataSourceSQLFilters[numDS])
+		result, "numerator", numEv.Criteria, sg.IsWarehouseNative(), opts.termSource(numDS))
 	if result.LDMetric.Denominator != nil {
 		result.LDMetric.Denominator.Filters = convertTermCriteria(
-			result, "denominator", denEv.Criteria, sg.IsWarehouseNative(), denDS, opts.DataSourceColumns[denDS], opts.DataSourceSQLFilters[denDS])
+			result, "denominator", denEv.Criteria, sg.IsWarehouseNative(), opts.termSource(denDS))
 	}
 
 	whnNumConst := sg.IsWarehouseNative() && numHasConst

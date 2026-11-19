@@ -49,7 +49,7 @@ func TestCriteriaToFilter_MappedConditions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := criteriaToFilter([]statsig.Criterion{tt.criterion}, nil, nil)
+			got, err := criteriaToFilter([]statsig.Criterion{tt.criterion}, nil)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -86,7 +86,7 @@ func TestCriteriaToFilter_MappedConditions(t *testing.T) {
 // generated warehouse SQL match nothing instead of erroring, so this is a silent
 // wrong-answer guard, not a cosmetic one.
 func TestCriteriaToFilter_NumericValuesAreJSONNumbers(t *testing.T) {
-	got, err := criteriaToFilter([]statsig.Criterion{crit("price", ">", "10")}, nil, nil)
+	got, err := criteriaToFilter([]statsig.Criterion{crit("price", ">", "10")}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestCriteriaToFilter_ExistsSerializesEmptyValues(t *testing.T) {
 	// Statsig accepts and stores stray values on a valueless condition; they must
 	// be dropped rather than passed through.
 	c.Values = []string{"ignored"}
-	got, err := criteriaToFilter([]statsig.Criterion{c}, nil, nil)
+	got, err := criteriaToFilter([]statsig.Criterion{c}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestCriteriaToFilter_MultipleCriteriaBecomeAndGroup(t *testing.T) {
 		crit("event", "in", "purchase"),
 		crit("page", "=", "checkout"),
 		crit("coupon", "non_null"),
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestCriteriaToFilter_MultipleCriteriaBecomeAndGroup(t *testing.T) {
 }
 
 func TestCriteriaToFilter_NoCriteriaYieldsNoFilter(t *testing.T) {
-	got, err := criteriaToFilter(nil, nil, nil)
+	got, err := criteriaToFilter(nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestCriteriaToFilter_NestedGroupSerializesAsObject(t *testing.T) {
 	got, err := criteriaToFilter([]statsig.Criterion{
 		crit("event", "in", "purchase"),
 		crit("page", "=", "checkout"),
-	}, nil, nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestCriteriaToFilter_RejectedConditions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := criteriaToFilter([]statsig.Criterion{tt.criterion}, nil, nil)
+			got, err := criteriaToFilter([]statsig.Criterion{tt.criterion}, nil)
 			if err == nil {
 				t.Fatalf("expected rejection, got filter %#v", got)
 			}
@@ -253,7 +253,7 @@ func TestCriteriaToFilter_NullVacuousOverrideRejected(t *testing.T) {
 	on := true
 	c := crit("country", "in", "JP")
 	c.NullVacuousOverride = &on
-	if _, err := criteriaToFilter([]statsig.Criterion{c}, nil, nil); err == nil {
+	if _, err := criteriaToFilter([]statsig.Criterion{c}, nil); err == nil {
 		t.Fatal("nullVacuousOverride changes null handling and must reject the criterion")
 	} else if !strings.Contains(err.Error(), "nullVacuousOverride") {
 		t.Errorf("error should name the field, got %q", err.Error())
@@ -267,7 +267,7 @@ func TestCriteriaToFilter_OneBadCriterionRejectsWholeTerm(t *testing.T) {
 		crit("event", "in", "purchase"),
 		crit("page", "=", "checkout"),
 		crit("ts", "after_exposure"),
-	}, nil, nil)
+	}, nil)
 	if err == nil {
 		t.Fatal("a single unmappable criterion must reject the entire term")
 	}
@@ -278,12 +278,12 @@ func TestCriteriaToFilter_LeafLimit(t *testing.T) {
 	for i := range within {
 		within[i] = crit("col", "in", "v")
 	}
-	if _, err := criteriaToFilter(within, nil, nil); err != nil {
+	if _, err := criteriaToFilter(within, nil); err != nil {
 		t.Errorf("%d criteria is exactly at LaunchDarkly's limit and should be accepted: %v", ldFilterMaxLeaves, err)
 	}
 
 	over := append(within, crit("col", "in", "v")) //nolint:gocritic // intentional copy
-	_, err := criteriaToFilter(over, nil, nil)
+	_, err := criteriaToFilter(over, nil)
 	if err == nil {
 		t.Fatalf("%d criteria exceeds LaunchDarkly's limit and must be rejected", len(over))
 	}
@@ -468,7 +468,7 @@ func TestConvert_CloudCriteriaStayLossy(t *testing.T) {
 func TestCriteriaToFilter_BooleanCheckWirePayload(t *testing.T) {
 	c := crit("IS_TERM", "is_true")
 	c.Values = []string{"ignored"}
-	got, err := criteriaToFilter([]statsig.Criterion{c}, nil, nil)
+	got, err := criteriaToFilter([]statsig.Criterion{c}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestCriteriaToFilter_BooleanCheckWirePayload(t *testing.T) {
 func TestCriteriaToFilter_BooleanCheckNeedsAColumn(t *testing.T) {
 	_, err := criteriaToFilter([]statsig.Criterion{
 		{Type: "metadata", Condition: "is_true"},
-	}, nil, nil)
+	}, nil)
 	if err == nil {
 		t.Fatal("a boolean check with no column should be rejected")
 	}
