@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Statsig `sql_filter` criteria convert. A filter that is an AND of simple column checks, such as
+- Statsig `sql_filter` criteria convert. A filter made of simple column checks joined by AND, OR, and NOT, such as
   `NOT is_test AND region = 'EU'`, becomes LaunchDarkly filter clauses. For any other, `warehouse` reads the Statsig
-  metrics and adds the filter to its data source's query as a true/false column, outside the custom fields; `metrics
-  convert` turns the criterion into a filter on that column. The column's name is a hash of the filter's SQL, so the commands need no mapping file. A
+  metrics and adds the filter to its data source's query as a true/false column named after its SQL
+  (`coalesce_plan_tier_0_gt_2`), outside the custom fields; `metrics convert` finds the column by the filter's SQL,
+  filters on it, and quotes the SQL in the metric's description. Columns an earlier build named `sql_filter_<hash>`
+  are still found. A
   filter with more than one statement, unbalanced parentheses, or a Statsig macro, or the new filters of a source
   whose preview fails with them, are left out with one line per run (`sql_filter_unusable`, `sql_filters_preview_failed`), and their metrics
   stay lossy. `--update-custom-fields` adds the columns to data sources created without them. A metric whose data

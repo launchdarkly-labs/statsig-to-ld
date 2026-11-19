@@ -386,26 +386,26 @@ Data sources created by an earlier version lack their custom fields. A run skips
 
 ### SQL filters
 
-A Statsig metric can filter its source with raw SQL (a `sql_filter` criterion). When the SQL is an AND of simple column checks, `metrics convert` writes it as LaunchDarkly filter clauses and the data source needs nothing added: `NOT is_test AND region = 'EU'` becomes `is_test in [false]` and `region in ["EU"]`. A simple check names an unquoted column and is one of:
+A Statsig metric can filter its source with raw SQL (a `sql_filter` criterion). When the SQL is made of simple column checks, `metrics convert` writes it as LaunchDarkly filter clauses and the data source needs nothing added: `NOT is_test AND region = 'EU'` becomes `is_test in [false]` and `region in ["EU"]`. A simple check names an unquoted column and is one of:
 
 - the column alone, `NOT` it, `IS TRUE`, `IS FALSE`, or `=` / `<>` with `TRUE` or `FALSE`
 - `=`, `<>`, `!=`, `IN`, or `NOT IN` with non-empty strings
 - `LIKE` or `NOT LIKE` with `'abc%'`, `'%abc'`, or `'%abc%'`
-- `<`, `<=`, `>`, or `>=` with a number
+- `<`, `<=`, `>`, `>=`, `=`, `<>`, or `!=` with a number. LaunchDarkly compares `in` values as text, and a decimal column's text is `10.00`, so `amount = 10` becomes `amount >= 10` and `amount <= 10`.
 
-Anything else keeps a column, as below: `OR`, functions, `IS NULL` (LaunchDarkly's filter editor cannot show it), and `=` with a number (LaunchDarkly compares `in` values as text, and a decimal column's text is `10.00`). So does a filter whose clauses would put the term over LaunchDarkly's limit of 10. The clauses use the source's own columns, which `metrics convert` checks when it can read the data source's columns.
+Checks can be joined by `AND`, `OR`, and `NOT`, with parentheses, as long as each `OR` holds only single checks: LaunchDarkly allows three levels, and the term's own AND group is the first. So `(is_test OR is_refund) AND amount > 0` converts, and `(is_test AND is_new) OR is_refund` keeps a column. So do functions, `IS NULL` (LaunchDarkly's filter editor cannot show it), and a filter whose clauses would put the term over LaunchDarkly's limit of 10. The clauses use the source's own columns, which `metrics convert` checks when it can read the data source's columns.
 
 For any other SQL filter, `warehouse` reads the Statsig metrics and adds each distinct one on a source to its data source's query as a true/false column, outside the custom fields so a filter can use one:
 
 ```sql
 SELECT *, 'orders' AS LD_EVENT_KEY FROM (
-SELECT *, (COALESCE(plan_tier, 0) > 2) AS sql_filter_fccc70d3dfeb219e FROM (
+SELECT *, (COALESCE(plan_tier, 0) > 2) AS coalesce_plan_tier_0_gt_2 FROM (
 <the Statsig source SQL, with its custom fields>
 ) AS statsig_filters
 ) AS ld_src
 ```
 
-`metrics convert` turns the criterion into the filter `sql_filter_fccc70d3dfeb219e in [true]`, combined with the term's other criteria (see [Metric filter criteria](#metric-filter-criteria)). The column's name is a hash of the filter's SQL, so both commands name it alike with no mapping file. A row whose filter is NULL is left out, as in Statsig's `WHERE`. Only metrics that `metrics convert` converts count: a metric's filters go on its source, and a ratio's denominator filters on the denominator's source.
+`metrics convert` turns the criterion into the filter `coalesce_plan_tier_0_gt_2 in [true]`, combined with the term's other criteria (see [Metric filter criteria](#metric-filter-criteria)), and adds the line `Statsig SQL filter: COALESCE(plan_tier, 0) > 2` to the metric's description when it fits LaunchDarkly's 768 characters. The column is named after the filter's words, cut at 60 characters, and numbered (`_2`) if the data source already has a column by that name. `metrics convert` finds the column by the filter's SQL in the data source's query, so it follows the numbering, and it also finds the `sql_filter_<hash>` columns an earlier version named. When it cannot read the data source, it uses the unnumbered name and notes `column_unverified`. A row whose filter is NULL is left out, as in Statsig's `WHERE`. Only metrics that `metrics convert` converts count: a metric's filters go on its source, and a ratio's denominator filters on the denominator's source.
 
 A filter that has more than one statement, unbalanced parentheses, or a Statsig macro is left out of the query (note code `sql_filter_unusable`), and so are the filters a data source does not have yet when its preview fails with them (`sql_filters_preview_failed`). The data source is still written, the run prints one line per code naming them, and the metrics that use those filters stay lossy; `metrics convert` names a filter `warehouse` cannot add. If the Statsig metrics cannot be read, the run warns and data sources get no filter columns.
 

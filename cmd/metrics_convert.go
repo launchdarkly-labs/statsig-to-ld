@@ -322,7 +322,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		convOpts.ConstantEventKeys, convOpts.DataSourceColumns = dsInfo.keys, dsInfo.cols
+		convOpts.ConstantEventKeys, convOpts.DataSourceColumns, convOpts.DataSourceSQLFilters = dsInfo.keys, dsInfo.cols, dsInfo.filters
 	}
 
 	// Fetch metrics
@@ -585,8 +585,10 @@ func fetchRegisteredAnalysisUnits(ctx context.Context, ldClient *launchdarkly.Cl
 
 type dataSourceInfo struct {
 	// keys maps a data source key to the constant event key it projects.
-	keys    map[string]string
-	cols    map[string][]string
+	keys map[string]string
+	cols map[string][]string
+	// filters lists the SQL filter columns each data source's query adds.
+	filters map[string][]warehouse.CustomField
 	fetched bool
 	// constant counts data sources read back as constant-key, not assumed ones.
 	constant int
@@ -596,7 +598,7 @@ type dataSourceInfo struct {
 // fetchDataSourceKeys reads each LD data source's constant event key and columns. With
 // assume, mapped data sources LaunchDarkly cannot report on count as constant-key.
 func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sourceMapping map[string]string, defaultDS string, assume, dryRun bool) (dataSourceInfo, error) {
-	info := dataSourceInfo{keys: map[string]string{}, cols: map[string][]string{}}
+	info := dataSourceInfo{keys: map[string]string{}, cols: map[string][]string{}, filters: map[string][]warehouse.CustomField{}}
 	listed := map[string]bool{}
 	if ldClient != nil {
 		list, err := ldClient.ListMetricDataSources(ctx)
@@ -612,10 +614,17 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 				listed[key] = true
 				cm := jsonutil.GetMap(ds, "columnMappings")
 				whType := warehouse.WarehouseTypeForIntegration(jsonutil.GetStr(ds, "integrationKey"))
+				query := jsonutil.GetStr(ds, "sqlQuery")
 				// An edited wrapper still counts: every row it returns carries the constant.
-				if w, state := warehouse.ClassifyConstantKey(jsonutil.GetStr(ds, "sqlQuery"), jsonutil.GetStr(cm, "keyColumn"), key, whType); state != warehouse.NoConstantKey {
+				if w, state := warehouse.ClassifyConstantKey(query, jsonutil.GetStr(cm, "keyColumn"), key, whType); state != warehouse.NoConstantKey {
 					info.keys[key] = w.EventKey
 					info.constant++
+				}
+				if w, ok := warehouse.ParseConstantKeyWrapper(query, whType); ok {
+					query = w.Inner
+				}
+				if filters := warehouse.SQLFiltersIn(query, whType); len(filters) > 0 {
+					info.filters[key] = filters
 				}
 				for _, c := range jsonutil.GetSlice(cm, "columns") {
 					if m, ok := c.(map[string]any); ok {

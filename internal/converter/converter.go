@@ -12,6 +12,7 @@ import (
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/warehouse"
 )
 
 const maxLDKeyLength = 256
@@ -70,6 +71,10 @@ type Options struct {
 	// DataSourceColumns maps an LD data source key to its column names. LaunchDarkly
 	// matches columns case-sensitively, so metric columns are rewritten to this case.
 	DataSourceColumns map[string][]string
+
+	// DataSourceSQLFilters lists, by LD data source key, the SQL filter columns its
+	// query adds, so a filter checks the column warehouse gave it.
+	DataSourceSQLFilters map[string][]warehouse.CustomField
 }
 
 // Warning codes are stable identifiers for the diagnostics the converter emits.
@@ -491,7 +496,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		Kind:                 "custom",
 		MaintainerID:         opts.MaintainerID,
 		Name:                 sg.Name,
-		Description:          desc,
+		Description:          withDescriptionLines(desc, sqlFilterLines("", termCriteria)),
 		EventKey:             eventKey,
 		IsNumeric:            &isNumeric,
 		SuccessCriteria:      successCriteria,
@@ -535,7 +540,7 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 	}
 	result.LDMetric.Filters = convertTermCriteria(
 		result, termCriteriaLabel, termCriteria,
-		sg.IsWarehouseNative(), filterDS, opts.DataSourceColumns[filterDS])
+		sg.IsWarehouseNative(), filterDS, opts.DataSourceColumns[filterDS], opts.DataSourceSQLFilters[filterDS])
 
 	if result.LDMetric.DataSource != nil {
 		m := &result.LDMetric
@@ -1187,7 +1192,7 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 		Kind:                 "custom",
 		MaintainerID:         opts.MaintainerID,
 		Name:                 sg.Name,
-		Description:          desc,
+		Description:          withDescriptionLines(desc, sqlFilterLines("numerator ", numEv.Criteria)+sqlFilterLines("denominator ", denEv.Criteria)),
 		EventKey:             numEv.Name,
 		IsNumeric:            &numSpec.isNumeric,
 		SuccessCriteria:      successCriteria,
@@ -1254,10 +1259,10 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	// while the other stays lossy.
 	// ---------------------------------------------------------------
 	result.LDMetric.Filters = convertTermCriteria(
-		result, "numerator", numEv.Criteria, sg.IsWarehouseNative(), numDS, opts.DataSourceColumns[numDS])
+		result, "numerator", numEv.Criteria, sg.IsWarehouseNative(), numDS, opts.DataSourceColumns[numDS], opts.DataSourceSQLFilters[numDS])
 	if result.LDMetric.Denominator != nil {
 		result.LDMetric.Denominator.Filters = convertTermCriteria(
-			result, "denominator", denEv.Criteria, sg.IsWarehouseNative(), denDS, opts.DataSourceColumns[denDS])
+			result, "denominator", denEv.Criteria, sg.IsWarehouseNative(), denDS, opts.DataSourceColumns[denDS], opts.DataSourceSQLFilters[denDS])
 	}
 
 	whnNumConst := sg.IsWarehouseNative() && numHasConst

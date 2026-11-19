@@ -18,8 +18,8 @@ import (
 
 const (
 	checkoutRawInner  = "SELECT ts, user_id FROM analytics.events WHERE kind = 'checkout'"
-	planTierCol       = "sql_filter_6e4004268a3c8fc1"
-	filterPreviewCols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"SQL_FILTER_6E4004268A3C8FC1","type":"BOOLEAN"}`
+	planTierCol       = "plan_tier_gt_2"
+	filterPreviewCols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"PLAN_TIER_GT_2","type":"BOOLEAN"}`
 )
 
 func withFilterLayer(inner string, cols ...string) string {
@@ -30,7 +30,11 @@ func wrappedCheckout(inner string) string {
 	return "SELECT *, 'checkout-events' AS LD_EVENT_KEY FROM (\n" + inner + "\n) AS ld_src"
 }
 
-var planTierExpr = "(plan_tier > 2) AS " + planTierCol
+var (
+	planTierExpr = "(plan_tier > 2) AS " + planTierCol
+	// How #63 named the column.
+	planTierHashExpr = "(plan_tier > 2) AS sql_filter_6e4004268a3c8fc1"
+)
 
 func sqlFilterEngine(t *testing.T, srvURL string, filters ...string) *migrationEngine {
 	e := newPhase3Engine(t, srvURL, false)
@@ -142,7 +146,7 @@ func TestPhase3_SQLFiltersAreAddedToTheQuery(t *testing.T) {
 			if got := f.created[0]["sqlQuery"]; got != tc.want {
 				t.Errorf("sqlQuery =\n%v\nwant\n%s", got, tc.want)
 			}
-			if cols := fmt.Sprint(f.created[0]["columnMappings"].(map[string]any)["columns"]); !strings.Contains(cols, "SQL_FILTER_6E4004268A3C8FC1") {
+			if cols := fmt.Sprint(f.created[0]["columnMappings"].(map[string]any)["columns"]); !strings.Contains(cols, strings.ToUpper(planTierCol)) {
 				t.Errorf("columns = %s, want the SQL filter's column", cols)
 			}
 		})
@@ -268,18 +272,41 @@ func TestPhase3_UpdateCustomFieldsAddsSQLFilterColumns(t *testing.T) {
 }
 
 func TestPhase3_SQLFilterColumnsAlreadyThereAreLeftAlone(t *testing.T) {
+	for name, expr := range map[string]string{"named after the SQL": planTierExpr, "named by #63's hash": planTierHashExpr} {
+		t.Run(name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: wrappedCheckoutWithSQL(t, wrappedCheckout(withFilterLayer(checkoutRawInner, expr))), previewCols: filterPreviewCols}
+			srv := f.server()
+			defer srv.Close()
+
+			e := sqlFilterEngine(t, srv.URL)
+			e.updateCustomFields = true
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if f.patchCount != 0 || len(e.report.Notes) != 0 || len(e.report.Warnings) != 0 {
+				t.Errorf("patches=%d notes=%+v warnings=%q", f.patchCount, e.report.Notes, e.report.Warnings)
+			}
+		})
+	}
+}
+
+// A readable name can be one the source's own columns already use.
+func TestPhase3_SQLFilterColumnNamedLikeASourceColumnIsNumbered(t *testing.T) {
 	t.Chdir(t.TempDir())
-	f := &fakeLD{t: t, list: wrappedCheckoutWithSQL(t, wrappedCheckout(withFilterLayer(checkoutRawInner, planTierExpr))), previewCols: filterPreviewCols}
+	f := &fakeLD{t: t, previewCols: filterPreviewCols + `,{"name":"PLAN_TIER_GT_2","type":"BOOLEAN"}`}
 	srv := f.server()
 	defer srv.Close()
 
 	e := sqlFilterEngine(t, srv.URL)
-	e.updateCustomFields = true
 	if err := e.phase3aMigrateDataSources(); err != nil {
 		t.Fatal(err)
 	}
-	if f.patchCount != 0 || len(e.report.Notes) != 0 || len(e.report.Warnings) != 0 {
-		t.Errorf("patches=%d notes=%+v warnings=%q", f.patchCount, e.report.Notes, e.report.Warnings)
+	if len(f.created) != 1 || len(e.report.Errors) != 0 {
+		t.Fatalf("created %d, errors=%q", len(f.created), e.report.Errors)
+	}
+	if got, want := f.created[0]["sqlQuery"], wrappedCheckout(withFilterLayer(checkoutRawInner, "(plan_tier > 2) AS plan_tier_gt_2_2")); got != want {
+		t.Errorf("sqlQuery =\n%v\nwant\n%s", got, want)
 	}
 }
 

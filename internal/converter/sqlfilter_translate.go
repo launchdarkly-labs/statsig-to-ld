@@ -8,25 +8,22 @@ import (
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 )
 
-// translateSQLFilter rewrites a Statsig SQL filter as LaunchDarkly filter clauses,
-// AND-ed, when it is an AND of simple column checks whose meaning carries over
-// exactly and which LaunchDarkly's filter editor can show. Anything else, such as
-// OR, functions, or null checks, is not translated and keeps its column.
+// translateSQLFilter rewrites a Statsig SQL filter as LaunchDarkly filter clauses to
+// AND, when its meaning carries over exactly and LaunchDarkly's filter editor can show
+// them: simple column checks joined by AND, OR, and NOT, where an OR holds only single
+// checks. Anything else, such as functions or null checks, keeps its column. Each
+// filter returned is a clause or an OR group of clauses.
 func translateSQLFilter(sql string) ([]launchdarkly.EventFilter, bool) {
 	toks, ok := lexSQLFilter(sql)
 	if !ok || len(toks) == 0 {
 		return nil, false
 	}
 	p := &sqlFilterParser{toks: toks}
-	clauses, ok := p.conjunction()
+	n, ok := p.disjunction()
 	if !ok || p.pos != len(toks) {
 		return nil, false
 	}
-	out := make([]launchdarkly.EventFilter, len(clauses))
-	for i, c := range clauses {
-		out[i] = c.filter
-	}
-	return out, true
+	return n.filters()
 }
 
 // sqlFilterTranslations returns, by criterion index, the clauses each of a term's
@@ -42,13 +39,24 @@ func sqlFilterTranslations(criteria []statsig.Criterion) map[int][]launchdarkly.
 		}
 		if clauses, ok := translateSQLFilter(sql); ok {
 			out[i] = clauses
-			leaves += len(clauses) - 1
+			leaves--
+			for _, f := range clauses {
+				leaves += leafCount(f)
+			}
 		}
 	}
 	if leaves > ldFilterMaxLeaves {
 		return nil
 	}
 	return out
+}
+
+// leafCount counts f's clauses, as LaunchDarkly's limit does.
+func leafCount(f launchdarkly.EventFilter) int {
+	if f.Type == launchdarkly.EventFilterTypeGroup {
+		return len(f.Values)
+	}
+	return 1
 }
 
 type sqlTokenKind int
@@ -157,6 +165,75 @@ type sqlClause struct {
 	negatable bool
 }
 
+// sqlNode is a parsed filter: a clause when op is empty, else an AND or OR of nodes.
+type sqlNode struct {
+	op       string
+	clause   sqlClause
+	children []sqlNode
+}
+
+// sqlGroup joins nodes with op, taking in the children of those that use op too.
+func sqlGroup(op string, nodes ...sqlNode) sqlNode {
+	g := sqlNode{op: op}
+	for _, n := range nodes {
+		if n.op == op {
+			g.children = append(g.children, n.children...)
+		} else {
+			g.children = append(g.children, n)
+		}
+	}
+	if len(g.children) == 1 {
+		return g.children[0]
+	}
+	return g
+}
+
+// negate returns the node matching exactly the rows where SQL's NOT of n is true. De
+// Morgan's laws hold in SQL's three-valued logic, so NOT moves onto each clause.
+func (n sqlNode) negate() (sqlNode, bool) {
+	if n.op == "" {
+		c, ok := negateSQLClause(n.clause)
+		return sqlNode{clause: c}, ok
+	}
+	flipped := launchdarkly.EventFilterGroupOpAnd
+	if n.op == flipped {
+		flipped = launchdarkly.EventFilterGroupOpOr
+	}
+	children := make([]sqlNode, len(n.children))
+	for i, c := range n.children {
+		var ok bool
+		if children[i], ok = c.negate(); !ok {
+			return sqlNode{}, false
+		}
+	}
+	return sqlGroup(flipped, children...), true
+}
+
+// filters lays n out as clauses and OR groups of clauses, to AND inside the term's
+// group. Anything deeper would pass LaunchDarkly's limit of three levels.
+func (n sqlNode) filters() ([]launchdarkly.EventFilter, bool) {
+	items := []sqlNode{n}
+	if n.op == launchdarkly.EventFilterGroupOpAnd {
+		items = n.children
+	}
+	out := make([]launchdarkly.EventFilter, 0, len(items))
+	for _, item := range items {
+		if item.op == "" {
+			out = append(out, item.clause.filter)
+			continue
+		}
+		values := make([]any, 0, len(item.children))
+		for _, c := range item.children {
+			if c.op != "" {
+				return nil, false
+			}
+			values = append(values, c.clause.filter)
+		}
+		out = append(out, launchdarkly.EventFilter{Type: launchdarkly.EventFilterTypeGroup, Op: launchdarkly.EventFilterGroupOpOr, Values: values})
+	}
+	return out, true
+}
+
 type sqlFilterParser struct {
 	toks []sqlToken
 	pos  int
@@ -187,68 +264,83 @@ func (p *sqlFilterParser) symbol(s string) bool {
 	return false
 }
 
-// conjunction reads clauses joined by AND.
-func (p *sqlFilterParser) conjunction() ([]sqlClause, bool) {
-	var out []sqlClause
+// disjunction reads conjunctions joined by OR.
+func (p *sqlFilterParser) disjunction() (sqlNode, bool) {
+	var nodes []sqlNode
 	for {
-		clauses, ok := p.unary()
+		n, ok := p.conjunction()
 		if !ok {
-			return nil, false
+			return sqlNode{}, false
 		}
-		out = append(out, clauses...)
-		if !p.keyword("AND") {
-			return out, true
+		nodes = append(nodes, n)
+		if !p.keyword("OR") {
+			return sqlGroup(launchdarkly.EventFilterGroupOpOr, nodes...), true
 		}
 	}
 }
 
-func (p *sqlFilterParser) unary() ([]sqlClause, bool) {
-	if p.keyword("NOT") {
-		clauses, ok := p.unary()
-		if !ok || len(clauses) != 1 {
-			return nil, false
+// conjunction reads checks joined by AND.
+func (p *sqlFilterParser) conjunction() (sqlNode, bool) {
+	var nodes []sqlNode
+	for {
+		n, ok := p.unary()
+		if !ok {
+			return sqlNode{}, false
 		}
-		negated, ok := negateSQLClause(clauses[0])
-		return []sqlClause{negated}, ok
+		nodes = append(nodes, n)
+		if !p.keyword("AND") {
+			return sqlGroup(launchdarkly.EventFilterGroupOpAnd, nodes...), true
+		}
+	}
+}
+
+func (p *sqlFilterParser) unary() (sqlNode, bool) {
+	if p.keyword("NOT") {
+		n, ok := p.unary()
+		if !ok {
+			return sqlNode{}, false
+		}
+		return n.negate()
 	}
 	if p.symbol("(") {
-		clauses, ok := p.conjunction()
+		n, ok := p.disjunction()
 		if !ok || !p.symbol(")") {
-			return nil, false
+			return sqlNode{}, false
 		}
-		return clauses, true
+		return n, true
 	}
-	c, ok := p.predicate()
-	return []sqlClause{c}, ok
+	return p.predicate()
 }
 
 // predicate reads one column check: a bare boolean column, IS TRUE or IS FALSE,
 // [NOT] IN, [NOT] LIKE, or a comparison with a literal.
-func (p *sqlFilterParser) predicate() (sqlClause, bool) {
+func (p *sqlFilterParser) predicate() (sqlNode, bool) {
 	t, ok := p.peek()
 	if !ok || t.kind != sqlIdent || sqlKeywords[strings.ToUpper(t.text)] {
-		return sqlClause{}, false
+		return sqlNode{}, false
 	}
 	p.pos++
 	col := t.text
-	leaf := func(op string, negate bool, values ...any) (sqlClause, bool) {
-		return sqlClause{filter: propertyFilter(col, op, negate, values...), negatable: true}, true
+	leaf := func(op string, negate bool, values ...any) sqlNode {
+		return sqlNode{clause: sqlClause{filter: propertyFilter(col, op, negate, values...), negatable: true}}
 	}
+	clause := func(c sqlClause, ok bool) (sqlNode, bool) { return sqlNode{clause: c}, ok }
 
 	next, ok := p.peek()
-	if !ok || (next.kind == sqlSymbol && next.text == ")") || (next.kind == sqlIdent && strings.EqualFold(next.text, "AND")) {
-		return leaf(ldOpIn, false, true)
+	if !ok || (next.kind == sqlSymbol && next.text == ")") ||
+		(next.kind == sqlIdent && (strings.EqualFold(next.text, "AND") || strings.EqualFold(next.text, "OR"))) {
+		return leaf(ldOpIn, false, true), true
 	}
 	switch {
 	case p.keyword("IS"):
 		for _, b := range []bool{true, false} {
 			if p.keyword(strconv.FormatBool(b)) {
-				c, _ := leaf(ldOpIn, false, b)
-				c.negatable = false
-				return c, true
+				n := leaf(ldOpIn, false, b)
+				n.clause.negatable = false
+				return n, true
 			}
 		}
-		return sqlClause{}, false
+		return sqlNode{}, false
 	case p.keyword("NOT"):
 		var c sqlClause
 		switch {
@@ -257,38 +349,47 @@ func (p *sqlFilterParser) predicate() (sqlClause, bool) {
 		case p.keyword("LIKE"):
 			c, ok = p.like(col)
 		default:
-			return sqlClause{}, false
+			return sqlNode{}, false
 		}
 		if !ok {
-			return sqlClause{}, false
+			return sqlNode{}, false
 		}
-		return negateSQLClause(c)
+		return clause(negateSQLClause(c))
 	case p.keyword("IN"):
-		return p.inList(col)
+		return clause(p.inList(col))
 	case p.keyword("LIKE"):
-		return p.like(col)
+		return clause(p.like(col))
 	case p.symbol("="), p.symbol("<>"), p.symbol("!="):
 		negate := p.toks[p.pos-1].text != "="
 		if s, ok := p.str(); ok {
-			return leaf(ldOpIn, negate, s)
+			return leaf(ldOpIn, negate, s), true
 		}
 		for _, b := range []bool{true, false} {
 			if p.keyword(strconv.FormatBool(b)) {
-				return leaf(ldOpIn, false, b != negate)
+				return leaf(ldOpIn, false, b != negate), true
 			}
 		}
-		return sqlClause{}, false
+		n, ok := p.number()
+		if !ok {
+			return sqlNode{}, false
+		}
+		// "in" compares text, and a decimal column's text is 10.00, so equality is a range.
+		eq := sqlGroup(launchdarkly.EventFilterGroupOpAnd, leaf(ldOpGreaterThanOrEqual, false, n), leaf(ldOpLessThanOrEqual, false, n))
+		if negate {
+			return eq.negate()
+		}
+		return eq, true
 	}
 	op, ok := sqlComparisons[next.text]
 	if next.kind != sqlSymbol || !ok {
-		return sqlClause{}, false
+		return sqlNode{}, false
 	}
 	p.pos++
 	n, ok := p.number()
 	if !ok {
-		return sqlClause{}, false
+		return sqlNode{}, false
 	}
-	return leaf(op, false, n)
+	return leaf(op, false, n), true
 }
 
 var sqlComparisons = map[string]string{"<": ldOpLessThan, "<=": ldOpLessThanOrEqual, ">": ldOpGreaterThan, ">=": ldOpGreaterThanOrEqual}

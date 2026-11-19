@@ -2,6 +2,7 @@ package warehouse
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -9,9 +10,11 @@ import (
 )
 
 const (
-	planTier      = "plan_tier > 2"
-	planTierCol   = "sql_filter_6e4004268a3c8fc1"
-	commentFilter = "-- paid plans only\nplan_tier > 2 OR is_partner = TRUE"
+	planTier    = "plan_tier > 2"
+	planTierCol = "plan_tier_gt_2"
+	// What #63 named the column.
+	planTierHashCol = "sql_filter_6e4004268a3c8fc1"
+	commentFilter   = "-- paid plans only\nplan_tier > 2 OR is_partner = TRUE"
 )
 
 var centsField = []CustomField{{Key: "cents", Formula: "price_usd*100"}}
@@ -21,6 +24,30 @@ func TestSQLFilterColumns_NamesEachFilter(t *testing.T) {
 	want := []CustomField{{Key: planTierCol, Formula: planTier}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("SQLFilterColumns = %+v, want %+v", got, want)
+	}
+}
+
+func TestSQLFilterColumns_NumbersNamesThatClash(t *testing.T) {
+	got := SQLFilterColumns([]string{"plan_tier > 2", "plan_tier>2", "cents > 500"}, "CENTS_GT_500")
+	want := []CustomField{
+		{Key: "plan_tier_gt_2", Formula: "plan_tier > 2"},
+		{Key: "plan_tier_gt_2_2", Formula: "plan_tier>2"},
+		{Key: "cents_gt_500_2", Formula: "cents > 500"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SQLFilterColumns = %+v\nwant %+v", got, want)
+	}
+}
+
+func TestMergeSQLFilters_MatchesBySQLAndNumbersNewNames(t *testing.T) {
+	have := []CustomField{{Key: planTierHashCol, Formula: planTier}, {Key: "region_eq_eu", Formula: "region = 'EU'"}}
+	want := SQLFilterColumns([]string{planTier, "region='EU'", "is_test = FALSE"}, "cents")
+	got := MergeSQLFilters(have, want, "cents")
+	wantMerged := append(slices.Clone(have),
+		CustomField{Key: "region_eq_eu_2", Formula: "region='EU'"},
+		CustomField{Key: "is_test_eq_false", Formula: "is_test = FALSE"})
+	if !reflect.DeepEqual(got, wantMerged) {
+		t.Errorf("MergeSQLFilters = %+v\nwant %+v", got, wantMerged)
 	}
 }
 
@@ -130,6 +157,18 @@ func TestMissingColumns(t *testing.T) {
 		{"created with custom fields only", build(SourceColumns{Fields: centsField}), SourceColumns{Filters: filters}, want},
 		{"has some filters", build(SourceColumns{Fields: centsField, Filters: filters[:1]}), SourceColumns{Filters: filters[1:]}, want},
 		{"has everything", build(want), SourceColumns{}, want},
+		{
+			"created by #63, whose columns are named by hash",
+			strings.Replace(build(want), "AS "+planTierCol, "AS "+planTierHashCol, 1),
+			SourceColumns{},
+			SourceColumns{Fields: centsField, Filters: append([]CustomField{{Key: planTierHashCol, Formula: planTier}}, filters[1:]...)},
+		},
+		{
+			"a name numbered to avoid a clash",
+			strings.Replace(build(want), "AS "+planTierCol, "AS "+planTierCol+"_3", 1),
+			SourceColumns{},
+			SourceColumns{Fields: centsField, Filters: append([]CustomField{{Key: planTierCol + "_3", Formula: planTier}}, filters[1:]...)},
+		},
 		// A bound metric may still filter on a column Statsig no longer has a filter for.
 		{
 			"keeps a filter Statsig dropped",
@@ -155,6 +194,7 @@ func TestMissingColumns(t *testing.T) {
 	edited := strings.Replace(build(want), "(plan_tier > 2)", "(plan_tier > 3)", 1)
 	for name, query := range map[string]string{
 		"filter edited in LaunchDarkly": edited,
+		"filter column renamed":         strings.Replace(build(want), "AS "+planTierCol, "AS tier_filter", 1),
 		"Statsig SQL changed":           strings.Replace(build(want), "analytics.orders", "analytics.orders_v2", 1),
 		"custom field changed":          build(SourceColumns{Fields: []CustomField{{Key: "cents", Formula: "price_usd*1000"}}}),
 	} {

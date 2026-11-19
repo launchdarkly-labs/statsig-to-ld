@@ -939,16 +939,44 @@ type sourcePreview struct {
 func (e *migrationEngine) previewSource(source, body map[string]any, plan dataSourcePlan, name, whType, integrationConfigID string) (sourcePreview, error) {
 	var r sourcePreview
 	statsigValue := jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn")
-	sql, cols := jsonutil.GetStr(body, "sqlQuery"), plan.columns
-	preview, hasCols, rawErr, err := e.previewWith(source, body, sql, cols, name, whType, integrationConfigID)
+	sql := jsonutil.GetStr(body, "sqlQuery")
+	cols, sourceColumns, err := e.previewColumns(&r, source, body, sql, plan, name, whType, integrationConfigID)
 	if err != nil {
 		return r, err
+	}
+	// A SQL filter's column can have a name the source SQL already returns.
+	if renamed, ok := warehouse.RenumberSQLFilters(cols, sourceColumns); ok {
+		plan.columns, plan.retry = renamed, nil
+		if cols, sourceColumns, err = e.previewColumns(&r, source, body, sql, plan, name, whType, integrationConfigID); err != nil {
+			return r, err
+		}
+	}
+	if names := warehouse.CollidingCustomFields(sourceColumns, cols.All()); len(names) > 0 {
+		return r, fmt.Errorf("Statsig custom field(s) %s: the source SQL already returns a column by that name; rename them in Statsig, then rerun", quoteAll(names))
+	}
+	if e.constantEventKey {
+		if err := e.applyConstantEventKey(body, whType, integrationConfigID, sourceColumns); err != nil {
+			return r, err
+		}
+	}
+	r.dropped = statsigValue != "" && jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn") == ""
+	return r, nil
+}
+
+// previewColumns sets body's query to sql with plan's columns, or with plan.retry when
+// that preview fails, and fills body's columns from the preview. It returns the
+// columns it used and the column names the preview gave.
+func (e *migrationEngine) previewColumns(r *sourcePreview, source, body map[string]any, sql string, plan dataSourcePlan, name, whType, integrationConfigID string) (warehouse.SourceColumns, []string, error) {
+	cols := plan.columns
+	preview, hasCols, rawErr, err := e.previewWith(source, body, sql, cols, name, whType, integrationConfigID)
+	if err != nil {
+		return cols, nil, err
 	}
 	// Only the metrics that use a SQL filter need its column, so the write goes ahead without the new ones.
 	if rawErr != nil && plan.retry != nil {
 		p, has, retryErr, err := e.previewWith(source, body, sql, *plan.retry, name, whType, integrationConfigID)
 		if err != nil {
-			return r, err
+			return cols, nil, err
 		}
 		r.issues = append(r.issues, sourceIssue{code: noteSQLFiltersPreviewFailed, key: jsonutil.GetStr(body, "key"), detail: failureReason(rawErr)})
 		preview, hasCols, rawErr, cols = p, has, retryErr, *plan.retry
@@ -969,18 +997,9 @@ func (e *migrationEngine) previewSource(source, body map[string]any, plan dataSo
 		warehouse.ListSQLFilterColumns(jsonutil.GetMap(body, "columnMappings"), cols.Filters)
 	}
 	if hasCols && rawErr != nil {
-		return r, fmt.Errorf("preview of the source SQL with %s failed: %w", columnsPhrase(cols), rawErr)
+		return cols, nil, fmt.Errorf("preview of the source SQL with %s failed: %w", columnsPhrase(cols), rawErr)
 	}
-	if names := warehouse.CollidingCustomFields(sourceColumns, cols.All()); len(names) > 0 {
-		return r, fmt.Errorf("Statsig custom field(s) %s: the source SQL already returns a column by that name; rename them in Statsig, then rerun", quoteAll(names))
-	}
-	if e.constantEventKey {
-		if err := e.applyConstantEventKey(body, whType, integrationConfigID, sourceColumns); err != nil {
-			return r, err
-		}
-	}
-	r.dropped = statsigValue != "" && jsonutil.GetStr(jsonutil.GetMap(body, "columnMappings"), "valueColumn") == ""
-	return r, nil
+	return cols, sourceColumns, nil
 }
 
 // previewWith sets body's query to sql with cols and previews it, or the Statsig
@@ -1022,7 +1041,7 @@ func columnsPhrase(cols warehouse.SourceColumns) string {
 func (e *migrationEngine) sourceColumns(source map[string]any, key, whType string) (warehouse.SourceColumns, []sourceIssue) {
 	cols := warehouse.SourceColumns{Fields: warehouse.CustomFields(source)}
 	var issues []sourceIssue
-	for _, f := range warehouse.SQLFilterColumns(e.sqlFilters[jsonutil.GetStr(source, "name")]) {
+	for _, f := range warehouse.SQLFilterColumns(e.sqlFilters[jsonutil.GetStr(source, "name")], columnNames(cols.Fields)...) {
 		if err := warehouse.ValidateSQLFilter(f, whType); err != nil {
 			issues = append(issues, sourceIssue{code: noteSQLFilterUnusable, key: key, detail: strconv.Quote(f.Formula)})
 			continue
@@ -1343,7 +1362,7 @@ func lacksPhrase(missing warehouse.SourceColumns) string {
 // bound metrics may filter on, and gives the columns without the new ones.
 func withExistingSQLFilters(cols warehouse.SourceColumns, ds map[string]any, whType string) (warehouse.SourceColumns, *warehouse.SourceColumns) {
 	kept := warehouse.SQLFiltersIn(jsonutil.GetStr(ds, "sqlQuery"), whType)
-	cols.Filters = warehouse.MergeSQLFilters(kept, cols.Filters)
+	cols.Filters = warehouse.MergeSQLFilters(kept, cols.Filters, columnNames(cols.Fields)...)
 	if len(cols.Filters) == len(kept) {
 		return cols, nil
 	}

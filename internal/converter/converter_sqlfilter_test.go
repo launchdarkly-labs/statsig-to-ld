@@ -9,6 +9,7 @@ import (
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/warehouse"
 )
 
 var planTierColumn = statsig.SQLFilterColumn("COALESCE(plan_tier, 0) > 2")
@@ -228,9 +229,33 @@ func TestConvert_WHN_SimpleSQLFilterOnUnknownColumnsNeedsNoNote(t *testing.T) {
 	}
 }
 
+// An OR sits inside the term's AND, within LaunchDarkly's three levels.
+func TestConvert_WHN_SQLFilterWithOrBecomesAGroup(t *testing.T) {
+	raw := strings.Replace(translatableSum, "NOT is_test AND NOT is_refund", "is_test OR is_refund", 1)
+	res := mustConvert(t, raw, Options{LDDataSource: "ld-checkout"})
+	if res.IsLossy() {
+		t.Fatalf("LossyReasons=%v", res.LossyReasons)
+	}
+	want := &launchdarkly.EventFilter{
+		Type: launchdarkly.EventFilterTypeGroup, Op: launchdarkly.EventFilterGroupOpAnd,
+		Values: []any{prop("event", ldOpIn, false, "purchase"), or(prop("is_test", ldOpIn, false, true), prop("is_refund", ldOpIn, false, true))},
+	}
+	if !reflect.DeepEqual(res.LDMetric.Filters, want) {
+		t.Errorf("Filters = %#v\nwant %#v", res.LDMetric.Filters, want)
+	}
+}
+
 // Over LaunchDarkly's clause limit, the SQL filter checks its column instead.
 func TestConvert_WHN_SQLFilterOverTheClauseLimitKeepsItsColumn(t *testing.T) {
-	sql := "a > 1 AND b > 1 AND c > 1 AND d > 1 AND e > 1 AND f > 1 AND g > 1 AND h > 1 AND i > 1 AND j > 1"
+	for _, sql := range []string{
+		"a > 1 AND b > 1 AND c > 1 AND d > 1 AND e > 1 AND f > 1 AND g > 1 AND h > 1 AND i > 1 AND j > 1",
+		"a > 1 OR b > 1 OR c > 1 OR d > 1 OR e > 1 OR f > 1 OR g > 1 OR h > 1 OR i > 1 OR j > 1",
+	} {
+		t.Run(sql, func(t *testing.T) { testSQLFilterKeepsItsColumn(t, sql) })
+	}
+}
+
+func testSQLFilterKeepsItsColumn(t *testing.T, sql string) {
 	raw := strings.Replace(translatableSum, "NOT is_test AND NOT is_refund", sql, 1)
 	col := statsig.SQLFilterColumn(sql)
 	res := mustConvert(t, raw, Options{LDDataSource: "ld-checkout"})
@@ -256,4 +281,47 @@ func TestConvert_WHN_SimpleSQLFilterOnAMissingColumnIsLossy(t *testing.T) {
 		t.Fatal("want lossy: the data source has no is_refund column")
 	}
 	assertHasWarning(t, res.LossyReasons, `"is_refund"`)
+}
+
+// warehouse may number a filter's column, or an earlier version may have hashed it.
+func TestConvert_WHN_SQLFilterUsesTheColumnItsDataSourceGivesIt(t *testing.T) {
+	for _, col := range []string{planTierColumn + "_2", "sql_filter_6e4004268a3c8fc1"} {
+		res := mustConvert(t, sqlFilterSum, Options{
+			LDDataSource:         "ld-checkout",
+			DataSourceColumns:    map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", strings.ToUpper(col)}},
+			DataSourceSQLFilters: map[string][]warehouse.CustomField{"ld-checkout": {{Key: col, Formula: "COALESCE(plan_tier, 0) > 2"}}},
+		})
+		if res.IsLossy() {
+			t.Fatalf("%s: LossyReasons=%v", col, res.LossyReasons)
+		}
+		if got := res.LDMetric.Filters.Values[1].(launchdarkly.EventFilter).Attribute; got != strings.ToUpper(col) {
+			t.Errorf("attribute = %q, want %q", got, strings.ToUpper(col))
+		}
+	}
+}
+
+// A column's name only hints at its filter, so the metric says what the filter was.
+func TestConvert_WHN_DescriptionQuotesTheSQLFilters(t *testing.T) {
+	res := mustConvert(t, sqlFilterSum, Options{LDDataSource: "ld-checkout"})
+	if want := "\nStatsig SQL filter: COALESCE(plan_tier, 0) > 2"; !strings.HasSuffix(res.LDMetric.Description, want) {
+		t.Errorf("Description = %q, want it to end %q", res.LDMetric.Description, want)
+	}
+
+	ratio := mustConvert(t, `{
+	  "type":"user_warehouse","name":"Rev per Visit","id":"Rev per Visit::user_warehouse","directionality":"increase",
+	  "warehouseNative":{"aggregation":"ratio","metricSourceName":"Checkout","valueColumn":"revenue","numeratorAggregation":"sum",
+	    "criteria":[{"type":"metadata","condition":"sql_filter","values":["NOT is_test"]}],
+	    "denominatorMetricSourceName":"Visits","denominatorValueColumn":"visit_id","denominatorAggregation":"count",
+	    "denominatorCriteria":[{"type":"metadata","condition":"sql_filter","values":["LOWER(region) = 'eu'"]}]}}`,
+		Options{SourceMapping: map[string]string{"Checkout": "ld-checkout", "Visits": "ld-visits"}})
+	if want := "\nStatsig numerator SQL filter: NOT is_test\nStatsig denominator SQL filter: LOWER(region) = 'eu'"; !strings.HasSuffix(ratio.LDMetric.Description, want) {
+		t.Errorf("ratio Description = %q, want it to end %q", ratio.LDMetric.Description, want)
+	}
+
+	// LaunchDarkly takes at most 768 characters.
+	long := strings.Replace(sqlFilterSum, `"name":"Pro Rev",`, `"name":"Pro Rev","description":"`+strings.Repeat("x", 740)+`",`, 1)
+	res = mustConvert(t, long, Options{LDDataSource: "ld-checkout"})
+	if strings.Contains(res.LDMetric.Description, "SQL filter") {
+		t.Errorf("Description is %d characters with the filter", len(res.LDMetric.Description))
+	}
 }
