@@ -589,7 +589,7 @@ type dataSourceInfo struct {
 	cols map[string][]string
 	// types maps each data source's columns, by lowercase name, to their types.
 	types map[string]map[string]string
-	// filters lists the SQL filter columns each data source's query adds.
+	// filters lists the SQL filter columns each listed data source's query adds.
 	filters map[string][]warehouse.CustomField
 	fetched bool
 	// constant counts data sources read back as constant-key, not assumed ones.
@@ -631,9 +631,7 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 				if w, ok := warehouse.ParseConstantKeyWrapper(query, whType); ok {
 					query = w.Inner
 				}
-				if filters := warehouse.SQLFiltersIn(query, whType); len(filters) > 0 {
-					info.filters[key] = filters
-				}
+				info.filters[key] = warehouse.SQLFiltersIn(query, whType)
 				for _, c := range jsonutil.GetSlice(cm, "columns") {
 					if m, ok := c.(map[string]any); ok {
 						if name := jsonutil.GetStr(m, "name"); name != "" {

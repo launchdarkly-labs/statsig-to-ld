@@ -78,7 +78,8 @@ type Options struct {
 	DataSourceColumnTypes map[string]map[string]string
 
 	// DataSourceSQLFilters lists, by LD data source key, the SQL filter columns its
-	// query adds, so a filter checks the column warehouse gave it.
+	// query adds, so a filter checks the column warehouse gave it. A key present with
+	// none means the query was read and adds none.
 	DataSourceSQLFilters map[string][]warehouse.CustomField
 }
 

@@ -370,11 +370,12 @@ func TestFetchDataSourceKeys_ReadsSQLFilterColumns(t *testing.T) {
 	list, _ := json.Marshal(map[string]any{"items": []any{
 		ds("wrapped", "SELECT *, 'wrapped' AS LD_EVENT_KEY FROM (\n"+layer+"\n) AS ld_src"),
 		ds("unwrapped", layer),
+		ds("plain", "SELECT * FROM analytics.orders"),
 	}})
 	srv := dataSourceListServer(t, http.StatusOK, string(list))
 	defer srv.Close()
 	ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
-	info, err := fetchDataSourceKeys(context.Background(), ld, map[string]string{"A": "wrapped", "B": "unwrapped"}, "", false, false)
+	info, err := fetchDataSourceKeys(context.Background(), ld, map[string]string{"A": "wrapped", "B": "unwrapped", "C": "plain"}, "", false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,6 +390,10 @@ func TestFetchDataSourceKeys_ReadsSQLFilterColumns(t *testing.T) {
 		if got := info.types[key]; !reflect.DeepEqual(got, map[string]string{"is_test": "BOOLEAN"}) {
 			t.Errorf("types[%s] = %v, want is_test BOOLEAN", key, got)
 		}
+	}
+	// Read with no filter columns, so a filter that needs one has none.
+	if filters, read := info.filters["plain"]; !read || filters != nil {
+		t.Errorf("filters[plain] = %v, %v; want read with none", filters, read)
 	}
 	var opts converter.Options
 	info.apply(&opts)

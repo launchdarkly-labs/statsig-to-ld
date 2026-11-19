@@ -227,3 +227,16 @@ func TestMissingColumns_ReadsBackTrickyQueries(t *testing.T) {
 		})
 	}
 }
+
+// A query names the source's columns before the ones this command adds, which may
+// reuse a name.
+func TestColumnTypes_TakesTheFirstColumnByEachName(t *testing.T) {
+	got := ColumnTypes([]any{
+		map[string]any{"name": "IS_TEST", "type": "TEXT"},
+		map[string]any{"name": "is_test", "type": "BOOLEAN"},
+		map[string]any{"name": "TS"},
+	})
+	if want := map[string]string{"is_test": "TEXT", "ts": ""}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ColumnTypes = %v, want %v", got, want)
+	}
+}

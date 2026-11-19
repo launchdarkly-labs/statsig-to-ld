@@ -260,20 +260,15 @@ func TestConvert_WHN_SQLFilterBecomesClausesOnlyOnColumnsOfTheRightType(t *testi
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := strings.Replace(translatableSum, "NOT is_test AND NOT is_refund", tc.sql, 1)
-			col := statsig.SQLFilterColumn(tc.sql)
 			types := map[string]string{"event": "TEXT", "price_usd": "FIXED", "is_test": tc.colType}
 			res := mustConvert(t, raw, Options{
 				LDDataSource:          "ld-checkout",
-				DataSourceColumns:     map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", "IS_TEST", strings.ToUpper(col)}},
+				DataSourceColumns:     map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", "IS_TEST"}},
 				DataSourceColumnTypes: map[string]map[string]string{"ld-checkout": types},
-				DataSourceSQLFilters:  map[string][]warehouse.CustomField{"ld-checkout": {{Key: col, Formula: tc.sql}}},
 			})
-			if res.IsLossy() {
-				t.Fatalf("LossyReasons=%v", res.LossyReasons)
-			}
-			second := res.LDMetric.Filters.Values[1].(launchdarkly.EventFilter)
-			if usesColumn := second.Attribute == strings.ToUpper(col); usesColumn == tc.clauses {
-				t.Errorf("second clause = %#v, want clauses %v", second, tc.clauses)
+			// Without clauses the filter needs a column, which this data source lacks.
+			if res.IsLossy() == tc.clauses {
+				t.Errorf("lossy = %v, want clauses %v; Filters=%#v", res.IsLossy(), tc.clauses, res.LDMetric.Filters)
 			}
 			if got := SQLFilterClauses(mustMetrics(t, raw))["Checkout"]; !reflect.DeepEqual(got, []string{tc.sql}) {
 				t.Errorf("SQLFilterClauses = %q, want the filter as a candidate for clauses", got)
@@ -302,6 +297,55 @@ func TestConvert_WHN_SQLFilterNeverTakesAnotherFiltersColumn(t *testing.T) {
 				t.Errorf("want lossy with no filter; Filters=%#v", res.LDMetric.Filters)
 			}
 		})
+	}
+}
+
+// warehouse keeps a column for a filter only where it could not show clauses match the
+// same rows, such as with no preview, whose column types are guesses.
+func TestConvert_WHN_SQLFilterUsesTheColumnWarehouseKeptForIt(t *testing.T) {
+	col := statsig.SQLFilterColumn("NOT is_test")
+	res := mustConvert(t, strings.Replace(translatableSum, "NOT is_test AND NOT is_refund", "NOT is_test", 1), Options{
+		LDDataSource:          "ld-checkout",
+		DataSourceColumns:     map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", "IS_TEST", strings.ToUpper(col)}},
+		DataSourceColumnTypes: map[string]map[string]string{"ld-checkout": {"event": "TEXT", "price_usd": "FLOAT", "is_test": "BOOLEAN"}},
+		DataSourceSQLFilters:  map[string][]warehouse.CustomField{"ld-checkout": {{Key: col, Formula: "NOT is_test"}}},
+	})
+	if res.IsLossy() {
+		t.Fatalf("LossyReasons=%v", res.LossyReasons)
+	}
+	if got, want := res.LDMetric.Filters.Values[1], sqlFilterLeaf(strings.ToUpper(col)); !reflect.DeepEqual(got, want) {
+		t.Errorf("second clause = %#v, want %#v", got, want)
+	}
+}
+
+// An earlier version gave every SQL filter a column, so its column says nothing about
+// whether clauses fit, and they win when they do.
+func TestConvert_WHN_SQLFilterPrefersClausesToAHashNamedColumn(t *testing.T) {
+	legacy := "SQL_FILTER_" + strings.ToUpper(hashPrefix("NOT is_test"))
+	for _, tc := range []struct {
+		isTestType, want string
+	}{{"BOOLEAN", "IS_TEST"}, {"FIXED", legacy}} {
+		res := mustConvert(t, strings.Replace(translatableSum, "NOT is_test AND NOT is_refund", "NOT is_test", 1), Options{
+			LDDataSource:          "ld-checkout",
+			DataSourceColumns:     map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", "IS_TEST", legacy}},
+			DataSourceColumnTypes: map[string]map[string]string{"ld-checkout": {"event": "TEXT", "price_usd": "FIXED", "is_test": tc.isTestType}},
+			DataSourceSQLFilters:  map[string][]warehouse.CustomField{"ld-checkout": {{Key: strings.ToLower(legacy), Formula: "NOT is_test"}}},
+		})
+		if res.IsLossy() {
+			t.Fatalf("%s: LossyReasons=%v", tc.isTestType, res.LossyReasons)
+		}
+		if got := res.LDMetric.Filters.Values[1].(launchdarkly.EventFilter).Attribute; got != tc.want {
+			t.Errorf("%s: attribute = %q, want %q", tc.isTestType, got, tc.want)
+		}
+	}
+}
+
+// Once the data source's query is read, a filter it has no column for has none.
+func TestConvert_WHN_SQLFilterMissingFromAReadQueryIsLossy(t *testing.T) {
+	res := mustConvert(t, sqlFilterSum, Options{LDDataSource: "ld-checkout",
+		DataSourceSQLFilters: map[string][]warehouse.CustomField{"ld-checkout": nil}})
+	if !res.IsLossy() || res.LDMetric.Filters != nil {
+		t.Errorf("want lossy with no filter; Filters=%#v", res.LDMetric.Filters)
 	}
 }
 
@@ -416,5 +460,22 @@ func TestConvert_WHN_DescriptionQuotesTheSQLFilters(t *testing.T) {
 	res = mustConvert(t, long, Options{LDDataSource: "ld-checkout"})
 	if strings.Contains(res.LDMetric.Description, "SQL filter") {
 		t.Errorf("Description is %d characters with the filter", len(res.LDMetric.Description))
+	}
+}
+
+// A column the query adds but the column list lacks cannot be filtered on.
+func TestConvert_WHN_SQLFilterPrefersClausesToAColumnMissingFromTheList(t *testing.T) {
+	col := statsig.SQLFilterColumn("NOT is_test")
+	res := mustConvert(t, strings.Replace(translatableSum, "NOT is_test AND NOT is_refund", "NOT is_test", 1), Options{
+		LDDataSource:          "ld-checkout",
+		DataSourceColumns:     map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", "IS_TEST"}},
+		DataSourceColumnTypes: map[string]map[string]string{"ld-checkout": {"event": "TEXT", "price_usd": "FIXED", "is_test": "BOOLEAN"}},
+		DataSourceSQLFilters:  map[string][]warehouse.CustomField{"ld-checkout": {{Key: col, Formula: "NOT is_test"}}},
+	})
+	if res.IsLossy() {
+		t.Fatalf("LossyReasons=%v", res.LossyReasons)
+	}
+	if got := res.LDMetric.Filters.Values[1].(launchdarkly.EventFilter).Attribute; got != "IS_TEST" {
+		t.Errorf("attribute = %q, want the clause on IS_TEST", got)
 	}
 }

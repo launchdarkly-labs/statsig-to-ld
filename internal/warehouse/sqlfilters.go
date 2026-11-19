@@ -69,7 +69,8 @@ func RenumberSQLFilters(c SourceColumns, columns []string, keep ...string) (Sour
 }
 
 // ColumnTypes maps the lowercase name of each column in columns, a data source's
-// column list, to its type. It is nil when the list names none.
+// column list, to its type. A query lists the source's columns before those this
+// command adds, so the first column by a name wins. It is nil when the list names none.
 func ColumnTypes(columns any) map[string]string {
 	var out map[string]string
 	add := func(m map[string]any) {
@@ -77,7 +78,9 @@ func ColumnTypes(columns any) map[string]string {
 			if out == nil {
 				out = map[string]string{}
 			}
-			out[strings.ToLower(name)] = j.GetStr(m, "type")
+			if _, seen := out[strings.ToLower(name)]; !seen {
+				out[strings.ToLower(name)] = j.GetStr(m, "type")
+			}
 		}
 	}
 	switch cols := columns.(type) {

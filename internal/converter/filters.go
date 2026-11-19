@@ -551,6 +551,13 @@ func convertTermCriteria(
 	}
 
 	translated := sqlFilterTranslations(criteria, src.types)
+	// warehouse keeps a column for a filter only where it could not show that clauses
+	// match the same rows, for instance with no preview, whose column types are guesses.
+	for i := range translated {
+		if sql, _ := criteria[i].SQLFilter(); keptSQLFilterColumn(sql, src) {
+			delete(translated, i)
+		}
+	}
 	replaced := map[int][]launchdarkly.EventFilter{}
 	maps.Copy(replaced, translated)
 	for i, c := range criteria {
@@ -620,17 +627,27 @@ func withDescriptionLines(desc, lines string) string {
 }
 
 // termSource is what is known of a term's data source: its columns, their types
-// by lowercase name, and the SQL filter columns its query adds. Columns and types are
-// empty when unknown.
+// by lowercase name, and the SQL filter columns its query adds, which queryRead says
+// were read. Columns and types are empty when unknown.
 type termSource struct {
-	key     string
-	columns []string
-	types   map[string]string
-	filters []warehouse.CustomField
+	key       string
+	columns   []string
+	types     map[string]string
+	filters   []warehouse.CustomField
+	queryRead bool
 }
 
 func (o Options) termSource(dsKey string) termSource {
-	return termSource{key: dsKey, columns: o.DataSourceColumns[dsKey], types: o.DataSourceColumnTypes[dsKey], filters: o.DataSourceSQLFilters[dsKey]}
+	filters, read := o.DataSourceSQLFilters[dsKey]
+	return termSource{key: dsKey, columns: o.DataSourceColumns[dsKey], types: o.DataSourceColumnTypes[dsKey], filters: filters, queryRead: read}
+}
+
+// keptSQLFilterColumn reports whether the data source has a column warehouse named
+// for sql in this version. A hash-named one predates the check on column types.
+func keptSQLFilterColumn(sql string, src termSource) bool {
+	name, found := sqlFilterColumn(sql, src)
+	return found && !strings.EqualFold(name, warehouse.LegacySQLFilterColumn(sql)) &&
+		(len(src.columns) == 0 || containsFold(src.columns, name))
 }
 
 // sqlFilterColumn names the column that holds sql's result. found is true for the
@@ -669,7 +686,7 @@ func missingSQLFilterColumns(criteria []statsig.Criterion, translated map[int][]
 		}
 		f := warehouse.CustomField{Key: name, Formula: sql}
 		bad := warehouse.ValidateSQLFilter(f, "snowflake") != nil
-		if bad || len(src.columns) > 0 {
+		if bad || len(src.columns) > 0 || src.queryRead {
 			missing = append(missing, f.Key)
 			unaddable = unaddable || bad
 		}

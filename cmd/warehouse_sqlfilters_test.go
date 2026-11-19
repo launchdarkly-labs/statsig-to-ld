@@ -633,3 +633,20 @@ func TestPhase3_SQLFilterColumnTheDataSourceHasIsKeptWhenClausesFit(t *testing.T
 		t.Errorf("sqlQuery =\n%v\nwant\n%s (errors %q)", got, want, e.report.Errors)
 	}
 }
+
+// A bare column's filter column has the column's own name, so the preview lists both.
+func TestPhase3_SQLFilterOnATextColumnOfTheSameNameKeepsItsColumn(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"IS_TEST","type":"TEXT"},{"name":"IS_TEST","type":"BOOLEAN"}`}
+	srv := f.server()
+	defer srv.Close()
+
+	e := sqlFilterEngine(t, srv.URL, "is_test")
+	e.sqlFilterClauses = map[string][]string{"Checkout Events": {"is_test"}}
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.created) != 1 || !strings.Contains(fmt.Sprint(f.created[0]["sqlQuery"]), "(is_test) AS is_test_2") {
+		t.Errorf("created = %v, errors=%q; want the filter's column, numbered", f.created, e.report.Errors)
+	}
+}
