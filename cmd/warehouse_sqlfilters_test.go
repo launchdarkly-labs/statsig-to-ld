@@ -53,7 +53,9 @@ func TestPhase1_ExportRecordsTheMetricsSQLFilters(t *testing.T) {
 		case "/metrics/list":
 			w.WriteHeader(metricsStatus)
 			_, _ = io.WriteString(w, `{"data":[{"name":"Pro Revenue","type":"user_warehouse","warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout Events",
-			  "criteria":[{"type":"metadata","condition":"sql_filter","values":["plan_tier > 2"]}]}}],"pagination":{"nextPage":""}}`)
+			  "criteria":[{"type":"metadata","condition":"sql_filter","values":["COALESCE(plan_tier, 0) > 2"]}]}},
+			  {"name":"Real Revenue","type":"user_warehouse","warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout Events",
+			  "criteria":[{"type":"metadata","condition":"sql_filter","values":["NOT is_test"]}]}}],"pagination":{"nextPage":""}}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -64,7 +66,7 @@ func TestPhase1_ExportRecordsTheMetricsSQLFilters(t *testing.T) {
 	if err := e.phase1Export(); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string][]string{"Checkout Events": {"plan_tier > 2"}}
+	want := map[string][]string{"Checkout Events": {"COALESCE(plan_tier, 0) > 2"}}
 	if !reflect.DeepEqual(e.sqlFilters, want) {
 		t.Errorf("sqlFilters = %#v, want %#v", e.sqlFilters, want)
 	}

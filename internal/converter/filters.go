@@ -91,14 +91,19 @@ const (
 )
 
 // SQLFilters lists, by Statsig source name, the SQL filters of the metrics this
-// package converts, each once, in the order first seen.
+// package converts that need a column, each once, in the order first seen. A filter
+// written as LaunchDarkly clauses needs none.
 func SQLFilters(metrics []statsig.Metric) map[string][]string {
 	out := map[string][]string{}
 	add := func(source string, criteria []statsig.Criterion) {
 		if source == "" {
 			return
 		}
-		for _, c := range criteria {
+		translated := sqlFilterTranslations(criteria)
+		for i, c := range criteria {
+			if _, done := translated[i]; done {
+				continue
+			}
 			if sql, ok := c.SQLFilter(); ok && !slices.Contains(out[source], sql) {
 				out[source] = append(out[source], sql)
 			}
@@ -144,8 +149,10 @@ func SQLFilters(metrics []statsig.Metric) map[string][]string {
 // original. A withheld metric is a visible gap; a silently widened one is a wrong
 // answer that survives review.
 //
+// translated holds the clauses that replace SQL filters, by criterion index.
+//
 // Returns (nil, nil) when there are no criteria.
-func criteriaToFilter(criteria []statsig.Criterion) (*launchdarkly.EventFilter, error) {
+func criteriaToFilter(criteria []statsig.Criterion, translated map[int][]launchdarkly.EventFilter) (*launchdarkly.EventFilter, error) {
 	if len(criteria) == 0 {
 		return nil, nil
 	}
@@ -156,10 +163,14 @@ func criteriaToFilter(criteria []statsig.Criterion) (*launchdarkly.EventFilter, 
 	}
 
 	leaves := make([]launchdarkly.EventFilter, 0, len(criteria))
-	for _, c := range criteria {
+	for i, c := range criteria {
 		leaf, err := criterionToLeaf(c)
 		if err != nil {
 			return nil, err
+		}
+		if clauses, ok := translated[i]; ok {
+			leaves = append(leaves, clauses...)
+			continue
 		}
 		leaves = append(leaves, *leaf)
 	}
@@ -509,7 +520,8 @@ func convertTermCriteria(
 		return nil
 	}
 
-	filter, err := criteriaToFilter(criteria)
+	translated := sqlFilterTranslations(criteria)
+	filter, err := criteriaToFilter(criteria, translated)
 	if err != nil {
 		result.addLossy(WarnFilterConditionBlocked, "DATA LOSS: %s %s not applied. %v. This metric would match every row instead of just the filtered subset. Dropped filters: [%s]. Add them by hand in LaunchDarkly if you need them.",
 			criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), err, detail)
@@ -522,7 +534,7 @@ func convertTermCriteria(
 		return nil
 	}
 
-	if missing, unaddable := missingSQLFilterColumns(criteria, columns); len(missing) > 0 {
+	if missing, unaddable := missingSQLFilterColumns(criteria, translated, columns); len(missing) > 0 {
 		if unaddable {
 			result.addLossy(WarnFilterSQLFilterColumn, "DATA LOSS: %s %s not applied. Data source %q has no %s for the result of its Statsig SQL filter, and warehouse cannot add one: the filter uses a Statsig macro, has more than one statement or unbalanced parentheses, or could not be read. Fix it in Statsig, rerun warehouse with --update-custom-fields, then run metrics convert again. Dropped filters: [%s].",
 				criteriaPhrase(len(criteria), termLabel), wasWere(len(criteria)), dsKey, columnPhrase(missing), detail)
@@ -533,7 +545,7 @@ func convertTermCriteria(
 		blocked(FilterBlockedSQLFilterColumn, "sql_filter")
 		return nil
 	}
-	if len(columns) == 0 && slices.ContainsFunc(criteria, func(c statsig.Criterion) bool { _, ok := c.SQLFilter(); return ok }) {
+	if len(columns) == 0 && needsSQLFilterColumn(criteria, translated) {
 		result.addNote(WarnColumnUnverified)
 	}
 
@@ -546,13 +558,24 @@ func convertTermCriteria(
 	return filter
 }
 
+// needsSQLFilterColumn reports whether a SQL filter of the term checks its column.
+func needsSQLFilterColumn(criteria []statsig.Criterion, translated map[int][]launchdarkly.EventFilter) bool {
+	for i, c := range criteria {
+		if _, ok := c.SQLFilter(); ok && translated[i] == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // missingSQLFilterColumns names the SQL filter columns that columns lack, ignoring
-// case, and reports whether warehouse cannot add one. With columns unknown it names
-// only those. Metric filters work only on Snowflake, so the SQL is read as Snowflake's.
-func missingSQLFilterColumns(criteria []statsig.Criterion, columns []string) (missing []string, unaddable bool) {
-	for _, c := range criteria {
+// case, for the filters not in translated, and reports whether warehouse cannot add
+// one. With columns unknown it names only those. Metric filters work only on
+// Snowflake, so the SQL is read as Snowflake's.
+func missingSQLFilterColumns(criteria []statsig.Criterion, translated map[int][]launchdarkly.EventFilter, columns []string) (missing []string, unaddable bool) {
+	for i, c := range criteria {
 		sql, ok := c.SQLFilter()
-		if !ok {
+		if _, done := translated[i]; !ok || done {
 			continue
 		}
 		f := warehouse.SQLFilterColumns([]string{sql})[0]

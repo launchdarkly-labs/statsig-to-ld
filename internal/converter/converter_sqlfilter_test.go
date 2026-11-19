@@ -11,13 +11,13 @@ import (
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 )
 
-var planTierColumn = statsig.SQLFilterColumn("plan_tier > 2")
+var planTierColumn = statsig.SQLFilterColumn("COALESCE(plan_tier, 0) > 2")
 
 const sqlFilterSum = `{
   "type":"user_warehouse","name":"Pro Rev","id":"Pro Rev::user_warehouse","directionality":"increase",
   "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout","valueColumn":"price_usd",
     "criteria":[{"type":"metadata","column":"event","condition":"in","values":["purchase"]},
-                {"type":"metadata","condition":"sql_filter","values":["plan_tier > 2"]}]}}`
+                {"type":"metadata","condition":"sql_filter","values":["COALESCE(plan_tier, 0) > 2"]}]}}`
 
 func sqlFilterLeaf(column string) launchdarkly.EventFilter {
 	return launchdarkly.EventFilter{Type: launchdarkly.EventFilterTypeEventProperty, Attribute: column, Op: ldOpIn, Values: []any{true}}
@@ -94,7 +94,7 @@ func TestConvert_WHN_SQLFilterOnUnknownColumnsIsNotedUnverified(t *testing.T) {
 
 // warehouse never adds a column for a filter it cannot nest, whatever the columns.
 func TestConvert_WHN_SQLFilterWarehouseCannotAddIsLossy(t *testing.T) {
-	raw := strings.Replace(sqlFilterSum, `"plan_tier > 2"`, `"ts > {statsig_start_date}"`, 1)
+	raw := strings.Replace(sqlFilterSum, `"COALESCE(plan_tier, 0) > 2"`, `"ts > {statsig_start_date}"`, 1)
 	for name, cols := range map[string]map[string][]string{
 		"columns unknown": nil,
 		"column missing":  {"ld-checkout": {"EVENT", "PRICE_USD"}},
@@ -127,9 +127,9 @@ func TestConvertRatio_SQLFilterPerTerm(t *testing.T) {
 	  "type":"user_warehouse","name":"Pro Rev per Visit","id":"Pro Rev per Visit::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"ratio",
 	    "metricSourceName":"Checkout","valueColumn":"revenue","numeratorAggregation":"sum",
-	    "criteria":[{"type":"metadata","condition":"sql_filter","values":["plan_tier > 2"]}],
+	    "criteria":[{"type":"metadata","condition":"sql_filter","values":["COALESCE(plan_tier, 0) > 2"]}],
 	    "denominatorMetricSourceName":"Visits","denominatorValueColumn":"visit_id","denominatorAggregation":"count",
-	    "denominatorCriteria":[{"type":"metadata","condition":"sql_filter","values":["is_bot = FALSE"]}]}}`
+	    "denominatorCriteria":[{"type":"metadata","condition":"sql_filter","values":["NOT COALESCE(is_bot, FALSE)"]}]}}`
 	res := mustConvert(t, raw, Options{
 		SourceMapping: map[string]string{"Checkout": "ld-checkout", "Visits": "ld-visits"},
 		DataSourceColumns: map[string][]string{
@@ -143,7 +143,7 @@ func TestConvertRatio_SQLFilterPerTerm(t *testing.T) {
 	if res.LDMetric.Denominator.Filters != nil {
 		t.Errorf("denominator filter needs a column ld-visits lacks, got %#v", res.LDMetric.Denominator.Filters)
 	}
-	assertHasWarning(t, res.LossyReasons, statsig.SQLFilterColumn("is_bot = FALSE"))
+	assertHasWarning(t, res.LossyReasons, statsig.SQLFilterColumn("NOT COALESCE(is_bot, FALSE)"))
 	assertHasWarning(t, res.LossyReasons, `"ld-visits"`)
 }
 
@@ -152,15 +152,18 @@ func TestSQLFilters_ListsEachSourcesFiltersOnce(t *testing.T) {
 		sqlFilterSum,
 		// Same filter, other spacing: the same column.
 		`{"type":"user_warehouse","name":"Pro Count","warehouseNative":{"aggregation":"count","metricSourceName":"Checkout",
-		  "criteria":[{"type":"metadata","condition":"sql_filter","values":["  plan_tier > 2 "]}]}}`,
+		  "criteria":[{"type":"metadata","condition":"sql_filter","values":["  COALESCE(plan_tier, 0) > 2 "]}]}}`,
 		`{"type":"user_warehouse","name":"Ratio","warehouseNative":{"aggregation":"ratio","metricSourceName":"Checkout","numeratorAggregation":"sum",
-		  "criteria":[{"type":"metadata","condition":"sql_filter","values":["region = 'EU'"]}],
+		  "criteria":[{"type":"metadata","condition":"sql_filter","values":["LOWER(region) = 'eu'"]}],
 		  "denominatorMetricSourceName":"Visits","denominatorAggregation":"count",
-		  "denominatorCriteria":[{"type":"metadata","condition":"sql_filter","values":["is_bot = FALSE"]}]}}`,
+		  "denominatorCriteria":[{"type":"metadata","condition":"sql_filter","values":["NOT COALESCE(is_bot, FALSE)"]}]}}`,
 		// A ratio's denominator without a source of its own reads the numerator's.
 		`{"type":"user_warehouse","name":"Same Source Ratio","warehouseNative":{"aggregation":"ratio","metricSourceName":"Visits","numeratorAggregation":"count",
 		  "denominatorAggregation":"count",
-		  "denominatorCriteria":[{"type":"metadata","condition":"sql_filter","values":["is_new = TRUE"]}]}}`,
+		  "denominatorCriteria":[{"type":"metadata","condition":"sql_filter","values":["COALESCE(is_new, FALSE)"]}]}}`,
+		// Written as clauses, so it needs no column.
+		`{"type":"user_warehouse","name":"Non-test Count","warehouseNative":{"aggregation":"count","metricSourceName":"Checkout",
+		  "criteria":[{"type":"metadata","condition":"sql_filter","values":["NOT is_test"]}]}}`,
 		// Not converted, so its filter needs no column.
 		`{"type":"user_warehouse","name":"P90","warehouseNative":{"aggregation":"percentile","metricSourceName":"Checkout",
 		  "criteria":[{"type":"metadata","condition":"sql_filter","values":["price > 0"]}]}}`,
@@ -168,8 +171,8 @@ func TestSQLFilters_ListsEachSourcesFiltersOnce(t *testing.T) {
 		  "criteria":[{"type":"metadata","condition":"sql_filter","values":["x = 1"]}]}]}`,
 	)
 	want := map[string][]string{
-		"Checkout": {"plan_tier > 2", "region = 'EU'"},
-		"Visits":   {"is_bot = FALSE", "is_new = TRUE"},
+		"Checkout": {"COALESCE(plan_tier, 0) > 2", "LOWER(region) = 'eu'"},
+		"Visits":   {"NOT COALESCE(is_bot, FALSE)", "COALESCE(is_new, FALSE)"},
 	}
 	if got := SQLFilters(metrics); !reflect.DeepEqual(got, want) {
 		t.Errorf("SQLFilters = %#v\nwant %#v", got, want)
@@ -185,4 +188,72 @@ func mustMetrics(t *testing.T, raws ...string) []statsig.Metric {
 		}
 	}
 	return out
+}
+
+const translatableSum = `{
+  "type":"user_warehouse","name":"Real Rev","id":"Real Rev::user_warehouse","directionality":"increase",
+  "warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout","valueColumn":"price_usd",
+    "criteria":[{"type":"metadata","column":"event","condition":"in","values":["purchase"]},
+                {"type":"metadata","condition":"sql_filter","values":["NOT is_test AND NOT is_refund"]}]}}`
+
+// A simple SQL filter reads as clauses in LaunchDarkly and needs no added column.
+func TestConvert_WHN_SimpleSQLFilterBecomesClauses(t *testing.T) {
+	res := mustConvert(t, translatableSum, Options{
+		LDDataSource:      "ld-checkout",
+		DataSourceColumns: map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", "IS_TEST", "IS_REFUND"}},
+	})
+	if res.IsLossy() {
+		t.Fatalf("LossyReasons=%v", res.LossyReasons)
+	}
+	want := &launchdarkly.EventFilter{
+		Type: launchdarkly.EventFilterTypeGroup, Op: launchdarkly.EventFilterGroupOpAnd,
+		Values: []any{
+			prop("EVENT", ldOpIn, false, "purchase"),
+			prop("IS_TEST", ldOpIn, false, false),
+			prop("IS_REFUND", ldOpIn, false, false),
+		},
+	}
+	if !reflect.DeepEqual(res.LDMetric.Filters, want) {
+		t.Errorf("Filters = %#v\nwant %#v", res.LDMetric.Filters, want)
+	}
+}
+
+func TestConvert_WHN_SimpleSQLFilterOnUnknownColumnsNeedsNoNote(t *testing.T) {
+	res := mustConvert(t, translatableSum, Options{LDDataSource: "ld-checkout"})
+	if res.IsLossy() || res.LDMetric.Filters == nil {
+		t.Fatalf("want the filter applied; LossyReasons=%v", res.LossyReasons)
+	}
+	if slices.Contains(res.NoteCodes, WarnColumnUnverified) {
+		t.Errorf("NoteCodes = %v, want no %s", res.NoteCodes, WarnColumnUnverified)
+	}
+}
+
+// Over LaunchDarkly's clause limit, the SQL filter checks its column instead.
+func TestConvert_WHN_SQLFilterOverTheClauseLimitKeepsItsColumn(t *testing.T) {
+	sql := "a > 1 AND b > 1 AND c > 1 AND d > 1 AND e > 1 AND f > 1 AND g > 1 AND h > 1 AND i > 1 AND j > 1"
+	raw := strings.Replace(translatableSum, "NOT is_test AND NOT is_refund", sql, 1)
+	col := statsig.SQLFilterColumn(sql)
+	res := mustConvert(t, raw, Options{LDDataSource: "ld-checkout"})
+	if res.IsLossy() || res.LDMetric.Filters == nil || len(res.LDMetric.Filters.Values) != 2 {
+		t.Fatalf("Filters=%#v LossyReasons=%v", res.LDMetric.Filters, res.LossyReasons)
+	}
+	if got := res.LDMetric.Filters.Values[1]; !reflect.DeepEqual(got, sqlFilterLeaf(col)) {
+		t.Errorf("second clause = %#v, want %#v", got, sqlFilterLeaf(col))
+	}
+	metrics := mustMetrics(t, raw)
+	if got := SQLFilters(metrics); !reflect.DeepEqual(got, map[string][]string{"Checkout": {sql}}) {
+		t.Errorf("SQLFilters = %#v, want the filter listed for its column", got)
+	}
+}
+
+// Nothing in warehouse checks a translated filter's columns, so convert does.
+func TestConvert_WHN_SimpleSQLFilterOnAMissingColumnIsLossy(t *testing.T) {
+	res := mustConvert(t, translatableSum, Options{
+		LDDataSource:      "ld-checkout",
+		DataSourceColumns: map[string][]string{"ld-checkout": {"EVENT", "PRICE_USD", "IS_TEST"}},
+	})
+	if !res.IsLossy() {
+		t.Fatal("want lossy: the data source has no is_refund column")
+	}
+	assertHasWarning(t, res.LossyReasons, `"is_refund"`)
 }

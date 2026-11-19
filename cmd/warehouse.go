@@ -126,7 +126,7 @@ func init() {
 	warehouseCmd.Flags().BoolVar(&whFlagOverwrite, "overwrite", false, "Update existing LD metric data sources that lack the constant event key in place: their query, key column, and column list (timestamp, value, and context mappings are kept while the new query returns them). Refuses a data source whose bound metrics use other event keys, whose value column or context kind columns the new query drops while bound metrics use them, or, with --constant-event-key=false, whose key column the new query no longer returns")
 	warehouseCmd.Flags().BoolVar(&whFlagForceOverwrite, "force-overwrite", false, "Like --overwrite, but also updates data sources whose bound metrics use other event keys and would match no rows afterwards; the run still lists those metrics")
 	warehouseCmd.Flags().BoolVar(&whFlagUpdateMappings, "update-mappings", false, "Correct existing LD metric data sources' timestamp, value, and context mappings from the Statsig export")
-	warehouseCmd.Flags().BoolVar(&whFlagCustomFields, "update-custom-fields", false, "Add the Statsig source's custom fields, and a column for each SQL filter its metrics use, to existing data sources this command created without them. A data source whose query was edited in LaunchDarkly is left alone, but a filter column removed there is added back")
+	warehouseCmd.Flags().BoolVar(&whFlagCustomFields, "update-custom-fields", false, "Add the Statsig source's custom fields, and the columns its metrics' SQL filters need, to existing data sources this command created without them. A data source whose query was edited in LaunchDarkly is left alone, but a filter column removed there is added back")
 	warehouseCmd.Flags().BoolVar(&whFlagRemoveUnmapped, "remove-unmapped-contexts", false, "With --update-mappings, also remove context kinds the Statsig export does not map, except those bound metrics use as analysis or randomization units")
 	warehouseCmd.Flags().BoolVar(&whFlagVerbose, "verbose", false, "Show detailed API request/response info")
 	warehouseCmd.Flags().BoolVar(&whFlagNoColor, "no-color", false, "Disable colored output")
@@ -198,7 +198,7 @@ type migrationEngine struct {
 	ldReadable       bool
 
 	updateCustomFields bool
-	// sqlFilters lists the SQL filters of each Statsig source's metrics, by source name.
+	// sqlFilters lists, by Statsig source name, the SQL filters of its metrics that need a column.
 	sqlFilters map[string][]string
 
 	// maintainerMapping is --ld-maintainer-mapping; maintainers holds its resolved
