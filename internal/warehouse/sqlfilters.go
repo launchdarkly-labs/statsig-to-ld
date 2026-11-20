@@ -1,9 +1,12 @@
 package warehouse
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	j "github.com/launchdarkly-labs/statsig-to-ld/internal/jsonutil"
@@ -18,7 +21,7 @@ const (
 	sqlFiltersTail = "\n) AS " + sqlFiltersAlias
 )
 
-var reSQLFilterAlias = regexp.MustCompile(`\) AS (sql_filter_[0-9a-f]{16})`)
+var reSQLFilterAlias = regexp.MustCompile(`\) AS ([A-Za-z_][A-Za-z0-9_]*)`)
 
 // SourceColumns are the columns this command adds to a source's query: its custom
 // fields, then a true/false column for each Statsig SQL filter its metrics use.
@@ -32,13 +35,117 @@ func (c SourceColumns) Empty() bool { return len(c.Fields) == 0 && len(c.Filters
 // All lists the custom fields, then the SQL filters.
 func (c SourceColumns) All() []CustomField { return append(slices.Clone(c.Fields), c.Filters...) }
 
-// SQLFilterColumns gives each SQL filter its column. Formula holds the filter's SQL.
-func SQLFilterColumns(sqls []string) []CustomField {
+// SQLFilterColumns gives each SQL filter a column named after its SQL, numbered from
+// _2 where the name, ignoring case, is an earlier one's or in taken. Formula holds
+// the filter's SQL.
+func SQLFilterColumns(sqls []string, taken ...string) []CustomField {
+	used := usedNames(taken)
 	out := make([]CustomField, 0, len(sqls))
 	for _, sql := range sqls {
-		out = append(out, CustomField{Key: statsig.SQLFilterColumn(sql), Formula: strings.TrimSpace(sql)})
+		sql = strings.TrimSpace(sql)
+		out = append(out, CustomField{Key: freeName(statsig.SQLFilterColumn(sql), used), Formula: sql})
 	}
 	return out
+}
+
+// RenumberSQLFilters renumbers each filter of c whose column columns, a query's
+// result columns, holds more than once, ignoring case, except those named in keep. It
+// reports whether it renamed one.
+func RenumberSQLFilters(c SourceColumns, columns []string, keep ...string) (SourceColumns, bool) {
+	clash := CollidingCustomFields(columns, c.Filters)
+	if len(clash) == 0 {
+		return c, false
+	}
+	used := usedNames(append(slices.Clone(columns), columnNames(c.All())...))
+	c.Filters = slices.Clone(c.Filters)
+	renamed := false
+	for i, f := range c.Filters {
+		if slices.Contains(clash, f.Key) && !slices.Contains(keep, f.Key) {
+			c.Filters[i].Key = freeName(statsig.SQLFilterColumn(f.Formula), used)
+			renamed = true
+		}
+	}
+	return c, renamed
+}
+
+// ColumnTypes maps the lowercase name of each column in columns, a data source's
+// column list, to its type. A query lists the source's columns before those this
+// command adds, so the first column by a name wins. It is nil when the list names none.
+func ColumnTypes(columns any) map[string]string {
+	var out map[string]string
+	add := func(m map[string]any) {
+		if name := j.GetStr(m, "name"); name != "" {
+			if out == nil {
+				out = map[string]string{}
+			}
+			if _, seen := out[strings.ToLower(name)]; !seen {
+				out[strings.ToLower(name)] = j.GetStr(m, "type")
+			}
+		}
+	}
+	switch cols := columns.(type) {
+	case []any:
+		for _, c := range cols {
+			if m, ok := c.(map[string]any); ok {
+				add(m)
+			}
+		}
+	case []map[string]any:
+		for _, m := range cols {
+			add(m)
+		}
+	case []FallbackColumn:
+		for _, c := range cols {
+			add(map[string]any{"name": c.Name, "type": c.Type})
+		}
+	}
+	return out
+}
+
+// SameSQLFilter reports whether a and b are one filter's SQL.
+func SameSQLFilter(a, b string) bool {
+	norm := func(s string) string { return strings.ReplaceAll(strings.TrimSpace(s), "\r\n", "\n") }
+	return norm(a) == norm(b)
+}
+
+func usedNames(names []string) map[string]bool {
+	used := make(map[string]bool, len(names))
+	for _, n := range names {
+		used[strings.ToLower(n)] = true
+	}
+	return used
+}
+
+// freeName returns base, or base numbered from _2, whichever used lacks, and marks
+// it used.
+func freeName(base string, used map[string]bool) string {
+	name := base
+	for n := 2; used[strings.ToLower(name)]; n++ {
+		name = base + "_" + strconv.Itoa(n)
+	}
+	used[strings.ToLower(name)] = true
+	return name
+}
+
+// namedAfter reports whether col is a name this command gives sql's column: its
+// own, numbered, or the hash an earlier version used.
+func namedAfter(col, sql string) bool {
+	base := statsig.SQLFilterColumn(sql)
+	if strings.EqualFold(col, base) || strings.EqualFold(col, LegacySQLFilterColumn(sql)) {
+		return true
+	}
+	if len(col) <= len(base)+1 || !strings.EqualFold(col[:len(base)+1], base+"_") {
+		return false
+	}
+	n, err := strconv.Atoi(col[len(base)+1:])
+	return err == nil && n >= 2 && strconv.Itoa(n) == col[len(base)+1:]
+}
+
+// LegacySQLFilterColumn is the name an earlier version gave sql's column, a hash
+// unique to the SQL.
+func LegacySQLFilterColumn(sql string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(sql)))
+	return "sql_filter_" + hex.EncodeToString(sum[:8])
 }
 
 // ApplySourceColumns adds c to a MapMetricSourceToDataSource body's query. It reports
@@ -127,7 +234,7 @@ func MissingColumns(query, sql string, c SourceColumns, whType string) (missing,
 		return SourceColumns{}, SourceColumns{}, false
 	}
 	merged.Fields = c.Fields
-	merged.Filters = MergeSQLFilters(have, c.Filters)
+	merged.Filters = MergeSQLFilters(have, c.Filters, columnNames(c.Fields)...)
 	if len(merged.Filters) > len(have) {
 		missing.Filters = slices.Clone(merged.Filters[len(have):])
 	}
@@ -152,19 +259,34 @@ func SQLFiltersIn(query, whType string) []CustomField {
 	return have
 }
 
-// MergeSQLFilters returns have, then the filters in want that have lacks.
-func MergeSQLFilters(have, want []CustomField) []CustomField {
+// MergeSQLFilters returns have, then the filters in want whose SQL have lacks,
+// renumbered where have or taken already uses the name, ignoring case.
+func MergeSQLFilters(have, want []CustomField, taken ...string) []CustomField {
+	used := usedNames(append(columnNames(have), taken...))
 	merged := slices.Clone(have)
 	for _, f := range want {
-		if !slices.ContainsFunc(have, func(h CustomField) bool { return h.Key == f.Key }) {
-			merged = append(merged, f)
+		if slices.ContainsFunc(merged, func(h CustomField) bool { return SameSQLFilter(h.Formula, f.Formula) }) {
+			continue
 		}
+		if used[strings.ToLower(f.Key)] {
+			f.Key = freeName(statsig.SQLFilterColumn(f.Formula), used)
+		}
+		used[strings.ToLower(f.Key)] = true
+		merged = append(merged, f)
 	}
 	return merged
 }
 
-// splitSQLFilters undoes the SQL filter layer BuildSourceQuery adds. Each column's
-// name must be the one its SQL hashes to, so an edited filter is not taken for one.
+func columnNames(fields []CustomField) []string {
+	names := make([]string, len(fields))
+	for i, f := range fields {
+		names[i] = f.Key
+	}
+	return names
+}
+
+// splitSQLFilters undoes the SQL filter layer BuildSourceQuery adds. Each column must
+// be named after its SQL, so an edited filter is not taken for one.
 func splitSQLFilters(query, whType string) (string, []CustomField) {
 	if base, filters, ok := readSQLFilters(query, whType); ok {
 		return base, filters
@@ -210,7 +332,7 @@ func nextSQLFilter(s, whType string) (CustomField, int, bool) {
 	}
 	for _, m := range reSQLFilterAlias.FindAllStringSubmatchIndex(s, -1) {
 		sql, col := strings.TrimSpace(s[1:m[0]]), s[m[2]:m[3]]
-		if statsig.SQLFilterColumn(sql) != col {
+		if !namedAfter(col, sql) {
 			continue
 		}
 		if scan, err := scanSQL(sql, whType); err == nil && !scan.unbalanced {

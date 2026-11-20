@@ -2,12 +2,15 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -16,6 +19,7 @@ import (
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/launchdarkly"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/report"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
+	"github.com/launchdarkly-labs/statsig-to-ld/internal/warehouse"
 )
 
 var checkoutMapping = map[string]string{"Checkout Events": "checkout-events", "Page Views": "page-views"}
@@ -350,5 +354,51 @@ func TestProcessMetric_ConstantKeyNotesAreNotWarnings(t *testing.T) {
 	}
 	if n := metricsWithNoteCode(rpt, converter.WarnColumnUnverified); n != 1 {
 		t.Errorf("unverified = %d, want the metric whose data source columns are unknown", n)
+	}
+}
+
+// metrics convert finds a SQL filter's column by its SQL, whatever warehouse named it.
+func TestFetchDataSourceKeys_ReadsSQLFilterColumns(t *testing.T) {
+	sum := sha256.Sum256([]byte("LOWER(region) = 'eu'"))
+	legacy := "sql_filter_" + hex.EncodeToString(sum[:8])
+	layer := "SELECT *, (COALESCE(plan_tier, 0) > 2) AS coalesce_plan_tier_0_gt_2_2, (LOWER(region) = 'eu') AS " + legacy +
+		" FROM (\nSELECT * FROM analytics.orders\n) AS statsig_filters"
+	ds := func(key, sql string) map[string]any {
+		return map[string]any{"key": key, "sqlQuery": sql, "integrationKey": "snowflake-experimentation",
+			"columnMappings": map[string]any{"keyColumn": "LD_EVENT_KEY", "columns": []any{map[string]any{"name": "IS_TEST", "type": "BOOLEAN"}}}}
+	}
+	list, _ := json.Marshal(map[string]any{"items": []any{
+		ds("wrapped", "SELECT *, 'wrapped' AS LD_EVENT_KEY FROM (\n"+layer+"\n) AS ld_src"),
+		ds("unwrapped", layer),
+		ds("plain", "SELECT * FROM analytics.orders"),
+	}})
+	srv := dataSourceListServer(t, http.StatusOK, string(list))
+	defer srv.Close()
+	ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
+	info, err := fetchDataSourceKeys(context.Background(), ld, map[string]string{"A": "wrapped", "B": "unwrapped", "C": "plain"}, "", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []warehouse.CustomField{
+		{Key: "coalesce_plan_tier_0_gt_2_2", Formula: "COALESCE(plan_tier, 0) > 2"},
+		{Key: legacy, Formula: "LOWER(region) = 'eu'"},
+	}
+	for _, key := range []string{"wrapped", "unwrapped"} {
+		if got := info.filters[key]; !reflect.DeepEqual(got, want) {
+			t.Errorf("filters[%s] = %+v, want %+v", key, got, want)
+		}
+		if got := info.types[key]; !reflect.DeepEqual(got, map[string]string{"is_test": "BOOLEAN"}) {
+			t.Errorf("types[%s] = %v, want is_test BOOLEAN", key, got)
+		}
+	}
+	// Read with no filter columns, so a filter that needs one has none.
+	if filters, read := info.filters["plain"]; !read || filters != nil {
+		t.Errorf("filters[plain] = %v, %v; want read with none", filters, read)
+	}
+	var opts converter.Options
+	info.apply(&opts)
+	if !reflect.DeepEqual(opts.DataSourceColumnTypes, info.types) || !reflect.DeepEqual(opts.DataSourceSQLFilters, info.filters) ||
+		!reflect.DeepEqual(opts.DataSourceColumns, info.cols) || !reflect.DeepEqual(opts.ConstantEventKeys, info.keys) {
+		t.Errorf("apply set %+v", opts)
 	}
 }

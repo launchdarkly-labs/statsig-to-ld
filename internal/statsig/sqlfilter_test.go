@@ -2,17 +2,28 @@ package statsig
 
 import "testing"
 
-// warehouse and metrics convert each derive the column name, possibly in different
-// versions, so the scheme is pinned.
-func TestSQLFilterColumn_IsPinnedAndIgnoresSurroundingSpace(t *testing.T) {
-	if got := SQLFilterColumn("plan_tier > 2"); got != "sql_filter_6e4004268a3c8fc1" {
-		t.Errorf("SQLFilterColumn = %q, want sql_filter_6e4004268a3c8fc1", got)
+func TestSQLFilterColumn_NamesTheColumnAfterTheSQL(t *testing.T) {
+	for sql, want := range map[string]string{
+		"COALESCE(plan_tier, 0) > 2":         "coalesce_plan_tier_0_gt_2",
+		"  LOWER(region) = 'eu'\n":           "lower_region_eq_eu",
+		"amount <> 10 OR amount != 20":       "amount_ne_10_or_amount_ne_20",
+		"a >= 1 AND b <= 2 AND c < 3":        "a_ge_1_and_b_le_2_and_c_lt_3",
+		"DATEDIFF('day', signup_ts, ts) < 7": "datediff_day_signup_ts_ts_lt_7",
+		"__x__ IS NOT NULL":                  "x_is_not_null",
+		"1 = 1":                              "sql_1_eq_1",
+		"TRUE":                               "true_filter",
+		"()":                                 "sql_filter",
+	} {
+		if got := SQLFilterColumn(sql); got != want {
+			t.Errorf("SQLFilterColumn(%q) = %q, want %q", sql, got, want)
+		}
 	}
-	if got := SQLFilterColumn("  plan_tier > 2\n"); got != "sql_filter_6e4004268a3c8fc1" {
-		t.Errorf("surrounding space changed the column: %q", got)
-	}
-	if SQLFilterColumn("plan_tier > 3") == SQLFilterColumn("plan_tier > 2") {
-		t.Error("different filters share a column")
+}
+
+func TestSQLFilterColumn_ShortensLongSQLAtAWord(t *testing.T) {
+	got := SQLFilterColumn("COALESCE(first_purchase_amount, 0) + COALESCE(second_purchase_amount, 0) > 100")
+	if want := "coalesce_first_purchase_amount_0_coalesce_second_purchase"; got != want {
+		t.Errorf("SQLFilterColumn = %q, want %q", got, want)
 	}
 }
 

@@ -18,8 +18,8 @@ import (
 
 const (
 	checkoutRawInner  = "SELECT ts, user_id FROM analytics.events WHERE kind = 'checkout'"
-	planTierCol       = "sql_filter_6e4004268a3c8fc1"
-	filterPreviewCols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"SQL_FILTER_6E4004268A3C8FC1","type":"BOOLEAN"}`
+	planTierCol       = "plan_tier_gt_2"
+	filterPreviewCols = `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"PLAN_TIER_GT_2","type":"BOOLEAN"}`
 )
 
 func withFilterLayer(inner string, cols ...string) string {
@@ -30,7 +30,11 @@ func wrappedCheckout(inner string) string {
 	return "SELECT *, 'checkout-events' AS LD_EVENT_KEY FROM (\n" + inner + "\n) AS ld_src"
 }
 
-var planTierExpr = "(plan_tier > 2) AS " + planTierCol
+var (
+	planTierExpr = "(plan_tier > 2) AS " + planTierCol
+	// How #63 named the column.
+	planTierHashExpr = "(plan_tier > 2) AS sql_filter_6e4004268a3c8fc1"
+)
 
 func sqlFilterEngine(t *testing.T, srvURL string, filters ...string) *migrationEngine {
 	e := newPhase3Engine(t, srvURL, false)
@@ -53,7 +57,9 @@ func TestPhase1_ExportRecordsTheMetricsSQLFilters(t *testing.T) {
 		case "/metrics/list":
 			w.WriteHeader(metricsStatus)
 			_, _ = io.WriteString(w, `{"data":[{"name":"Pro Revenue","type":"user_warehouse","warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout Events",
-			  "criteria":[{"type":"metadata","condition":"sql_filter","values":["plan_tier > 2"]}]}}],"pagination":{"nextPage":""}}`)
+			  "criteria":[{"type":"metadata","condition":"sql_filter","values":["COALESCE(plan_tier, 0) > 2"]}]}},
+			  {"name":"Real Revenue","type":"user_warehouse","warehouseNative":{"aggregation":"sum","metricSourceName":"Checkout Events",
+			  "criteria":[{"type":"metadata","condition":"sql_filter","values":["NOT is_test"]}]}}],"pagination":{"nextPage":""}}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -64,9 +70,10 @@ func TestPhase1_ExportRecordsTheMetricsSQLFilters(t *testing.T) {
 	if err := e.phase1Export(); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string][]string{"Checkout Events": {"plan_tier > 2"}}
-	if !reflect.DeepEqual(e.sqlFilters, want) {
-		t.Errorf("sqlFilters = %#v, want %#v", e.sqlFilters, want)
+	want := map[string][]string{"Checkout Events": {"COALESCE(plan_tier, 0) > 2", "NOT is_test"}}
+	wantClauses := map[string][]string{"Checkout Events": {"NOT is_test"}}
+	if !reflect.DeepEqual(e.sqlFilters, want) || !reflect.DeepEqual(e.sqlFilterClauses, wantClauses) {
+		t.Errorf("sqlFilters = %#v, clauses = %#v; want %#v, %#v", e.sqlFilters, e.sqlFilterClauses, want, wantClauses)
 	}
 	files, _ := filepath.Glob("statsig_export_*.json")
 	if len(files) != 1 {
@@ -74,7 +81,7 @@ func TestPhase1_ExportRecordsTheMetricsSQLFilters(t *testing.T) {
 	}
 	loaded := &migrationEngine{exportFile: files[0], state: state.NewMigrationState(false)}
 	loaded.phase1LoadFromFile()
-	if !reflect.DeepEqual(loaded.sqlFilters, want) || len(loaded.report.Warnings) != 0 {
+	if !reflect.DeepEqual(loaded.sqlFilters, want) || !reflect.DeepEqual(loaded.sqlFilterClauses, wantClauses) || len(loaded.report.Warnings) != 0 {
 		t.Errorf("loaded sqlFilters = %#v warnings=%q, want %#v", loaded.sqlFilters, loaded.report.Warnings, want)
 	}
 
@@ -140,7 +147,7 @@ func TestPhase3_SQLFiltersAreAddedToTheQuery(t *testing.T) {
 			if got := f.created[0]["sqlQuery"]; got != tc.want {
 				t.Errorf("sqlQuery =\n%v\nwant\n%s", got, tc.want)
 			}
-			if cols := fmt.Sprint(f.created[0]["columnMappings"].(map[string]any)["columns"]); !strings.Contains(cols, "SQL_FILTER_6E4004268A3C8FC1") {
+			if cols := fmt.Sprint(f.created[0]["columnMappings"].(map[string]any)["columns"]); !strings.Contains(cols, strings.ToUpper(planTierCol)) {
 				t.Errorf("columns = %s, want the SQL filter's column", cols)
 			}
 		})
@@ -266,18 +273,41 @@ func TestPhase3_UpdateCustomFieldsAddsSQLFilterColumns(t *testing.T) {
 }
 
 func TestPhase3_SQLFilterColumnsAlreadyThereAreLeftAlone(t *testing.T) {
+	for name, expr := range map[string]string{"named after the SQL": planTierExpr, "named by #63's hash": planTierHashExpr} {
+		t.Run(name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, list: wrappedCheckoutWithSQL(t, wrappedCheckout(withFilterLayer(checkoutRawInner, expr))), previewCols: filterPreviewCols}
+			srv := f.server()
+			defer srv.Close()
+
+			e := sqlFilterEngine(t, srv.URL)
+			e.updateCustomFields = true
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if f.patchCount != 0 || len(e.report.Notes) != 0 || len(e.report.Warnings) != 0 {
+				t.Errorf("patches=%d notes=%+v warnings=%q", f.patchCount, e.report.Notes, e.report.Warnings)
+			}
+		})
+	}
+}
+
+// A readable name can be one the source's own columns already use.
+func TestPhase3_SQLFilterColumnNamedLikeASourceColumnIsNumbered(t *testing.T) {
 	t.Chdir(t.TempDir())
-	f := &fakeLD{t: t, list: wrappedCheckoutWithSQL(t, wrappedCheckout(withFilterLayer(checkoutRawInner, planTierExpr))), previewCols: filterPreviewCols}
+	f := &fakeLD{t: t, previewCols: filterPreviewCols + `,{"name":"PLAN_TIER_GT_2","type":"BOOLEAN"}`}
 	srv := f.server()
 	defer srv.Close()
 
 	e := sqlFilterEngine(t, srv.URL)
-	e.updateCustomFields = true
 	if err := e.phase3aMigrateDataSources(); err != nil {
 		t.Fatal(err)
 	}
-	if f.patchCount != 0 || len(e.report.Notes) != 0 || len(e.report.Warnings) != 0 {
-		t.Errorf("patches=%d notes=%+v warnings=%q", f.patchCount, e.report.Notes, e.report.Warnings)
+	if len(f.created) != 1 || len(e.report.Errors) != 0 {
+		t.Fatalf("created %d, errors=%q", len(f.created), e.report.Errors)
+	}
+	if got, want := f.created[0]["sqlQuery"], wrappedCheckout(withFilterLayer(checkoutRawInner, "(plan_tier > 2) AS plan_tier_gt_2_2")); got != want {
+		t.Errorf("sqlQuery =\n%v\nwant\n%s", got, want)
 	}
 }
 
@@ -466,5 +496,157 @@ func TestWriteDryRunBodies_IncludesSQLFilters(t *testing.T) {
 	}
 	if cols := fmt.Sprint(bodies[0]["columnMappings"].(map[string]any)["columns"]); !strings.Contains(cols, "map[name:"+planTierCol+" type:BOOLEAN]") {
 		t.Errorf("columns = %s, want the SQL filter's column", cols)
+	}
+}
+
+// clauseEngine plans "NOT is_test", which needs no column when IS_TEST is a boolean.
+func clauseEngine(t *testing.T, srvURL string) *migrationEngine {
+	e := sqlFilterEngine(t, srvURL, "NOT is_test")
+	e.sqlFilterClauses = map[string][]string{"Checkout Events": {"NOT is_test"}}
+	return e
+}
+
+const notIsTestExpr = "(NOT is_test) AS not_is_test"
+
+// The preview shows the column types, which decide whether clauses can stand for the filter.
+func TestPhase3_SQLFilterGetsAColumnOnlyWhenItsColumnTypesDoNotFit(t *testing.T) {
+	for _, tc := range []struct{ name, isTestType, want string }{
+		{"boolean", "BOOLEAN", wantCheckoutSQL},
+		{"number", "FIXED", wrappedCheckout(withFilterLayer(checkoutRawInner, notIsTestExpr))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			f := &fakeLD{t: t, previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"IS_TEST","type":"` + tc.isTestType + `"}`}
+			srv := f.server()
+			defer srv.Close()
+
+			e := clauseEngine(t, srv.URL)
+			if err := e.phase3aMigrateDataSources(); err != nil {
+				t.Fatal(err)
+			}
+			if len(f.created) != 1 || len(e.report.Errors) != 0 {
+				t.Fatalf("created %d, errors=%q", len(f.created), e.report.Errors)
+			}
+			if got := f.created[0]["sqlQuery"]; got != tc.want {
+				t.Errorf("sqlQuery =\n%v\nwant\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPhase3_SQLFilterKeepsItsColumnWithoutAPreview(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, noIntegration: true}
+	srv := f.server()
+	defer srv.Close()
+
+	e := clauseEngine(t, srv.URL)
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.created) != 1 || !strings.Contains(fmt.Sprint(f.created[0]["sqlQuery"]), notIsTestExpr) {
+		t.Errorf("created = %v, want the filter's column", f.created)
+	}
+}
+
+func TestDryRun_StoredColumnTypesDecideWhichSQLFiltersNeedAColumn(t *testing.T) {
+	for _, tc := range []struct {
+		isTestType string
+		adds       bool
+	}{{"BOOLEAN", false}, {"FIXED", true}} {
+		t.Run(tc.isTestType, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			list, err := json.Marshal(map[string]any{"items": []any{map[string]any{
+				"key": "checkout-events", "sqlQuery": wantCheckoutSQL, "columnMappings": map[string]any{
+					"keyColumn": "LD_EVENT_KEY", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"},
+					"columns": []any{map[string]any{"name": "TS", "type": "TIMESTAMP_NTZ"}, map[string]any{"name": "USER_ID", "type": "TEXT"},
+						map[string]any{"name": "IS_TEST", "type": tc.isTestType}, map[string]any{"name": "LD_EVENT_KEY", "type": "TEXT"}},
+				},
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := &fakeLD{t: t, list: string(list), previewCols: filterPreviewCols}
+			srv := f.server()
+			defer srv.Close()
+
+			e := clauseEngine(t, srv.URL)
+			e.dryRun, e.ldReadable, e.updateCustomFields = true, true, true
+			l := e.dryRunDataSources("snowflake")
+			if adds := strings.Contains(strings.Join(l.lines, " "), `adds SQL filter columns "not_is_test"`); adds != tc.adds {
+				t.Errorf("lines = %q, want adds %v", l.lines, tc.adds)
+			}
+		})
+	}
+}
+
+// Renaming a column the data source already has would break the metrics bound to it.
+func TestPhase3_SQLFilterColumnTheDataSourceHasIsNotRenumbered(t *testing.T) {
+	t.Chdir(t.TempDir())
+	list, err := json.Marshal(map[string]any{"items": []any{map[string]any{
+		"key": "checkout-events", "sqlQuery": withFilterLayer(checkoutRawInner, planTierExpr),
+		"columnMappings": map[string]any{"keyColumn": "EVENT_NAME", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}, "columns": []any{}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeLD{t: t, list: string(list), previewCols: filterPreviewCols + `,{"name":"PLAN_TIER_GT_2","type":"BOOLEAN"}`}
+	srv := f.server()
+	defer srv.Close()
+
+	e := sqlFilterEngine(t, srv.URL)
+	e.overwrite = true
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if f.patchCount != 0 || len(e.report.Errors) != 1 || !strings.Contains(e.report.Errors[0], `SQL filter column(s) "plan_tier_gt_2"`) {
+		t.Errorf("patches=%d errors=%q", f.patchCount, e.report.Errors)
+	}
+}
+
+// A column the data source has stays, even once clauses could stand for its filter.
+func TestPhase3_SQLFilterColumnTheDataSourceHasIsKeptWhenClausesFit(t *testing.T) {
+	t.Chdir(t.TempDir())
+	list, err := json.Marshal(map[string]any{"items": []any{map[string]any{
+		"key": "checkout-events", "sqlQuery": withFilterLayer(checkoutRawInner, notIsTestExpr),
+		"columnMappings": map[string]any{"keyColumn": "EVENT_NAME", "timestampColumn": "TS", "contexts": map[string]any{"user": "USER_ID"}, "columns": []any{}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeLD{t: t, list: string(list), previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"IS_TEST","type":"BOOLEAN"}`}
+	srv := f.server()
+	defer srv.Close()
+
+	e := clauseEngine(t, srv.URL)
+	e.overwrite = true
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	var got any
+	for _, op := range f.patches["checkout-events"] {
+		if op.Op != "test" && op.Path == "/sqlQuery" {
+			got = op.Value
+		}
+	}
+	if want := wrappedCheckout(withFilterLayer(checkoutRawInner, notIsTestExpr)); got != want {
+		t.Errorf("sqlQuery =\n%v\nwant\n%s (errors %q)", got, want, e.report.Errors)
+	}
+}
+
+// A bare column's filter column has the column's own name, so the preview lists both.
+func TestPhase3_SQLFilterOnATextColumnOfTheSameNameKeepsItsColumn(t *testing.T) {
+	t.Chdir(t.TempDir())
+	f := &fakeLD{t: t, previewCols: `{"name":"TS","type":"TIMESTAMP_NTZ"},{"name":"USER_ID","type":"TEXT"},{"name":"IS_TEST","type":"TEXT"},{"name":"IS_TEST","type":"BOOLEAN"}`}
+	srv := f.server()
+	defer srv.Close()
+
+	e := sqlFilterEngine(t, srv.URL, "is_test")
+	e.sqlFilterClauses = map[string][]string{"Checkout Events": {"is_test"}}
+	if err := e.phase3aMigrateDataSources(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.created) != 1 || !strings.Contains(fmt.Sprint(f.created[0]["sqlQuery"]), "(is_test) AS is_test_2") {
+		t.Errorf("created = %v, errors=%q; want the filter's column, numbered", f.created, e.report.Errors)
 	}
 }

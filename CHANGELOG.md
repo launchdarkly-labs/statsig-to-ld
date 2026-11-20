@@ -9,13 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Statsig `sql_filter` criteria convert. `warehouse` reads the Statsig metrics and adds each SQL filter on a source to
-  its data source's query as a true/false column, outside the custom fields; `metrics convert` turns the criterion into
-  a filter on that column. The column's name is a hash of the filter's SQL, so the commands need no mapping file. A
-  filter with more than one statement, unbalanced parentheses, or a Statsig macro, or the new filters of a source
-  whose preview fails with them, are left out with one line per run (`sql_filter_unusable`, `sql_filters_preview_failed`), and their metrics
-  stay lossy. `--update-custom-fields` adds the columns to data sources created without them. A metric whose data
-  source lacks the column stays lossy (filter blocked code `sql_filter_column_missing`).
+- Statsig `sql_filter` criteria convert. A filter made of simple column checks joined by AND, OR, and NOT, such as
+  `NOT is_test AND region = 'EU'`, becomes LaunchDarkly filter clauses when each column has a type the clause fits
+  (BOOLEAN for true and false, text for strings, a number type for numbers). For any other, `warehouse` reads the
+  Statsig metrics and adds the filter to its data source's query as a true/false column named after its SQL
+  (`coalesce_plan_tier_0_gt_2`), outside the custom fields. `metrics convert` filters on the column the query gives
+  that SQL, or on a `sql_filter_<hash>` column an earlier build named where clauses do not fit, and quotes each SQL
+  filter in the metric's description. A filter with more than one statement, unbalanced parentheses, or a Statsig macro, or the new filters
+  of a source whose preview fails with them, are left out with one line per run (`sql_filter_unusable`,
+  `sql_filters_preview_failed`), and their metrics stay lossy. `--update-custom-fields` adds the columns to data
+  sources created without them. A metric whose data source lacks the column stays lossy (filter blocked code
+  `sql_filter_column_missing`).
 
 - `warehouse`: Statsig custom fields (a name and a SQL formula on a metric source) are added to the data source's
   query as columns, inside the constant event key wrapper, so metrics that use them have the column. A source fails
