@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `metrics convert`: a warehouse-native metric's Statsig dimension columns become its LaunchDarkly event properties
+  (`slicedEventPropertyColumns`), so experiment results can be sliced by them. LaunchDarkly rejects a whole metric for
+  one bad event property, so only columns it accepts are sent: columns in the data source's column list (in its
+  spelling) that are string, boolean, or integer columns, not the timestamp or a context key column, up to 10 per metric
+  (`--max-event-properties`). The rest are left out with a warning, and the metric is not lossy (codes
+  `event_property_no_data_source`, `event_property_not_in_data_source`, `event_property_unsupported_column`,
+  `event_property_limit`). On an account without event properties, metrics are created without them (code
+  `event_properties_not_enabled`) and the summary counts them. Existing metrics are skipped and do not get them. The
+  report adds `event_property_columns`, and dimension columns are no longer listed under
+  `whn_analysis_features_dropped`.
+
 - Statsig `sql_filter` criteria convert. A filter made of simple column checks joined by AND, OR, and NOT, such as
   `NOT is_test AND region = 'EU'`, becomes LaunchDarkly filter clauses when each column has a type the clause fits
   (BOOLEAN for true and false, text for strings, a number type for numbers). For any other, `warehouse` reads the

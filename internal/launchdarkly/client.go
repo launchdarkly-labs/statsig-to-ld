@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/httputil"
@@ -36,6 +37,23 @@ func (e *ConflictError) Error() string {
 func IsConflict(err error) bool {
 	var target *ConflictError
 	return errors.As(err, &target)
+}
+
+// MetricCreateError is an error status LaunchDarkly answered a metric create with.
+type MetricCreateError struct {
+	Status  int
+	Message string
+	text    string
+}
+
+func (e *MetricCreateError) Error() string { return e.text }
+
+// IsEventPropertiesNotEnabled reports whether LaunchDarkly refused a metric's event
+// properties because the account does not have them enabled.
+func IsEventPropertiesNotEnabled(err error) bool {
+	var target *MetricCreateError
+	return errors.As(err, &target) && target.Status == http.StatusBadRequest &&
+		strings.Contains(target.Message, "`slicedEventPropertyColumns` is not enabled")
 }
 
 // Sentinel errors returned by CreateEnvironment so callers can branch on the
@@ -116,11 +134,11 @@ func (c *Client) CreateMetric(ctx context.Context, metric MetricPost) (*MetricRe
 		if len(errMsg) > 300 {
 			errMsg = errMsg[:300] + "..."
 		}
-		hint := actionableHint(statusCode, errMsg)
-		if hint != "" {
-			return nil, fmt.Errorf("LD API returned HTTP %d: %s — %s", statusCode, errMsg, hint)
+		text := fmt.Sprintf("LD API returned HTTP %d: %s", statusCode, errMsg)
+		if hint := actionableHint(statusCode, errMsg); hint != "" {
+			text += " — " + hint
 		}
-		return nil, fmt.Errorf("LD API returned HTTP %d: %s", statusCode, errMsg)
+		return nil, &MetricCreateError{Status: statusCode, Message: errResp.Message, text: text}
 	}
 
 	var ldResp MetricResponse

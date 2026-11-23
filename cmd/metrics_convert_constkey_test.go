@@ -203,7 +203,7 @@ func TestProcessMetric_UnfilteredConstantKeyMetricSkippedEvenWithConvertLossy(t 
 	defer func() { flagConvertLossy = prev }()
 
 	rpt := report.New()
-	processMetric(context.Background(), filteredCheckoutMetric(), constKeyConvOpts(), nil, rpt, "proj", true, 1, 1, new(int64))
+	processMetric(context.Background(), filteredCheckoutMetric(), constKeyConvOpts(), nil, rpt, "proj", true, 1, 1, new(convertTally))
 
 	if len(rpt.Metrics) != 1 {
 		t.Fatalf("got %d report entries, want 1", len(rpt.Metrics))
@@ -252,7 +252,7 @@ func TestProcessMetric_ExistingMetricWithLegacyEventKeyIsReported(t *testing.T) 
 			}
 			rpt := report.New()
 			ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
-			processMetric(context.Background(), m, constKeyConvOpts(), ld, rpt, "proj", false, 1, 1, new(int64))
+			processMetric(context.Background(), m, constKeyConvOpts(), ld, rpt, "proj", false, 1, 1, new(convertTally))
 
 			if len(rpt.Metrics) != 1 || rpt.Metrics[0].Status != report.StatusSkippedExisting {
 				t.Fatalf("report = %+v, want one skipped_existing entry", rpt.Metrics)
@@ -289,7 +289,7 @@ func TestProcessMetric_ExistingMetricReadBackFailureIsUnverified(t *testing.T) {
 	}
 	rpt := report.New()
 	ld := launchdarkly.NewClient("api-x", "proj", srv.URL)
-	processMetric(context.Background(), m, constKeyConvOpts(), ld, rpt, "proj", false, 1, 1, new(int64))
+	processMetric(context.Background(), m, constKeyConvOpts(), ld, rpt, "proj", false, 1, 1, new(convertTally))
 
 	if len(rpt.Metrics) != 1 || !slices.Equal(rpt.Metrics[0].WarningCodes, []string{converter.WarnExistingMetricUnverified}) {
 		t.Fatalf("report = %+v, want one entry coded %s", rpt.Metrics, converter.WarnExistingMetricUnverified)
@@ -337,11 +337,11 @@ func TestProcessMetric_ConstantKeyNotesAreNotWarnings(t *testing.T) {
 	opts := constKeyConvOpts()
 	opts.RegisteredAnalysisUnits = map[string]bool{"user": true}
 	rpt := report.New()
-	processMetric(context.Background(), m, opts, nil, rpt, "proj", true, 1, 1, new(int64))
+	processMetric(context.Background(), m, opts, nil, rpt, "proj", true, 1, 1, new(convertTally))
 	opts.DataSourceColumns = nil
 	m2 := m
 	m2.Name, m2.ID = "Order Total 2", "Order Total 2::user_warehouse"
-	processMetric(context.Background(), m2, opts, nil, rpt, "proj", true, 1, 1, new(int64))
+	processMetric(context.Background(), m2, opts, nil, rpt, "proj", true, 1, 1, new(convertTally))
 	rpt.Finalize(2)
 
 	if rpt.Converted != 2 {

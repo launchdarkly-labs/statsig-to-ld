@@ -30,7 +30,7 @@ func TestProcessMetric_LossySkippedByDefault(t *testing.T) {
 
 	rpt := report.New()
 	// dry-run so no LD client is needed
-	processMetric(context.Background(), lossyMetric(), converter.Options{}, nil, rpt, "proj", true, 1, 1, new(int64))
+	processMetric(context.Background(), lossyMetric(), converter.Options{}, nil, rpt, "proj", true, 1, 1, new(convertTally))
 
 	if len(rpt.Metrics) != 1 {
 		t.Fatalf("got %d report entries, want 1", len(rpt.Metrics))
@@ -46,7 +46,7 @@ func TestProcessMetric_ConvertLossyFlagConverts(t *testing.T) {
 	defer func() { flagConvertLossy = prev }()
 
 	rpt := report.New()
-	processMetric(context.Background(), lossyMetric(), converter.Options{}, nil, rpt, "proj", true, 1, 1, new(int64))
+	processMetric(context.Background(), lossyMetric(), converter.Options{}, nil, rpt, "proj", true, 1, 1, new(convertTally))
 
 	if len(rpt.Metrics) != 1 {
 		t.Fatalf("got %d report entries, want 1", len(rpt.Metrics))
@@ -78,15 +78,15 @@ func whnNoDataSourceMetric() statsig.Metric {
 
 func TestProcessMetric_CountsNeedsDataSource(t *testing.T) {
 	rpt := report.New()
-	var needsDS int64
+	var tally convertTally
 	// No --ld-data-source in Options → the WHN metric converts but resolves none.
-	processMetric(context.Background(), whnNoDataSourceMetric(), converter.Options{}, nil, rpt, "proj", true, 1, 1, &needsDS)
+	processMetric(context.Background(), whnNoDataSourceMetric(), converter.Options{}, nil, rpt, "proj", true, 1, 1, &tally)
 
 	if rpt.Metrics[0].Status != report.StatusConverted {
 		t.Fatalf("status = %q, want converted", rpt.Metrics[0].Status)
 	}
-	if needsDS != 1 {
-		t.Errorf("needsDataSource count = %d, want 1 (WHN metric with no data source)", needsDS)
+	if tally.needsDataSource != 1 {
+		t.Errorf("needsDataSource count = %d, want 1 (WHN metric with no data source)", tally.needsDataSource)
 	}
 }
 
@@ -105,13 +105,13 @@ func cloudMetric() statsig.Metric {
 
 func TestProcessMetric_CloudMetricDoesNotCountNeedsDataSource(t *testing.T) {
 	rpt := report.New()
-	var needsDS int64
-	processMetric(context.Background(), cloudMetric(), converter.Options{}, nil, rpt, "proj", true, 1, 1, &needsDS)
+	var tally convertTally
+	processMetric(context.Background(), cloudMetric(), converter.Options{}, nil, rpt, "proj", true, 1, 1, &tally)
 
 	if rpt.Metrics[0].Status != report.StatusConverted {
 		t.Fatalf("status = %q, want converted", rpt.Metrics[0].Status)
 	}
-	if needsDS != 0 {
-		t.Errorf("needsDataSource count = %d, want 0 (a converted cloud metric needs no data source)", needsDS)
+	if tally.needsDataSource != 0 {
+		t.Errorf("needsDataSource count = %d, want 0 (a converted cloud metric needs no data source)", tally.needsDataSource)
 	}
 }

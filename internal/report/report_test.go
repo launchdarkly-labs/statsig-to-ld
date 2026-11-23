@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -385,9 +386,37 @@ func TestWriteCSV_BlockingCodesColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	col := slices.Index(records[0], "blocking_codes")
+	if col < 0 || records[1][col] != "constant_event_key_unfiltered" {
+		t.Errorf("header = %v, row = %v", records[0], records[1])
+	}
+}
+
+func TestWriteCSV_EventPropertyColumnsIsTheLastColumn(t *testing.T) {
+	r := New()
+	r.AddConverted("edits", "sum", "edits::sum", "edits-sum", "proj", nil, Diagnostics{EventPropertyColumns: []string{"DEVICE", "PLAN_TIER"}})
+	r.Finalize(1)
+	var buf bytes.Buffer
+	if err := r.WriteCSV(&buf); err != nil {
+		t.Fatal(err)
+	}
+	records, err := csv.NewReader(strings.NewReader(buf.String())).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
 	last := len(records[0]) - 1
-	if records[0][last] != "blocking_codes" || records[1][last] != "constant_event_key_unfiltered" {
+	if records[0][last] != "event_property_columns" || records[1][last] != "DEVICE PLAN_TIER" {
 		t.Errorf("last column = %q / %q", records[0][last], records[1][last])
+	}
+}
+
+func TestRunOptions_RecordsMaxEventProperties(t *testing.T) {
+	raw, err := json.Marshal(RunOptions{MaxEventProperties: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"max_event_properties":12`) {
+		t.Errorf("run options = %s", raw)
 	}
 }
 

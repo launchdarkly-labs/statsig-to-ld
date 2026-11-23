@@ -567,3 +567,34 @@ func TestUpdateMetricDataSource_PatchNotAppliedIsDistinct(t *testing.T) {
 		t.Errorf("err = %v, want the validation error itself", err)
 	}
 }
+
+func TestCreateMetric_EventPropertiesNotEnabledIsDistinct(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"not enabled", http.StatusBadRequest, `{"code":"invalid_input","message":"adding ` + "`slicedEventPropertyColumns`" + ` is not enabled"}`, true},
+		{"other event property problem", http.StatusBadRequest, `{"code":"invalid_input","message":"` + "`slicedEventPropertyColumns`" + ` can have at most 10 columns"}`, false},
+		{"other 400", http.StatusBadRequest, `{"code":"invalid_input","message":"something is not enabled"}`, false},
+		{"not a 400", http.StatusForbidden, `{"code":"forbidden","message":"adding ` + "`slicedEventPropertyColumns`" + ` is not enabled"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			})
+			_, err := client.CreateMetric(context.Background(), MetricPost{Key: "m", SlicedEventPropertyColumns: []string{"DEVICE"}})
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if got := IsEventPropertiesNotEnabled(err); got != tc.want {
+				t.Errorf("IsEventPropertiesNotEnabled(%v) = %v, want %v", err, got, tc.want)
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", tc.status)) {
+				t.Errorf("error = %v, want the status in it", err)
+			}
+		})
+	}
+}

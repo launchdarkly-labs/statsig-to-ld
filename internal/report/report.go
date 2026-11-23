@@ -58,6 +58,7 @@ type RunOptions struct {
 	LDDataSource           string   `json:"ld_data_source,omitempty"`
 	SourceMappingEntries   int      `json:"source_mapping_entries"`
 	UnitTypeMappingEntries int      `json:"unit_type_mapping_entries"`
+	MaxEventProperties     int      `json:"max_event_properties"`
 
 	// MetricSourcesFetched is false when the Statsig metric sources could not be
 	// read, which otherwise looks identical to no source having units to add.
@@ -134,6 +135,9 @@ type Diagnostics struct {
 
 	// AnalysisUnits is the resolved set of LaunchDarkly analysis units.
 	AnalysisUnits []string `json:"analysis_units,omitempty"`
+
+	// EventPropertyColumns are the Statsig dimension columns sent as LaunchDarkly event properties.
+	EventPropertyColumns []string `json:"event_property_columns,omitempty"`
 
 	// StatsigRollupTimeWindow is the metric's effective Statsig rollup window. It
 	// distinguishes a daily-participation rate (lossy) from a one-time or windowed
@@ -344,7 +348,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 		"statsig_name", "statsig_type", "statsig_id", "status", "ld_key", "ld_project", "warnings", "reason",
 		"warning_codes", "lossy_codes", "ld_data_source", "analysis_units",
 		"statsig_rollup_time_window", "statsig_source_name", "filters_applied", "filters_blocked",
-		"blocking_codes",
+		"blocking_codes", "event_property_columns",
 	}
 	if err := cw.Write(header); err != nil {
 		return err
@@ -363,7 +367,8 @@ func (r *Report) WriteCSV(w io.Writer) error {
 		row := []string{m.StatsigName, m.StatsigType, m.StatsigID, m.Status, m.LDKey, m.LDProject, warnings, m.Reason,
 			strings.Join(m.WarningCodes, " "), strings.Join(m.LossyCodes, " "), m.LDDataSource,
 			strings.Join(m.AnalysisUnits, " "), m.StatsigRollupTimeWindow, m.StatsigSourceName,
-			strconv.Itoa(applied), strconv.Itoa(blocked), strings.Join(m.BlockingCodes, " ")}
+			strconv.Itoa(applied), strconv.Itoa(blocked), strings.Join(m.BlockingCodes, " "),
+			strings.Join(m.EventPropertyColumns, " ")}
 		if err := cw.Write(row); err != nil {
 			return err
 		}
