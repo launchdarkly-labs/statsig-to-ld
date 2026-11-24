@@ -67,6 +67,16 @@ func TestEventPropertyColumns_NoColumnsIsNil(t *testing.T) {
 	}
 }
 
+// LaunchDarkly rejects a name when any column by that name breaks a rule.
+func TestEventPropertyColumns_RepeatedNameTakesTheRejection(t *testing.T) {
+	cm := mappingsJSON(t, `{"columns":[
+		{"name":"DEVICE","type":"TEXT"},{"name":"DEVICE","type":"ARRAY<STRING>"},{"name":"PLAN","type":"TEXT"},{"name":"PLAN","type":"TEXT"}]}`)
+	want := []EventPropertyColumn{{Name: "DEVICE", Unsupported: `its type is "ARRAY<STRING>"`}, {Name: "PLAN"}}
+	if got := EventPropertyColumns(cm); !reflect.DeepEqual(got, want) {
+		t.Errorf("EventPropertyColumns = %+v, want %+v", got, want)
+	}
+}
+
 // LaunchDarkly compares names exactly, so only the exact timestamp or key column is ruled out.
 func TestEventPropertyColumns_KeyColumnsMatchExactly(t *testing.T) {
 	cm := mappingsJSON(t, `{"timestampColumn":"ts","contexts":{"user":"user_id"},"columns":[

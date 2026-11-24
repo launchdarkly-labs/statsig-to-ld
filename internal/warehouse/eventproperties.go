@@ -31,7 +31,8 @@ var eventPropertyDecimalTypes = []string{"NUMBER", "DECIMAL", "DEC", "NUMERIC", 
 // EventPropertyColumns applies LaunchDarkly's event property rules to each column in a
 // data source's column mappings: string, boolean and integer columns (a decimal only
 // with scale 0), other than the timestamp and context key columns. LaunchDarkly
-// rejects the whole metric when any of its event properties breaks a rule.
+// rejects the whole metric when any of its event properties breaks a rule, and a
+// name when any column by that name does.
 func EventPropertyColumns(columnMappings map[string]any) []EventPropertyColumn {
 	timestamp := j.GetStr(columnMappings, "timestampColumn")
 	keyColumns := map[string]string{}
@@ -41,6 +42,7 @@ func EventPropertyColumns(columnMappings map[string]any) []EventPropertyColumn {
 		}
 	}
 	var out []EventPropertyColumn
+	seen := map[string]int{}
 	for _, raw := range j.GetSlice(columnMappings, "columns") {
 		c, ok := raw.(map[string]any)
 		if !ok {
@@ -61,6 +63,13 @@ func EventPropertyColumns(columnMappings map[string]any) []EventPropertyColumn {
 		default:
 			col.Unsupported = unsupportedEventPropertyType(j.GetStr(c, "type"), c["scale"])
 		}
+		if i, ok := seen[name]; ok {
+			if out[i].Unsupported == "" {
+				out[i].Unsupported = col.Unsupported
+			}
+			continue
+		}
+		seen[name] = len(out)
 		out = append(out, col)
 	}
 	return out

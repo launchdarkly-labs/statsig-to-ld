@@ -56,6 +56,17 @@ func IsEventPropertiesNotEnabled(err error) bool {
 		strings.Contains(target.Message, "`slicedEventPropertyColumns` is not enabled")
 }
 
+// EventPropertiesRejection returns LaunchDarkly's reason when it refused a metric create
+// over its event properties.
+func EventPropertiesRejection(err error) (string, bool) {
+	var target *MetricCreateError
+	if errors.As(err, &target) && target.Status == http.StatusBadRequest &&
+		strings.Contains(target.Message, "slicedEventPropertyColumns") {
+		return target.Message, true
+	}
+	return "", false
+}
+
 // Sentinel errors returned by CreateEnvironment so callers can branch on the
 // 409 (someone else created it; refetch + reuse) and 403/401 (token lacks env
 // write permission; degrade rule import for that env) cases.

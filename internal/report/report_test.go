@@ -394,7 +394,7 @@ func TestWriteCSV_BlockingCodesColumn(t *testing.T) {
 
 func TestWriteCSV_EventPropertyColumnsIsTheLastColumn(t *testing.T) {
 	r := New()
-	r.AddConverted("edits", "sum", "edits::sum", "edits-sum", "proj", nil, Diagnostics{EventPropertyColumns: []string{"DEVICE", "PLAN_TIER"}})
+	r.AddConverted("edits", "sum", "edits::sum", "edits-sum", "proj", nil, Diagnostics{EventPropertyColumns: []string{"DEVICE", "PLAN TIER"}})
 	r.Finalize(1)
 	var buf bytes.Buffer
 	if err := r.WriteCSV(&buf); err != nil {
@@ -405,7 +405,7 @@ func TestWriteCSV_EventPropertyColumnsIsTheLastColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := len(records[0]) - 1
-	if records[0][last] != "event_property_columns" || records[1][last] != "DEVICE PLAN_TIER" {
+	if records[0][last] != "event_property_columns" || records[1][last] != "DEVICE; PLAN TIER" {
 		t.Errorf("last column = %q / %q", records[0][last], records[1][last])
 	}
 }

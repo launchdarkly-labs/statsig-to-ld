@@ -2,14 +2,15 @@ package converter
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/statsig"
 	"github.com/launchdarkly-labs/statsig-to-ld/internal/warehouse"
 )
 
-// defaultMaxEventProperties is LaunchDarkly's default limit on a metric's event properties.
-const defaultMaxEventProperties = 10
+// DefaultMaxEventProperties is LaunchDarkly's default limit on a metric's event properties.
+const DefaultMaxEventProperties = 10
 
 // eventPropertyColumns picks the Statsig dimension columns that become LaunchDarkly event
 // properties, in Statsig's order, spelled as the data source spells them. LaunchDarkly
@@ -67,7 +68,7 @@ func eventPropertyColumns(result *Result, wn *statsig.WarehouseNative, dsKey str
 
 	limit := opts.MaxEventProperties
 	if limit <= 0 {
-		limit = defaultMaxEventProperties
+		limit = DefaultMaxEventProperties
 	}
 	if len(kept) > limit {
 		result.addWarning(WarnEventPropertyLimit,
@@ -78,15 +79,16 @@ func eventPropertyColumns(result *Result, wn *statsig.WarehouseNative, dsKey str
 	return kept
 }
 
-// findEventPropertyColumn finds col among a data source's columns, preferring one
-// LaunchDarkly accepts, then the exact spelling.
+// findEventPropertyColumn finds col among a data source's columns: the exact spelling,
+// or else one that differs only in case, preferring one LaunchDarkly accepts.
 func findEventPropertyColumn(cols []warehouse.EventPropertyColumn, col string) (warehouse.EventPropertyColumn, bool) {
+	if i := slices.IndexFunc(cols, func(c warehouse.EventPropertyColumn) bool { return c.Name == col }); i >= 0 {
+		return cols[i], true
+	}
 	for _, accepted := range []bool{true, false} {
-		for _, match := range []func(string, string) bool{func(a, b string) bool { return a == b }, strings.EqualFold} {
-			for _, c := range cols {
-				if (c.Unsupported == "") == accepted && match(c.Name, col) {
-					return c, true
-				}
+		for _, c := range cols {
+			if (c.Unsupported == "") == accepted && strings.EqualFold(c.Name, col) {
+				return c, true
 			}
 		}
 	}
@@ -104,6 +106,19 @@ func (r *Result) DropEventPropertiesNotEnabled() {
 	r.addWarning(WarnEventPropertiesNotEnabled,
 		"LaunchDarkly has not enabled event properties for this account, so the metric is created without its Statsig dimension columns %s. Once they are enabled, delete the metric and run again to add them",
 		quoteList(cols))
+}
+
+// DropEventPropertiesRejected removes the metric's event properties after LaunchDarkly
+// rejected them for the given reason, and records why.
+func (r *Result) DropEventPropertiesRejected(reason string) {
+	cols := r.LDMetric.SlicedEventPropertyColumns
+	if len(cols) == 0 {
+		return
+	}
+	r.LDMetric.SlicedEventPropertyColumns = nil
+	r.addWarning(WarnEventPropertiesRejected,
+		"LaunchDarkly rejected the Statsig dimension columns %s (%s), so the metric is created without them. Once the cause is fixed, delete the metric and run again to add them",
+		quoteList(cols), reason)
 }
 
 func quoteList(names []string) string {

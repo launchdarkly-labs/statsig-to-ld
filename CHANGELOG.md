@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`--max-event-properties`). The rest are left out with a warning, and the metric is not lossy (codes
   `event_property_no_data_source`, `event_property_not_in_data_source`, `event_property_unsupported_column`,
   `event_property_limit`). On an account without event properties, metrics are created without them (code
-  `event_properties_not_enabled`) and the summary counts them. Existing metrics are skipped and do not get them. The
+  `event_properties_not_enabled`) and the summary counts them. A metric whose columns LaunchDarkly rejects for another
+  reason is also created without them (code `event_properties_rejected`). Existing metrics are skipped and do not get them. The
   report adds `event_property_columns`, and dimension columns are no longer listed under
   `whn_analysis_features_dropped`.
 

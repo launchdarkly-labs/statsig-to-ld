@@ -220,16 +220,17 @@ LaunchDarkly rejects the whole metric if one column breaks its rules, so the con
 | Column left out when | Warning code |
 |---|---|
 | The metric has no data source | `event_property_no_data_source` |
-| The data source's column list does not have it, ignoring case | `event_property_not_in_data_source` |
+| The data source's column list does not have it, ignoring case (an exact match is used when there is one) | `event_property_not_in_data_source` |
 | It is not a string, boolean, or integer column (a `NUMBER` or `DECIMAL` counts only with a recorded scale of 0), it is the timestamp or a context key column, or its name is longer than 255 characters | `event_property_unsupported_column` |
 | It comes after the first 10 the metric keeps (`--max-event-properties`) | `event_property_limit` |
 
 - **Ratio metrics.** LaunchDarkly slices the numerator only, and the denominator stays whole. The columns are checked against the numerator's data source.
 - **Accounts without event properties.** They must be enabled for the LaunchDarkly account. Where they are not, LaunchDarkly refuses the create. The converter then creates the metric without them (code `event_properties_not_enabled`), stops sending them for the rest of the run, and the summary counts those metrics. A dry run cannot tell.
+- **Other refusals.** If LaunchDarkly still rejects a metric's columns, for example because the account's limit is lower than `--max-event-properties` or the data source's columns changed, that metric is created without them (code `event_properties_rejected`, with LaunchDarkly's reason) and the summary counts it.
 - **Existing metrics** are skipped as usual, so they do not get event properties. Delete one and run again to recreate it with them.
 - **Without LaunchDarkly credentials**, a dry run cannot read the data source's columns. It keeps Statsig's names, up to the limit, and gives the metric the `column_unverified` note.
 
-The report lists each metric's event properties in `event_property_columns`, in JSON and CSV.
+The report lists each metric's event properties in `event_property_columns`, in JSON and CSV (separated by `; `). On a dry run or a skipped metric, it lists the ones that would be sent.
 
 #### Maintainers
 

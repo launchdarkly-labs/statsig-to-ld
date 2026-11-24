@@ -145,8 +145,9 @@ const (
 	WarnEventPropertyNotInDataSource = "event_property_not_in_data_source"
 	WarnEventPropertyUnsupported     = "event_property_unsupported_column"
 	WarnEventPropertyLimit           = "event_property_limit"
-	// Set by the command when LaunchDarkly refuses event properties for the account.
+	// Set by the command when LaunchDarkly refuses event properties for the account, or a metric's.
 	WarnEventPropertiesNotEnabled = "event_properties_not_enabled"
+	WarnEventPropertiesRejected   = "event_properties_rejected"
 )
 
 // FilterOutcome records what happened to one metric term's Statsig filter

@@ -136,7 +136,8 @@ type Diagnostics struct {
 	// AnalysisUnits is the resolved set of LaunchDarkly analysis units.
 	AnalysisUnits []string `json:"analysis_units,omitempty"`
 
-	// EventPropertyColumns are the Statsig dimension columns sent as LaunchDarkly event properties.
+	// EventPropertyColumns are the Statsig dimension columns kept as LaunchDarkly event
+	// properties: sent on a converted metric, and the ones that would be on a dry run or a skip.
 	EventPropertyColumns []string `json:"event_property_columns,omitempty"`
 
 	// StatsigRollupTimeWindow is the metric's effective Statsig rollup window. It
@@ -368,7 +369,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 			strings.Join(m.WarningCodes, " "), strings.Join(m.LossyCodes, " "), m.LDDataSource,
 			strings.Join(m.AnalysisUnits, " "), m.StatsigRollupTimeWindow, m.StatsigSourceName,
 			strconv.Itoa(applied), strconv.Itoa(blocked), strings.Join(m.BlockingCodes, " "),
-			strings.Join(m.EventPropertyColumns, " ")}
+			strings.Join(m.EventPropertyColumns, "; ")}
 		if err := cw.Write(row); err != nil {
 			return err
 		}

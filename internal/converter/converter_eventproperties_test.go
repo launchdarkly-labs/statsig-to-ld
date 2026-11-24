@@ -172,6 +172,21 @@ func TestConvert_WHN_EventPropertyTakesTheColumnLaunchDarklyAccepts(t *testing.T
 	}
 }
 
+// The column Statsig names exactly is the one it sliced by, so a case variant never stands in for it.
+func TestConvert_WHN_EventPropertyExactMatchWinsEvenWhenUnsupported(t *testing.T) {
+	cols := []warehouse.EventPropertyColumn{
+		{Name: "device", Unsupported: `its type is "FLOAT"`},
+		{Name: "DEVICE"},
+	}
+	res := mustConvert(t, dimensionMetric("device"), eventPropertyOpts(cols))
+	if got := res.LDMetric.SlicedEventPropertyColumns; len(got) != 0 {
+		t.Errorf("SlicedEventPropertyColumns = %v, want none", got)
+	}
+	if w := warningWithCode(t, res, WarnEventPropertyUnsupported); !strings.Contains(w, `"device" (its type is "FLOAT")`) {
+		t.Errorf("warning = %q", w)
+	}
+}
+
 func TestConvert_WHN_EventPropertiesNeedADataSource(t *testing.T) {
 	res := mustConvert(t, dimensionMetric("device"), Options{})
 	if got := res.LDMetric.SlicedEventPropertyColumns; got != nil {
@@ -254,5 +269,20 @@ func TestResult_DropEventPropertiesNotEnabled(t *testing.T) {
 	res.DropEventPropertiesNotEnabled()
 	if len(res.Warnings) != before {
 		t.Errorf("a metric without event properties got another warning: %v", res.Warnings)
+	}
+}
+
+func TestResult_DropEventPropertiesRejected(t *testing.T) {
+	res := mustConvert(t, dimensionMetric("device", "plan_tier"), eventPropertyOpts(fileEventColumns))
+	res.DropEventPropertiesRejected("`slicedEventPropertyColumns` can have at most 1 columns")
+	if got := res.LDMetric.SlicedEventPropertyColumns; got != nil {
+		t.Errorf("SlicedEventPropertyColumns = %v, want none", got)
+	}
+	w := warningWithCode(t, res, WarnEventPropertiesRejected)
+	if !strings.Contains(w, `"DEVICE", "PLAN_TIER"`) || !strings.Contains(w, "can have at most 1 columns") {
+		t.Errorf("warning = %q, want the columns and LaunchDarkly's reason", w)
+	}
+	if len(res.Warnings) != len(res.WarningCodes) {
+		t.Errorf("Warnings and WarningCodes out of step: %v / %v", res.Warnings, res.WarningCodes)
 	}
 }

@@ -121,7 +121,7 @@ func init() {
 	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Migration report path")
 	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
 	convertCmd.Flags().StringVar(&flagDefaultUnit, "default-unit", "", "Unit of measure for numeric metrics (default \"units\")")
-	convertCmd.Flags().IntVar(&flagMaxEventProps, "max-event-properties", 10, "Most Statsig dimension columns kept per metric")
+	convertCmd.Flags().IntVar(&flagMaxEventProps, "max-event-properties", converter.DefaultMaxEventProperties, "Most Statsig dimension columns kept per metric")
 
 	convertCmd.Flags().StringVar(&flagIncludeTags, "include-tags", "", "Only convert these Statsig tags (comma-separated)")
 	convertCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert these Statsig types (comma-separated)")
@@ -469,10 +469,15 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		fmt.Println("   rerun with --ld-key and --ld-project once `warehouse` has created the data sources.")
 	}
 
-	if n := atomic.LoadInt64(&tally.withoutEventProperties); n > 0 {
+	if n := tally.withoutEventProperties.Load(); n > 0 {
 		fmt.Printf("\n⚠  %d metric(s) were created without their Statsig dimension columns, because\n", n)
 		fmt.Println("   LaunchDarkly has not enabled event properties for this account. Once it has,")
 		fmt.Println("   delete those metrics and run again to create them with their event properties.")
+	}
+	if n := tally.eventPropertiesRejected.Load(); n > 0 {
+		fmt.Printf("\n⚠  %d metric(s) were created without their Statsig dimension columns, because\n", n)
+		fmt.Println("   LaunchDarkly rejected them. Each one's event_properties_rejected warning in the")
+		fmt.Println("   report gives LaunchDarkly's reason.")
 	}
 
 	// Warehouse-native and ratio metrics need a LaunchDarkly data source. Call
@@ -800,8 +805,9 @@ type convertTally struct {
 	needsDataSource int64 // converted WHN/ratio metrics with no data source bound
 	// eventPropertiesRefused is set once LaunchDarkly refuses event properties for the
 	// account, so later creates leave them out instead of failing first.
-	eventPropertiesRefused atomic.Bool
-	withoutEventProperties int64
+	eventPropertiesRefused  atomic.Bool
+	withoutEventProperties  atomic.Int64
+	eventPropertiesRejected atomic.Int64
 }
 
 // processMetric handles a single metric: convert → create → record in report.
@@ -899,20 +905,25 @@ func processMetric(
 		return
 	}
 
-	// An account without event properties still gets the metric, without them.
-	dropped := false
-	if tally.eventPropertiesRefused.Load() && len(result.LDMetric.SlicedEventPropertyColumns) > 0 {
+	// A metric whose event properties LaunchDarkly refuses is still created, without them.
+	notEnabled := tally.eventPropertiesRefused.Load() && len(result.LDMetric.SlicedEventPropertyColumns) > 0
+	if notEnabled {
 		result.DropEventPropertiesNotEnabled()
-		dropped = true
 	}
+	rejected := false
 	_, createErr := ldClient.CreateMetric(ctx, result.LDMetric)
-	if !dropped && launchdarkly.IsEventPropertiesNotEnabled(createErr) {
-		tally.eventPropertiesRefused.Store(true)
-		result.DropEventPropertiesNotEnabled()
-		dropped = true
+	if reason, ok := launchdarkly.EventPropertiesRejection(createErr); ok && len(result.LDMetric.SlicedEventPropertyColumns) > 0 {
+		if launchdarkly.IsEventPropertiesNotEnabled(createErr) {
+			tally.eventPropertiesRefused.Store(true)
+			result.DropEventPropertiesNotEnabled()
+			notEnabled = true
+		} else {
+			result.DropEventPropertiesRejected(reason)
+			rejected = true
+		}
 		_, createErr = ldClient.CreateMetric(ctx, result.LDMetric)
 	}
-	if dropped {
+	if notEnabled || rejected {
 		diag = buildDiagnostics(sg, result)
 	}
 	if createErr != nil {
@@ -947,8 +958,11 @@ func processMetric(
 	if needsDataSource {
 		atomic.AddInt64(&tally.needsDataSource, 1)
 	}
-	if dropped {
-		atomic.AddInt64(&tally.withoutEventProperties, 1)
+	if notEnabled {
+		tally.withoutEventProperties.Add(1)
+	}
+	if rejected {
+		tally.eventPropertiesRejected.Add(1)
 	}
 	if flagVerbose {
 		status := "OK"
