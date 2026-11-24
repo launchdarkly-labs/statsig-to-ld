@@ -318,6 +318,9 @@ Many of these mark a conversion **lossy**: by default the metric is skipped (`sk
 | `N mapped data source(s) do not have the constant event key` | High | One line at the start of the run. Warehouse-native metrics on those data sources keep their Statsig event keys, which usually match none of their rows. Run `warehouse --overwrite` first to add the constant event key, then rerun `metrics convert`. |
 | `... is not a column of the bound LaunchDarkly data source` (code `column_not_in_data_source`) | Medium | Lossy — skipped by default. A value, count-distinct, or filter column from Statsig is not in the data source's column list. Check the Statsig column name against the data source's columns in LD. |
 | (note code `constant_event_key`) | Info | Not printed; in `note_codes` only. The term's event key is its data source's constant event key, the expected outcome on a constant-key data source. |
+| `Statsig dimension columns ... not carried over` (codes `event_property_no_data_source`, `event_property_not_in_data_source`, `event_property_unsupported_column`, `event_property_limit`) | Low | Not lossy: the metric is created without those event properties, and its results are unchanged. LD rejects a whole metric for one bad event property column, so the converter leaves out columns that are not in the data source, are not string, boolean, or integer columns, are the timestamp or a context key column, or come after the first 10. Bind a data source, fix the data source's column list, or pass `--max-event-properties` if LD raised the account's limit. |
+| `N metric(s) were created without their Statsig dimension columns` (code `event_properties_not_enabled`) | Medium | A note at the end of the run summary. LD has not enabled event properties for the account, so the run creates metrics without them. Once they are enabled, delete those metrics and rerun. |
+| `LaunchDarkly rejected the Statsig dimension columns ...` (code `event_properties_rejected`) | Medium | Counted in a note at the end of the run summary. LD refused this metric's columns for another reason, quoted in the warning (often an account limit below `--max-event-properties`), so the metric was created without them. Fix the cause, delete the metric, and rerun. |
 | `no LD data source specified` | Medium | Warehouse-native metric is being created without a data source binding. Fix: run `statsig-to-ld warehouse` first (it creates the data sources and writes `source-mapping.json`), then re-run `metrics convert --source-mapping source-mapping.json`. If the data sources already exist (set up by hand or via Terraform), pass `--ld-data-source` or `--source-mapping` directly. |
 
 ## Subcommand: warehouse
@@ -473,6 +476,10 @@ cat migration-report.json | jq -r '.metrics[] | select(.ld_data_source == null a
 
 # analysis unit distribution (which metrics are analyzed at a non-user grain)
 cat migration-report.json | jq -r '.metrics[].analysis_units[]?' | sort | uniq -c | sort -rn
+
+# event properties: metrics that got some, and why Statsig dimension columns were left out
+cat migration-report.json | jq '[.metrics[] | select(.status == "converted" and .event_property_columns)] | length'
+cat migration-report.json | jq -r '.metrics[].warning_codes[]? | select(startswith("event_propert"))' | sort | uniq -c | sort -rn
 
 # daily participation: split the lossy rate from the clean one-time/windowed rollups
 cat migration-report.json | jq -r '.metrics[] | select(.statsig_type == "daily_participation") | .statsig_rollup_time_window // "(unset = rate)"' | sort | uniq -c | sort -rn

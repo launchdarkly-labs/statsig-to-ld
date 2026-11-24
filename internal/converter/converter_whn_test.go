@@ -204,14 +204,15 @@ func TestConvert_WHN_Ratio_FlatDenominatorColumn(t *testing.T) {
 }
 
 func TestConvert_WHN_AdvancedFields_AdvisoryVsLossy(t *testing.T) {
-	// CUPED + dimension columns are analysis-only → advisory (not lossy);
-	// valueThreshold changes the numbers → lossy.
+	// CUPED is analysis-only → advisory (not lossy); valueThreshold changes the
+	// numbers → lossy.
 	raw := `{
 	  "type":"user_warehouse","name":"Adv","id":"Adv::user_warehouse","directionality":"increase",
 	  "warehouseNative":{"aggregation":"sum","metricSourceName":"S","valueColumn":"v",
 	    "cupedAttributionWindow":7,"metricDimensionColumns":["product","page"],"valueThreshold":100}}`
 	res := mustConvert(t, raw, Options{LDDataSource: "snowflake-ds"})
-	assertHasWarning(t, res.Warnings, "not carried over") // cuped + dimensions advisory
+	assertHasWarning(t, res.Warnings, "not carried over to LaunchDarkly (metric definition is unaffected): CUPED attribution window")
+	assertNoWarning(t, res.Warnings, "metric dimension columns")
 	if !res.IsLossy() {
 		t.Error("valueThreshold should mark the conversion lossy")
 	}

@@ -86,6 +86,7 @@ var (
 	flagList            bool
 	flagDumpRaw         string
 	flagAssumeConstKey  bool
+	flagMaxEventProps   int
 )
 
 func init() {
@@ -120,6 +121,7 @@ func init() {
 	convertCmd.Flags().StringVar(&flagOutput, "output", "migration-report.json", "Migration report path")
 	convertCmd.Flags().StringVar(&flagFormat, "format", "json", "Report format: json or csv")
 	convertCmd.Flags().StringVar(&flagDefaultUnit, "default-unit", "", "Unit of measure for numeric metrics (default \"units\")")
+	convertCmd.Flags().IntVar(&flagMaxEventProps, "max-event-properties", converter.DefaultMaxEventProperties, "Most Statsig dimension columns kept per metric")
 
 	convertCmd.Flags().StringVar(&flagIncludeTags, "include-tags", "", "Only convert these Statsig tags (comma-separated)")
 	convertCmd.Flags().StringVar(&flagIncludeTypes, "include-types", "", "Only convert these Statsig types (comma-separated)")
@@ -170,6 +172,9 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	}
 	if flagConcurrency < 1 {
 		return fmt.Errorf("--concurrency must be at least 1")
+	}
+	if flagMaxEventProps < 1 {
+		return fmt.Errorf("--max-event-properties must be at least 1")
 	}
 	flagLDURL = strings.TrimRight(flagLDURL, "/")
 	flagStatsigURL = strings.TrimRight(flagStatsigURL, "/")
@@ -277,6 +282,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		UnitTypeMapping:    unitTypeMapping,
 		WidenAnalysisUnits: flagWidenUnits,
 		ExtraAnalysisUnits: parseCommaSeparated(flagExtraUnits),
+		MaxEventProperties: flagMaxEventProps,
 	}
 
 	// Built on a dry run too: the analysis-unit lookup below is read-only.
@@ -383,6 +389,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		LDDataSource:            flagLDDataSource,
 		SourceMappingEntries:    len(sourceMapping),
 		UnitTypeMappingEntries:  len(unitTypeMapping),
+		MaxEventProperties:      flagMaxEventProps,
 		MetricSourcesFetched:    len(convOpts.SourceUnitTypes) > 0,
 		RegisteredAnalysisUnits: sortedKeys(convOpts.RegisteredAnalysisUnits),
 		AssumeConstantEventKey:  flagAssumeConstKey,
@@ -391,7 +398,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		ConstantKeyDataSources:  dsInfo.constant,
 	}
 	total := len(metrics)
-	var needsDataSource int64 // converted WHN/ratio metrics with no data source bound
+	var tally convertTally
 
 	if total > 0 && !flagVerbose {
 		fmt.Fprintf(os.Stderr, "Processing %d metrics [.=ok  S=incompatible  L=lossy  E=exists  X=fail]: ", total)
@@ -400,7 +407,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	if flagDryRun || total <= 1 {
 		// Sequential for dry-run, single metric, or empty
 		for i, sg := range metrics {
-			processMetric(ctx, sg, convOpts, ldClient, rpt, flagLDProject, flagDryRun, i+1, total, &needsDataSource)
+			processMetric(ctx, sg, convOpts, ldClient, rpt, flagLDProject, flagDryRun, i+1, total, &tally)
 		}
 	} else {
 		// Parallel for bulk non-dry-run
@@ -422,7 +429,7 @@ func runConvert(cmd *cobra.Command, args []string) error {
 				defer wg.Done()
 				defer func() { <-sem }() // release
 				n := int(atomic.AddInt64(&processed, 1))
-				processMetric(ctx, sg, convOpts, ldClient, rpt, flagLDProject, false, n, total, &needsDataSource)
+				processMetric(ctx, sg, convOpts, ldClient, rpt, flagLDProject, false, n, total, &tally)
 			}(sg)
 		}
 		wg.Wait()
@@ -462,10 +469,21 @@ func runConvert(cmd *cobra.Command, args []string) error {
 		fmt.Println("   rerun with --ld-key and --ld-project once `warehouse` has created the data sources.")
 	}
 
+	if n := tally.withoutEventProperties.Load(); n > 0 {
+		fmt.Printf("\n⚠  %d metric(s) were created without their Statsig dimension columns, because\n", n)
+		fmt.Println("   LaunchDarkly has not enabled event properties for this account. Once it has,")
+		fmt.Println("   delete those metrics and run again to create them with their event properties.")
+	}
+	if n := tally.eventPropertiesRejected.Load(); n > 0 {
+		fmt.Printf("\n⚠  %d metric(s) were created without their Statsig dimension columns, because\n", n)
+		fmt.Println("   LaunchDarkly rejected them. Each one's event_properties_rejected warning in the")
+		fmt.Println("   report gives LaunchDarkly's reason.")
+	}
+
 	// Warehouse-native and ratio metrics need a LaunchDarkly data source. Call
 	// this out prominently: on a dry run the report shows them as converted, but
 	// a real run rejects ratio metrics (HTTP 400) and creates the rest unbound.
-	if n := atomic.LoadInt64(&needsDataSource); n > 0 {
+	if n := atomic.LoadInt64(&tally.needsDataSource); n > 0 {
 		fmt.Printf("\n⚠  %d converted metric(s) resolved no LaunchDarkly data source.\n", n)
 		fmt.Println("   Warehouse-native metrics need one to collect data, and ratio metrics are")
 		fmt.Println("   rejected without it (HTTP 400). Bind them with --ld-data-source <key> or")
@@ -591,7 +609,9 @@ type dataSourceInfo struct {
 	types map[string]map[string]string
 	// filters lists the SQL filter columns each listed data source's query adds.
 	filters map[string][]warehouse.CustomField
-	fetched bool
+	// eventProps says which of each listed data source's columns can be event properties.
+	eventProps map[string][]warehouse.EventPropertyColumn
+	fetched    bool
 	// constant counts data sources read back as constant-key, not assumed ones.
 	constant int
 	assumed  []string
@@ -601,12 +621,14 @@ type dataSourceInfo struct {
 func (d dataSourceInfo) apply(opts *converter.Options) {
 	opts.ConstantEventKeys, opts.DataSourceColumns = d.keys, d.cols
 	opts.DataSourceColumnTypes, opts.DataSourceSQLFilters = d.types, d.filters
+	opts.DataSourceEventPropertyColumns = d.eventProps
 }
 
 // fetchDataSourceKeys reads each LD data source's constant event key and columns. With
 // assume, mapped data sources LaunchDarkly cannot report on count as constant-key.
 func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sourceMapping map[string]string, defaultDS string, assume, dryRun bool) (dataSourceInfo, error) {
-	info := dataSourceInfo{keys: map[string]string{}, cols: map[string][]string{}, types: map[string]map[string]string{}, filters: map[string][]warehouse.CustomField{}}
+	info := dataSourceInfo{keys: map[string]string{}, cols: map[string][]string{}, types: map[string]map[string]string{},
+		filters: map[string][]warehouse.CustomField{}, eventProps: map[string][]warehouse.EventPropertyColumn{}}
 	listed := map[string]bool{}
 	if ldClient != nil {
 		list, err := ldClient.ListMetricDataSources(ctx)
@@ -642,6 +664,7 @@ func fetchDataSourceKeys(ctx context.Context, ldClient *launchdarkly.Client, sou
 				if types := warehouse.ColumnTypes(jsonutil.GetSlice(cm, "columns")); types != nil {
 					info.types[key] = types
 				}
+				info.eventProps[key] = warehouse.EventPropertyColumns(cm)
 			}
 		}
 	}
@@ -777,6 +800,16 @@ func buildSourceUnitTypes(sources []statsig.MetricSourceConfig) map[string][]str
 	return out
 }
 
+// convertTally is the state a run's metric workers share.
+type convertTally struct {
+	needsDataSource int64 // converted WHN/ratio metrics with no data source bound
+	// eventPropertiesRefused is set once LaunchDarkly refuses event properties for the
+	// account, so later creates leave them out instead of failing first.
+	eventPropertiesRefused  atomic.Bool
+	withoutEventProperties  atomic.Int64
+	eventPropertiesRejected atomic.Int64
+}
+
 // processMetric handles a single metric: convert → create → record in report.
 // In verbose mode, prints detailed per-metric lines. In non-verbose mode,
 // prints a single character per metric: . (ok), S (incompatible), L (lossy),
@@ -790,7 +823,7 @@ func processMetric(
 	ldProject string,
 	dryRun bool,
 	current, total int,
-	needsDataSourceCount *int64,
+	tally *convertTally,
 ) {
 	progress := fmt.Sprintf("[%d/%d]", current, total)
 
@@ -858,7 +891,7 @@ func processMetric(
 	if dryRun {
 		rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings, diag)
 		if needsDataSource {
-			atomic.AddInt64(needsDataSourceCount, 1)
+			atomic.AddInt64(&tally.needsDataSource, 1)
 		}
 		if flagVerbose {
 			status := "OK"
@@ -872,7 +905,27 @@ func processMetric(
 		return
 	}
 
+	// A metric whose event properties LaunchDarkly refuses is still created, without them.
+	notEnabled := tally.eventPropertiesRefused.Load() && len(result.LDMetric.SlicedEventPropertyColumns) > 0
+	if notEnabled {
+		result.DropEventPropertiesNotEnabled()
+	}
+	rejected := false
 	_, createErr := ldClient.CreateMetric(ctx, result.LDMetric)
+	if reason, ok := launchdarkly.EventPropertiesRejection(createErr); ok && len(result.LDMetric.SlicedEventPropertyColumns) > 0 {
+		if launchdarkly.IsEventPropertiesNotEnabled(createErr) {
+			tally.eventPropertiesRefused.Store(true)
+			result.DropEventPropertiesNotEnabled()
+			notEnabled = true
+		} else {
+			result.DropEventPropertiesRejected(reason)
+			rejected = true
+		}
+		_, createErr = ldClient.CreateMetric(ctx, result.LDMetric)
+	}
+	if notEnabled || rejected {
+		diag = buildDiagnostics(sg, result)
+	}
 	if createErr != nil {
 		if launchdarkly.IsConflict(createErr) {
 			var warnings, codes []string
@@ -903,7 +956,13 @@ func processMetric(
 
 	rpt.AddConverted(sg.Name, effType, sg.ID, result.LDMetric.Key, ldProject, result.Warnings, diag)
 	if needsDataSource {
-		atomic.AddInt64(needsDataSourceCount, 1)
+		atomic.AddInt64(&tally.needsDataSource, 1)
+	}
+	if notEnabled {
+		tally.withoutEventProperties.Add(1)
+	}
+	if rejected {
+		tally.eventPropertiesRejected.Add(1)
 	}
 	if flagVerbose {
 		status := "OK"
@@ -1047,6 +1106,7 @@ func buildDiagnostics(sg statsig.Metric, result *converter.Result) report.Diagno
 		AnalysisUnits:           result.LDMetric.AnalysisUnits,
 		StatsigRollupTimeWindow: sg.EffectiveRollupTimeWindow(),
 		StatsigSourceName:       sg.NumeratorSourceName(),
+		EventPropertyColumns:    result.LDMetric.SlicedEventPropertyColumns,
 	}
 	if result.LDMetric.DataSource != nil {
 		diag.LDDataSource = result.LDMetric.DataSource.Key

@@ -81,6 +81,15 @@ type Options struct {
 	// query adds, so a filter checks the column warehouse gave it. A key present with
 	// none means the query was read and adds none.
 	DataSourceSQLFilters map[string][]warehouse.CustomField
+
+	// DataSourceEventPropertyColumns lists, by LD data source key, its columns and whether
+	// LaunchDarkly accepts each as an event property. A key is present for every data
+	// source LaunchDarkly listed; without one, Statsig's column names go unchecked.
+	DataSourceEventPropertyColumns map[string][]warehouse.EventPropertyColumn
+
+	// MaxEventProperties caps a metric's event properties. Zero means LaunchDarkly's
+	// default limit of 10.
+	MaxEventProperties int
 }
 
 // Warning codes are stable identifiers for the diagnostics the converter emits.
@@ -130,6 +139,15 @@ const (
 	WarnFilterConditionBlocked   = "filter_condition_unsupported"
 	WarnFilterDuplicateLocations = "filter_criteria_in_two_locations"
 	WarnFilterSQLFilterColumn    = "filter_sql_filter_column_missing"
+
+	// Statsig dimension columns that did not become LaunchDarkly event properties.
+	WarnEventPropertyNoDataSource    = "event_property_no_data_source"
+	WarnEventPropertyNotInDataSource = "event_property_not_in_data_source"
+	WarnEventPropertyUnsupported     = "event_property_unsupported_column"
+	WarnEventPropertyLimit           = "event_property_limit"
+	// Set by the command when LaunchDarkly refuses event properties for the account, or a metric's.
+	WarnEventPropertiesNotEnabled = "event_properties_not_enabled"
+	WarnEventPropertiesRejected   = "event_properties_rejected"
 )
 
 // FilterOutcome records what happened to one metric term's Statsig filter
@@ -552,6 +570,9 @@ func Convert(sg *statsig.Metric, opts Options) (*Result, error) {
 		m := &result.LDMetric
 		alignTermColumns(result, opts, m.DataSource.Key, "", sg.IsWarehouseNative() && hasConstKey, &m.ValueColumn, &m.UnitAggregationField, m.Filters)
 	}
+	if sg.IsWarehouseNative() {
+		result.LDMetric.SlicedEventPropertyColumns = eventPropertyColumns(result, sg.WarehouseNative, filterDS, opts)
+	}
 
 	if sg.IsWarehouseNative() && hasConstKey {
 		blockUnfilteredTerms(result, boundDS, "warehouse-native", "event")
@@ -900,9 +921,9 @@ func winsorPercentiles(result *Result, wn *statsig.WarehouseNative, isNumeric bo
 // warnUnsupportedWarehouseFeatures flags Statsig warehouse-native features that
 // LaunchDarkly can't represent. Value-affecting features (capping, log transform,
 // value threshold) are lossy — they change the numbers, so the metric is skipped
-// by default. Analysis-only features (CUPED, dimension columns, cohort wait,
-// bake days) are advisory: they aren't replicated, but the core metric
-// definition (aggregation/column/filter) still converts faithfully.
+// by default. Analysis-only features (CUPED, cohort wait, bake days) are
+// advisory: they aren't replicated, but the core metric definition
+// (aggregation/column/filter) still converts faithfully.
 func warnUnsupportedWarehouseFeatures(result *Result, wn *statsig.WarehouseNative) {
 	if wn == nil {
 		return
@@ -920,9 +941,6 @@ func warnUnsupportedWarehouseFeatures(result *Result, wn *statsig.WarehouseNativ
 	var dropped []string
 	if wn.CupedAttributionWindow != nil {
 		dropped = append(dropped, "CUPED attribution window")
-	}
-	if len(wn.MetricDimensionColumns) > 0 {
-		dropped = append(dropped, "metric dimension columns")
 	}
 	if wn.WaitForCohortWindow != nil && *wn.WaitForCohortWindow {
 		dropped = append(dropped, "wait-for-cohort window")
@@ -1280,6 +1298,10 @@ func convertRatio(sg *statsig.Metric, opts Options) (*Result, error) {
 	if denDS != "" && result.LDMetric.Denominator != nil {
 		d := result.LDMetric.Denominator
 		alignTermColumns(result, opts, denDS, "denominator ", whnDenConst, &d.ValueColumn, &d.UnitAggregationField, d.Filters)
+	}
+
+	if sg.IsWarehouseNative() {
+		result.LDMetric.SlicedEventPropertyColumns = eventPropertyColumns(result, sg.WarehouseNative, numDS, opts)
 	}
 
 	if whnNumConst {

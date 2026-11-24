@@ -567,3 +567,41 @@ func TestUpdateMetricDataSource_PatchNotAppliedIsDistinct(t *testing.T) {
 		t.Errorf("err = %v, want the validation error itself", err)
 	}
 }
+
+func TestCreateMetric_EventPropertiesNotEnabledIsDistinct(t *testing.T) {
+	const limitMsg = "`slicedEventPropertyColumns` can have at most 10 columns"
+	const membershipMsg = `data source \"file-events\" does not expose a column named \"device\" (set in slicedEventPropertyColumns)`
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		want     bool
+		rejected string
+	}{
+		{"not enabled", http.StatusBadRequest, `{"code":"invalid_input","message":"adding ` + "`slicedEventPropertyColumns`" + ` is not enabled"}`, true, "adding `slicedEventPropertyColumns` is not enabled"},
+		{"other event property problem", http.StatusBadRequest, `{"code":"invalid_input","message":"` + limitMsg + `"}`, false, limitMsg},
+		{"column not in the data source", http.StatusBadRequest, `{"code":"invalid_input","message":"` + membershipMsg + `"}`, false, strings.ReplaceAll(membershipMsg, `\"`, `"`)},
+		{"other 400", http.StatusBadRequest, `{"code":"invalid_input","message":"something is not enabled"}`, false, ""},
+		{"not a 400", http.StatusForbidden, `{"code":"forbidden","message":"adding ` + "`slicedEventPropertyColumns`" + ` is not enabled"}`, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, client := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			})
+			_, err := client.CreateMetric(context.Background(), MetricPost{Key: "m", SlicedEventPropertyColumns: []string{"DEVICE"}})
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if got := IsEventPropertiesNotEnabled(err); got != tc.want {
+				t.Errorf("IsEventPropertiesNotEnabled(%v) = %v, want %v", err, got, tc.want)
+			}
+			if got, ok := EventPropertiesRejection(err); got != tc.rejected || ok != (tc.rejected != "") {
+				t.Errorf("EventPropertiesRejection(%v) = %q, %v; want %q", err, got, ok, tc.rejected)
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", tc.status)) {
+				t.Errorf("error = %v, want the status in it", err)
+			}
+		})
+	}
+}

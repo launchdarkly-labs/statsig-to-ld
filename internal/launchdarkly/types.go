@@ -43,6 +43,10 @@ type MetricPost struct {
 
 	// ValueColumn overrides the data source's value column for a numeric warehouse-native metric.
 	ValueColumn string `json:"valueColumn,omitempty"`
+
+	// SlicedEventPropertyColumns are the data source columns experiment results can be
+	// sliced by, in order. LaunchDarkly rejects the whole metric if any one is invalid.
+	SlicedEventPropertyColumns []string `json:"slicedEventPropertyColumns,omitempty"`
 }
 
 // EventFilter is a node in a LaunchDarkly metric filter tree: either a group
